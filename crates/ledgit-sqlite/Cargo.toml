@@ -1,0 +1,12 @@
+[package]
+name = "ledgit-sqlite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SQLite-backed store for Ledgit."
+
+[dependencies]
+ledgit-core = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }

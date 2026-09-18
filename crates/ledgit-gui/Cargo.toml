@@ -1,0 +1,19 @@
+[package]
+name = "ledgit-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Desktop front end for Ledgit."
+
+[[bin]]
+name = "ledgit-gui"
+path = "src/main.rs"
+
+[dependencies]
+ledgit-core = { workspace = true }
+ledgit-sqlite = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+rfd = { workspace = true }
+serde = { workspace = true }

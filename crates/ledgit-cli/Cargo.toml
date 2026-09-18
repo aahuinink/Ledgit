@@ -1,0 +1,16 @@
+[package]
+name = "ledgit-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Command line front end for Ledgit."
+
+[[bin]]
+name = "ledgit"
+path = "src/main.rs"
+
+[dependencies]
+ledgit-core = { workspace = true }
+ledgit-sqlite = { workspace = true }
+clap = { workspace = true }

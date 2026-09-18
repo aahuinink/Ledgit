@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ledgit-core",
+    "crates/ledgit-sqlite",
+    "crates/ledgit-cli",
+    "crates/ledgit-gui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+
+[workspace.dependencies]
+ledgit-core = { path = "crates/ledgit-core" }
+ledgit-sqlite = { path = "crates/ledgit-sqlite" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+clap = { version = "4", features = ["derive", "env"] }
+eframe = { version = "0.33", features = ["persistence"] }
+egui = "0.33"
+rfd = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
