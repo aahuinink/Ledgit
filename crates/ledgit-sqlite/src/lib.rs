@@ -309,6 +309,22 @@ mod tests {
     use super::*;
     use ledgit_core::prelude::*;
 
+    /// Remove a test budget, best effort.
+    ///
+    /// Deliberately not `unwrap`: whether the OS lets us unlink a scratch file
+    /// is not what any of these tests are about, and asserting on it turns a
+    /// tidy-up detail into a red suite. Each test closes its own store first;
+    /// this is only here to keep the temp directory from filling up.
+    fn cleanup(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        // journal_mode is DELETE, so this exists only if a test died mid write.
+        // SQLite names it "<db file>-journal" - appended to the whole name, not
+        // swapped for the extension, which is what `with_extension` would do.
+        let mut journal = path.as_os_str().to_os_string();
+        journal.push("-journal");
+        let _ = std::fs::remove_file(std::path::PathBuf::from(journal));
+    }
+
     #[test]
     fn a_budget_survives_being_closed_and_reopened() {
         let dir = std::env::temp_dir().join(format!("ledgit-test-{}", std::process::id()));
@@ -332,7 +348,12 @@ mod tests {
         assert!(repo.working().is_balanced());
         assert_eq!(repo.store().verify().unwrap(), 1);
 
-        std::fs::remove_file(&path).unwrap();
+        // Close the database before deleting the file. Windows refuses to
+        // delete a file that still has an open handle (`ERROR_SHARING_VIOLATION`),
+        // while Linux happily unlinks it and lets the inode live until the last
+        // handle closes - so leaving this out passes here and fails there.
+        drop(repo);
+        cleanup(&path);
     }
 
     /// A budget written before the rename must be turned away by name, not left
@@ -351,7 +372,8 @@ mod tests {
         assert!(err.contains("XtraLedger"), "unhelpful message: {err}");
         assert!(err.contains("ledgers"), "unhelpful message: {err}");
 
-        std::fs::remove_file(&path).unwrap();
+        // Both stores above were temporaries, so they are already closed.
+        cleanup(&path);
     }
 
     #[test]
@@ -373,7 +395,8 @@ mod tests {
         assert_eq!(repo.committed().ledgers.len(), 0, "but it is not history yet");
         assert_eq!(repo.working().ledgers.len(), 1);
 
-        std::fs::remove_file(&path).unwrap();
+        drop(repo); // see `a_budget_survives_being_closed_and_reopened`
+        cleanup(&path);
     }
 
     #[test]
