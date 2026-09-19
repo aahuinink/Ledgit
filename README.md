@@ -109,6 +109,7 @@ ledgit register Chequing            # every posting, with a running balance
 ledgit bucket show "Net Worth"      # totals, netting assets against liabilities
 ledgit bucket show "Spending" --sum # or just add every member up
 ledgit search rent                  # ledgers, transactions, issuers, buckets
+ledgit bucket combine --plus Cash --minus Receivables   # total several at once
 ```
 
 ## The desktop app
@@ -128,6 +129,9 @@ cargo run -p ledgit-gui -- ~/budget.ledgit    # or pick a file from the welcome 
   whole book.
 - **Issuers** - schedules, next due dates, pause and resume, and the button that
   stages what is owed.
+- **Buckets** - totals over a group of ledgers, and **Combine buckets**, which
+  adds and subtracts several at once (`Cash - Receivables`). Buckets do not
+  nest; this is the read-time answer instead.
 - **Commit** - the report: every staged change, every ledger it moves, and
   every bucket that might be affected. Nothing is permanent until you press it.
 - **History** - the commit log, branches, revert, and rebase.
@@ -142,9 +146,9 @@ permanent.
 you are off 100% the current setting shows in the status bar and clicking it
 resets. On a trackpad, pinch works too.
 
-Zoom and pinning are UI preferences, stored beside the app rather than in the
-budget - neither is a fact about your money, so neither has any business in the
-commit history.
+Zoom, pinning and the current bucket combination are UI preferences, stored
+beside the app rather than in the budget - none of them is a fact about your
+money, so none has any business in the commit history.
 
 ## Status
 

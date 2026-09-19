@@ -79,9 +79,9 @@ pub mod prelude {
     pub use crate::money::Money;
     pub use crate::op::Op;
     pub use crate::query::{
-        balance_as_of, register, roll_up, search, BucketRollUp, IssuerFilter, IssuerQuery,
-        LedgerFilter, LedgerQuery, LedgerSort, Order, RegisterLine, RollUp, TxFilter, TxQuery,
-        TxSort,
+        balance_as_of, combine, register, roll_up, search, BucketLine, BucketRollUp, Combination,
+        IssuerFilter, IssuerQuery, LedgerFilter, LedgerQuery, LedgerSort, Order, RegisterLine,
+        RollUp, Sign, Term, TxFilter, TxQuery, TxSort,
     };
     pub use crate::repo::Repo;
     pub use crate::report::ChangeReport;

@@ -14,7 +14,7 @@ use crate::date::Date;
 use crate::id::{BucketUid, IssuerIx, IssuerUid, LedgerIx, LedgerUid, PostingIx, TxIx};
 use crate::model::{Normality, Parent};
 use crate::money::Money;
-use crate::state::Budget;
+use crate::state::{Budget, LedgerArena};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -361,28 +361,34 @@ pub fn roll_up(
     order: Order,
 ) -> Option<BucketRollUp> {
     let bix = l.buckets.ix(bucket)?;
-    let members = &l.buckets.members[bix.get()];
     let a = &l.ledgers;
 
-    let mut lines: Vec<BucketLine> = members
-        .iter()
-        .map(|ix| {
-            let balance = a.balance(*ix);
-            let normality = a.normality[ix.get()];
-            let contribution = match roll {
-                RollUp::Sum => balance,
-                RollUp::ByNormality => Money(a.raw_balance[ix.get()].0),
-            };
-            BucketLine {
-                ledger: *ix,
-                name: a.name[ix.get()].clone(),
-                normality,
-                balance,
-                contribution,
-            }
-        })
-        .collect();
+    let mut lines: Vec<BucketLine> =
+        l.buckets.members[bix.get()].iter().map(|ix| bucket_line(l, *ix, roll)).collect();
+    sort_lines(&mut lines, a, sort, order);
 
+    let total = lines.iter().map(|l| l.contribution).sum();
+    Some(BucketRollUp { uid: bucket, name: l.buckets.name[bix.get()].clone(), total, lines })
+}
+
+/// One ledger's row, before any sign from a combination is applied.
+fn bucket_line(l: &Budget, ix: LedgerIx, roll: RollUp) -> BucketLine {
+    let a = &l.ledgers;
+    let balance = a.balance(ix);
+    BucketLine {
+        ledger: ix,
+        name: a.name[ix.get()].clone(),
+        normality: a.normality[ix.get()],
+        balance,
+        contribution: match roll {
+            RollUp::Sum => balance,
+            RollUp::ByNormality => Money(a.raw_balance[ix.get()].0),
+        },
+    }
+}
+
+/// Ties are broken by row index so a redraw never reshuffles equal rows.
+fn sort_lines(lines: &mut [BucketLine], a: &LedgerArena, sort: LedgerSort, order: Order) {
     lines.sort_by(|x, y| {
         let o = match sort {
             LedgerSort::Name => x.name.to_lowercase().cmp(&y.name.to_lowercase()),
@@ -392,9 +398,139 @@ pub fn roll_up(
         };
         order.apply(o).then(x.ledger.0.cmp(&y.ledger.0))
     });
+}
+
+// ------------------------------------------------------ combining buckets
+
+/// Which way a bucket enters a [`Combination`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum Sign {
+    #[default]
+    Plus,
+    Minus,
+}
+
+impl Sign {
+    /// `-1` or `+1`, for multiplying a contribution.
+    fn apply(self, m: Money) -> Money {
+        match self {
+            Sign::Plus => m,
+            Sign::Minus => -m,
+        }
+    }
+}
+
+/// One bucket's part in a combination: "plus Cash", "minus Receivables".
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Term {
+    pub bucket: BucketUid,
+    pub sign: Sign,
+}
+
+impl Term {
+    pub fn plus(bucket: BucketUid) -> Term {
+        Term { bucket, sign: Sign::Plus }
+    }
+    pub fn minus(bucket: BucketUid) -> Term {
+        Term { bucket, sign: Sign::Minus }
+    }
+}
+
+/// Totals across several buckets at once, e.g. `Cash - Receivables`.
+///
+/// This is a *read*, not an entity: nothing here is stored in the budget and
+/// no operation creates it. Buckets stay flat, which keeps the op log free of
+/// a graph that would have to be checked for cycles on every replay.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Combination {
+    pub total: Money,
+    /// One row per contributing ledger, deduplicated: a ledger in two added
+    /// buckets is counted once, not twice.
+    pub lines: Vec<BucketLine>,
+    /// Ledgers that appeared on both sides and so contribute nothing. Kept
+    /// rather than dropped, because a silently vanishing ledger looks like a
+    /// bug in the totals.
+    pub cancelled: Vec<BucketLine>,
+    /// Terms naming a bucket that is not on this branch. A combination can
+    /// outlive the bucket it names - buckets are deletable - so this is
+    /// reported rather than treated as an error.
+    pub missing: Vec<BucketUid>,
+}
+
+/// Total several buckets together, adding some and subtracting others.
+///
+/// Membership is treated as a set, so the answer does not depend on how many
+/// buckets a ledger happens to belong to:
+///
+/// * in added buckets only - counted once, positive;
+/// * in subtracted buckets only - counted once, negative;
+/// * in both - cancelled, and listed in [`Combination::cancelled`].
+///
+/// `roll` applies per ledger exactly as it does for a single bucket, so a
+/// `ByNormality` combination still nets assets against liabilities within each
+/// term before the term's own sign is applied.
+pub fn combine(
+    l: &Budget,
+    terms: &[Term],
+    roll: RollUp,
+    sort: LedgerSort,
+    order: Order,
+) -> Combination {
+    let mut missing = Vec::new();
+    // Membership per side. `LedgerIx` is a u32 row index, so these stay small
+    // even for a combination spanning every bucket in the budget.
+    let mut plus: Vec<LedgerIx> = Vec::new();
+    let mut minus: Vec<LedgerIx> = Vec::new();
+
+    for term in terms {
+        let Some(bix) = l.buckets.ix(term.bucket) else {
+            if !missing.contains(&term.bucket) {
+                missing.push(term.bucket);
+            }
+            continue;
+        };
+        let side = match term.sign {
+            Sign::Plus => &mut plus,
+            Sign::Minus => &mut minus,
+        };
+        for ix in &l.buckets.members[bix.get()] {
+            if !side.contains(ix) {
+                side.push(*ix);
+            }
+        }
+    }
+
+    let mut lines = Vec::new();
+    let mut cancelled = Vec::new();
+
+    for ix in &plus {
+        if minus.contains(ix) {
+            cancelled.push(zeroed(bucket_line(l, *ix, roll)));
+        } else {
+            lines.push(bucket_line(l, *ix, roll));
+        }
+    }
+    for ix in &minus {
+        if plus.contains(ix) {
+            continue; // already recorded as cancelled above
+        }
+        let mut line = bucket_line(l, *ix, roll);
+        line.contribution = Sign::Minus.apply(line.contribution);
+        lines.push(line);
+    }
+
+    let a = &l.ledgers;
+    sort_lines(&mut lines, a, sort, order);
+    sort_lines(&mut cancelled, a, sort, order);
 
     let total = lines.iter().map(|l| l.contribution).sum();
-    Some(BucketRollUp { uid: bucket, name: l.buckets.name[bix.get()].clone(), total, lines })
+    Combination { total, lines, cancelled, missing }
+}
+
+/// A cancelled row keeps its balance for display but contributes nothing.
+fn zeroed(mut line: BucketLine) -> BucketLine {
+    line.contribution = Money(0);
+    line
 }
 
 /// Balance of one ledger restricted to transactions on or before `as_of`.

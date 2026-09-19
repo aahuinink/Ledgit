@@ -217,3 +217,30 @@ fn transaction_filters_narrow_the_list() {
     s.tx_from = "not a date".into();
     draw(&mut s, View::Transactions);
 }
+
+/// The combining branch of the Buckets screen is a whole second layout that the
+/// "draw every view" tests never reach, because it only runs with terms set.
+#[test]
+fn the_buckets_screen_draws_a_combination() {
+    let mut s = session();
+    let net = s.selected_bucket.expect("fixture selects a bucket");
+    let spending = s.repo.add_bucket("Spending", "").unwrap();
+    let cash = s.repo.working().ledgers.uid[0];
+    s.repo.stage(Op::AddToBucket { bucket: spending, ledger: cash }).unwrap();
+
+    // One added, one subtracted, and the subtracted one overlaps the added one
+    // so the cancelled section draws too.
+    s.bucket_combo = vec![Term::plus(net), Term::minus(spending)];
+    draw(&mut s, View::Buckets);
+
+    let c = combine(s.budget(), &s.bucket_combo, s.bucket_roll, s.ledger_sort, Order::Asc);
+    assert_eq!(c.cancelled.len(), 1, "cash is in both buckets");
+
+    // A term naming a bucket that is not on this branch must render, not panic.
+    s.bucket_combo = vec![Term::plus(BucketUid::new())];
+    draw(&mut s, View::Buckets);
+
+    // And a leading subtraction is a legitimate, if odd, thing to ask for.
+    s.bucket_combo = vec![Term::minus(net)];
+    draw(&mut s, View::Buckets);
+}

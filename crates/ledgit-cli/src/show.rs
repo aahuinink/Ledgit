@@ -249,6 +249,57 @@ pub fn bucket(l: &Budget, uid: BucketUid, roll: RollUp, sort: LedgerSort) -> Res
     Ok(())
 }
 
+/// Several buckets totalled together, with the formula spelled out.
+pub fn combination(l: &Budget, terms: &[Term], roll: RollUp, sort: LedgerSort) {
+    let c = ledgit_core::query::combine(l, terms, roll, sort, Order::Asc);
+
+    let formula: Vec<String> = terms
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let name = l
+                .buckets
+                .ix(t.bucket)
+                .map(|bix| l.buckets.name[bix.get()].clone())
+                .unwrap_or_else(|| format!("{} (missing)", t.bucket.short()));
+            match (i, t.sign) {
+                // A leading plus reads as noise; a leading minus does not.
+                (0, Sign::Plus) => name,
+                (_, Sign::Plus) => format!("+ {name}"),
+                (_, Sign::Minus) => format!("- {name}"),
+            }
+        })
+        .collect();
+    println!("{}\n", formula.join(" "));
+
+    println!("  {:<28} {:<7} {:>14} {:>14}", "ledger", "normal", "balance", "contributes");
+    for line in &c.lines {
+        println!(
+            "  {:<28} {:<7} {:>14} {:>14}",
+            truncate(&line.name, 28),
+            &line.normality,
+            amt(line.balance),
+            amt(line.contribution)
+        );
+    }
+
+    let label = match roll {
+        RollUp::ByNormality => "net (assets - liabilities)",
+        RollUp::Sum => "sum of balances",
+    };
+    println!("\n  {:<50} {:>14}", label, amt(c.total));
+
+    if !c.cancelled.is_empty() {
+        println!("\n  on both sides, so contributing nothing:");
+        for line in &c.cancelled {
+            println!("    {:<26} {:>14}", truncate(&line.name, 26), amt(line.balance));
+        }
+    }
+    for uid in &c.missing {
+        println!("\n  warning: bucket {} is not on this branch", uid.short());
+    }
+}
+
 pub fn register(l: &Budget, ledger: LedgerUid, limit: Option<usize>) -> Result<()> {
     let ix = l.ledgers.ix(ledger).ok_or_else(|| Error::Invalid("no such ledger".into()))?;
     // Qualified: this module has its own `register`, which prints one.

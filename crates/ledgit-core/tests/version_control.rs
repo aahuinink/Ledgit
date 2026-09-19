@@ -133,7 +133,7 @@ fn reverting_a_commit_posts_a_mirror_entry_and_deletes_nothing() {
 }
 
 #[test]
-fn reverting_an_ledger_creation_explains_why_it_cannot() {
+fn reverting_a_ledger_creation_explains_why_it_cannot() {
     let mut f = fixture();
     f.repo.add_ledger("Typo Acount", "", Normality::Debit, d("2024-03-01")).unwrap();
     let c = f.repo.commit("add a ledger with a typo").unwrap();
@@ -517,5 +517,140 @@ impl CommitIfNeeded for Repo<MemStore> {
         if self.has_staged_changes() {
             self.commit("wip").unwrap();
         }
+    }
+}
+
+/// `combine` is the answer to "can buckets contain other buckets": they cannot,
+/// but several can be totalled together at read time.
+mod combining_buckets {
+    use super::*;
+
+    struct Combo {
+        repo: Repo<MemStore>,
+        cash: BucketUid,
+        owed: BucketUid,
+        chequing: LedgerUid,
+        savings: LedgerUid,
+        receivable: LedgerUid,
+    }
+
+    /// Two asset ledgers in a "Cash" bucket, one in "Receivables".
+    fn combo() -> Combo {
+        let mut repo = Repo::init(MemStore::new(), "tester").unwrap();
+        let open = d("2024-01-01");
+        let chequing = repo.add_ledger("Chequing", "", Normality::Debit, open).unwrap();
+        let savings = repo.add_ledger("Savings", "", Normality::Debit, open).unwrap();
+        let receivable = repo.add_ledger("Receivable", "", Normality::Debit, open).unwrap();
+        let equity = repo.add_ledger("Opening Balances", "", Normality::Credit, open).unwrap();
+
+        repo.post("Open chequing", "", open, Money::from_major(3_000), chequing, equity).unwrap();
+        repo.post("Open savings", "", open, Money::from_major(7_000), savings, equity).unwrap();
+        repo.post("Invoice", "", open, Money::from_major(2_000), receivable, equity).unwrap();
+
+        let cash = repo.add_bucket("Cash", "").unwrap();
+        let owed = repo.add_bucket("Receivables", "").unwrap();
+        for ledger in [chequing, savings] {
+            repo.stage(Op::AddToBucket { bucket: cash, ledger }).unwrap();
+        }
+        repo.stage(Op::AddToBucket { bucket: owed, ledger: receivable }).unwrap();
+        repo.commit("set up").unwrap();
+
+        Combo { repo, cash, owed, chequing, savings, receivable }
+    }
+
+    fn total(c: &Combo, terms: &[Term]) -> Money {
+        combine(c.repo.working(), terms, RollUp::ByNormality, LedgerSort::Name, Order::Asc).total
+    }
+
+    #[test]
+    fn one_bucket_minus_another() {
+        let c = combo();
+        // 10,000 in cash less 2,000 still owed to us.
+        assert_eq!(total(&c, &[Term::plus(c.cash), Term::minus(c.owed)]), Money::from_major(8_000));
+        // Order of the terms does not change the arithmetic.
+        assert_eq!(total(&c, &[Term::minus(c.owed), Term::plus(c.cash)]), Money::from_major(8_000));
+    }
+
+    #[test]
+    fn a_ledger_in_two_added_buckets_is_counted_once() {
+        let mut c = combo();
+        // "Liquid" overlaps "Cash" on Chequing.
+        let liquid = c.repo.add_bucket("Liquid", "").unwrap();
+        for ledger in [c.chequing, c.receivable] {
+            c.repo.stage(Op::AddToBucket { bucket: liquid, ledger }).unwrap();
+        }
+        c.repo.commit("overlap").unwrap();
+
+        let combined = combine(
+            c.repo.working(),
+            &[Term::plus(c.cash), Term::plus(liquid)],
+            RollUp::ByNormality,
+            LedgerSort::Name,
+            Order::Asc,
+        );
+        // Chequing 3,000 + Savings 7,000 + Receivable 2,000, with Chequing
+        // counted once despite being in both buckets.
+        assert_eq!(combined.total, Money::from_major(12_000));
+        assert_eq!(combined.lines.len(), 3);
+        assert!(combined.cancelled.is_empty());
+    }
+
+    #[test]
+    fn a_ledger_on_both_sides_cancels_and_is_reported() {
+        let mut c = combo();
+        // Savings is in Cash, and now also in the bucket being subtracted.
+        c.repo.stage(Op::AddToBucket { bucket: c.owed, ledger: c.savings }).unwrap();
+        c.repo.commit("overlap both ways").unwrap();
+
+        let combined = combine(
+            c.repo.working(),
+            &[Term::plus(c.cash), Term::minus(c.owed)],
+            RollUp::ByNormality,
+            LedgerSort::Name,
+            Order::Asc,
+        );
+        // Chequing 3,000 - Receivable 2,000. Savings appears on both sides and
+        // contributes nothing rather than being counted twice.
+        assert_eq!(combined.total, Money::from_major(1_000));
+        assert_eq!(combined.cancelled.len(), 1);
+        assert_eq!(combined.cancelled[0].name, "Savings");
+        assert_eq!(combined.cancelled[0].contribution, Money(0));
+        assert!(combined.lines.iter().all(|l| l.name != "Savings"));
+    }
+
+    #[test]
+    fn a_single_added_term_agrees_with_rolling_that_bucket_up() {
+        let c = combo();
+        let l = c.repo.working();
+        for roll in [RollUp::ByNormality, RollUp::Sum] {
+            let rolled = roll_up(l, c.cash, roll, LedgerSort::Name, Order::Asc).unwrap();
+            let combined = combine(l, &[Term::plus(c.cash)], roll, LedgerSort::Name, Order::Asc);
+            assert_eq!(rolled.total, combined.total, "{roll:?}");
+            assert_eq!(rolled.lines, combined.lines, "{roll:?}");
+        }
+    }
+
+    #[test]
+    fn a_deleted_bucket_is_reported_rather_than_silently_zeroed() {
+        let mut c = combo();
+        let terms = [Term::plus(c.cash), Term::minus(c.owed)];
+        c.repo.stage(Op::DeleteBucket { uid: c.owed }).unwrap();
+        c.repo.commit("drop receivables").unwrap();
+
+        let combined =
+            combine(c.repo.working(), &terms, RollUp::ByNormality, LedgerSort::Name, Order::Asc);
+        // The surviving term still totals, but the caller can say why the
+        // number moved instead of quietly showing cash as the whole answer.
+        assert_eq!(combined.total, Money::from_major(10_000));
+        assert_eq!(combined.missing, vec![c.owed]);
+    }
+
+    #[test]
+    fn no_terms_is_an_empty_total_not_a_panic() {
+        let c = combo();
+        let combined =
+            combine(c.repo.working(), &[], RollUp::ByNormality, LedgerSort::Name, Order::Asc);
+        assert_eq!(combined.total, Money(0));
+        assert!(combined.lines.is_empty());
     }
 }

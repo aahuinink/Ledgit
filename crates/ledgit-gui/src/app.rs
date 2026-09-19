@@ -66,6 +66,10 @@ pub struct Session {
     // navigating away and back does not silently reset a filter you set.
     pub ledger_sort: LedgerSort,
     pub bucket_roll: RollUp,
+    /// Buckets being totalled together on the Buckets screen, in the order
+    /// picked so the formula reads the way it was built. Empty means the
+    /// screen is showing a single bucket instead.
+    pub bucket_combo: Vec<Term>,
     pub tx_from: String,
     pub tx_to: String,
     pub tx_ledger: Option<LedgerUid>,
@@ -99,6 +103,7 @@ impl Session {
             goto: None,
             ledger_sort: LedgerSort::Name,
             bucket_roll: RollUp::ByNormality,
+            bucket_combo: Vec::new(),
             tx_from: String::new(),
             tx_to: String::new(),
             tx_ledger: None,
@@ -157,6 +162,10 @@ pub struct LedgitApp {
     /// eframe's storage rather than in the budget - pinning something is not a
     /// fact about your money and has no business in the commit history.
     pins: HashMap<String, Vec<String>>,
+    /// Bucket combinations, per budget file. A combination is a *reading* of
+    /// the budget, not a fact in it, so like pins it lives beside the app and
+    /// never reaches the commit history.
+    combos: HashMap<String, Vec<Term>>,
     recent: Vec<String>,
     /// Last zoom factor, mirrored out of the egui context so `save` can reach
     /// it without a `Context`. Like pins, it is a preference about eyesight,
@@ -171,19 +180,21 @@ impl LedgitApp {
         initial: Option<PathBuf>,
         author: String,
     ) -> LedgitApp {
-        let (pins, recent, zoom) = match cc.storage {
+        let (pins, combos, recent, zoom) = match cc.storage {
             Some(s) => (
                 eframe::get_value(s, "pins").unwrap_or_default(),
+                eframe::get_value(s, "combos").unwrap_or_default(),
                 eframe::get_value(s, "recent").unwrap_or_default(),
                 eframe::get_value(s, "zoom").unwrap_or(1.0),
             ),
-            None => (HashMap::new(), Vec::new(), 1.0),
+            None => (HashMap::new(), HashMap::new(), Vec::new(), 1.0),
         };
         // A stored zoom from an older build could be anything; clamp it rather
         // than trust it, or one bad value leaves the app unreadable on start.
         let zoom = clamp_zoom(zoom);
         cc.egui_ctx.set_zoom_factor(zoom);
-        let mut app = LedgitApp { session: None, author, pins, recent, zoom, startup_error: None };
+        let mut app =
+            LedgitApp { session: None, author, pins, combos, recent, zoom, startup_error: None };
         if let Some(p) = initial {
             app.open_path(p);
         }
@@ -202,6 +213,13 @@ impl LedgitApp {
                 // Drop pins for ledgers that are not on this branch.
                 let budget_ledgers: Vec<LedgerUid> = s.budget().ledgers.uid.clone();
                 s.pins.retain(|p| budget_ledgers.contains(p));
+                // Same for a saved combination. `combine` reports a missing
+                // bucket rather than failing, but a term that cannot resolve on
+                // this branch is just noise, so drop it on the way in.
+                let live_buckets: Vec<BucketUid> =
+                    s.budget().buckets.live().map(|ix| s.budget().buckets.uid[ix.get()]).collect();
+                s.bucket_combo = self.combos.get(&key).cloned().unwrap_or_default();
+                s.bucket_combo.retain(|t| live_buckets.contains(&t.bucket));
                 self.recent.retain(|r| *r != key);
                 self.recent.insert(0, key);
                 self.recent.truncate(8);
@@ -214,10 +232,9 @@ impl LedgitApp {
 
     fn remember_pins(&mut self) {
         if let Some(s) = &self.session {
-            self.pins.insert(
-                s.path.to_string_lossy().to_string(),
-                s.pins.iter().map(|p| p.to_string()).collect(),
-            );
+            let key = s.path.to_string_lossy().to_string();
+            self.pins.insert(key.clone(), s.pins.iter().map(|p| p.to_string()).collect());
+            self.combos.insert(key, s.bucket_combo.clone());
         }
     }
 }
@@ -237,6 +254,7 @@ impl eframe::App for LedgitApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.remember_pins();
         eframe::set_value(storage, "pins", &self.pins);
+        eframe::set_value(storage, "combos", &self.combos);
         eframe::set_value(storage, "recent", &self.recent);
         eframe::set_value(storage, "zoom", &self.zoom);
     }

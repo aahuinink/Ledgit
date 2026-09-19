@@ -218,6 +218,28 @@ enum BucketCmd {
         #[arg(long, default_value = "name")]
         sort: String,
     },
+    /// Total several buckets at once, adding some and subtracting others.
+    ///
+    /// Buckets cannot contain other buckets; this combines them at read time
+    /// instead. A ledger in more than one bucket is counted once, and one that
+    /// lands on both sides cancels out.
+    ///
+    ///   ledgit bucket combine --plus Cash --minus Receivables
+    Combine {
+        /// A bucket to add. Repeat for several.
+        #[arg(long = "plus", short = 'p', value_name = "BUCKET")]
+        plus: Vec<String>,
+        /// A bucket to subtract. Repeat for several.
+        #[arg(long = "minus", short = 'm', value_name = "BUCKET")]
+        minus: Vec<String>,
+        /// Add every member's balance as shown, instead of netting assets
+        /// against liabilities.
+        #[arg(long)]
+        sum: bool,
+        /// name | balance | normality | opened
+        #[arg(long, default_value = "name")]
+        sort: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -464,6 +486,23 @@ fn bucket_cmd(repo: &mut Repo<SqliteStore>, cmd: BucketCmd) -> Result<()> {
             let uid = resolve::bucket(repo.working(), &bucket)?;
             let roll = if sum { RollUp::Sum } else { RollUp::ByNormality };
             show::bucket(repo.working(), uid, roll, show::ledger_sort(&sort)?)?;
+        }
+        BucketCmd::Combine { plus, minus, sum, sort } => {
+            if plus.is_empty() && minus.is_empty() {
+                return Err(Error::Invalid(
+                    "nothing to combine - pass at least one --plus or --minus".into(),
+                ));
+            }
+            let l = repo.working();
+            let mut terms = Vec::with_capacity(plus.len() + minus.len());
+            for name in &plus {
+                terms.push(Term::plus(resolve::bucket(l, name)?));
+            }
+            for name in &minus {
+                terms.push(Term::minus(resolve::bucket(l, name)?));
+            }
+            let roll = if sum { RollUp::Sum } else { RollUp::ByNormality };
+            show::combination(l, &terms, roll, show::ledger_sort(&sort)?);
         }
     }
     Ok(())

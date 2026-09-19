@@ -24,7 +24,7 @@ Context you would otherwise have to rediscover:
   `Op` - plain, serialisable data. If a fix tempts you to add a closure, a
   delete operation for a ledger/transaction/issuer, or a derived table in
   SQLite, it is the wrong fix. `docs/ARCHITECTURE.md` says why.
-- **Keep it green.** 73 tests and `cargo clippy --all-targets` clean. A GUI fix
+- **Keep it green.** 80 tests and `cargo clippy --all-targets` clean. A GUI fix
   that needs a new behaviour usually wants a case added to `smoke.rs`.
 
 If he reports nothing and wants to move on, the next work is the GUI gaps
@@ -85,8 +85,9 @@ cargo run -p ledgit-gui -- /tmp/scratch.ledgit
   a `.ledgit` file association and an optional `PATH` entry for the CLI.
 - **Split entries**: transactions and issuers carry N legs summing to zero,
   stored in one flat posting arena. Paycheques are a single entry.
-- **Tests**: 73, covering the money and date edge cases, budget invariants,
-  recurrence arithmetic, GUI zoom, and the version-control behaviours end to end.
+- **Tests**: 80, covering the money and date edge cases, budget invariants,
+  recurrence arithmetic, GUI zoom, bucket combination, and the version-control
+  behaviours end to end.
 
 ## Next
 

@@ -73,6 +73,24 @@ correct for two.
 The *size* of an entry is what it debits (`magnitude`), not the sum of every
 leg: a $2,400 paycheque is $2,400, not $4,800.
 
+## Buckets do not nest
+
+A bucket holds ledgers, never other buckets: `BucketArena.members` is
+`Vec<Vec<LedgerIx>>` and the ops are `AddToBucket { bucket, ledger }`. Nesting
+would put a graph in the op log, and a graph in the op log has to be checked for
+cycles on *every* replay - admit one cycle once and the file never loads again.
+
+Roll-ups across several buckets are a read instead. `query::combine` takes a
+slice of signed `Term`s and treats membership as a set:
+
+* in added buckets only - counted once, positive;
+* in subtracted buckets only - counted once, negative;
+* in both - cancelled, and reported separately rather than dropped.
+
+So `Cash - Receivables` is a question you ask, not an entity you create. Nothing
+is stored, nothing needs validating on replay, and a combination naming a
+deleted bucket degrades to a warning instead of an unloadable budget.
+
 ## Data-oriented layout
 
 `Budget` is struct-of-arrays. Row `i` of every column describes entity `i`:
