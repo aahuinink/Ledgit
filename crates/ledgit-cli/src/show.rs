@@ -41,6 +41,7 @@ pub fn status(repo: &Repo<SqliteStore>) -> Result<()> {
         }
         None => println!("No commits yet."),
     }
+    println!("{}", freshness(repo.working(), Date::today_utc()));
 
     let r = repo.report()?;
     if r.is_empty() {
@@ -64,6 +65,12 @@ pub fn status(repo: &Repo<SqliteStore>) -> Result<()> {
         println!(
             "New: {} ledger(s), {} issuer(s), {} bucket(s); {} bucket(s) deleted",
             r.new_ledgers, r.new_issuers, r.new_buckets, r.deleted_buckets
+        );
+    }
+    if r.new_cohorts + r.deleted_cohorts + r.new_views + r.deleted_views > 0 {
+        println!(
+            "Readings: {} cohort(s) and {} view(s) new; {} cohort(s) and {} view(s) deleted",
+            r.new_cohorts, r.new_views, r.deleted_cohorts, r.deleted_views
         );
     }
 
@@ -101,6 +108,23 @@ pub fn status(repo: &Repo<SqliteStore>) -> Result<()> {
         println!("\n!! Debits do not equal credits. Refusing to commit. This is a bug - please report it.");
     }
     Ok(())
+}
+
+/// "Up to date through 2026-09-24 · issuers through 2026-09-15": the last
+/// recorded transaction, and how far the recurring payments have been run.
+pub fn freshness(l: &Budget, today: Date) -> String {
+    let mut s = match l.latest_transaction_date() {
+        Some(d) => format!("Up to date through {d}"),
+        None => "No transactions yet".to_string(),
+    };
+    if let Some(d) = ledgit_core::cohort::caught_up_through(l) {
+        s.push_str(&format!(" \u{b7} issuers through {d}"));
+        let behind = ledgit_core::cohort::overdue_issuers(l, today);
+        if behind > 0 {
+            s.push_str(&format!(" ({behind} overdue - `ledgit issuer run`)"));
+        }
+    }
+    s
 }
 
 pub fn log(repo: &Repo<SqliteStore>, limit: usize) -> Result<()> {
@@ -415,7 +439,7 @@ pub fn sides(l: &Budget, tix: ledgit_core::id::TxIx) -> (String, String) {
     (debits.join(", "), credits.join(", "))
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {

@@ -168,6 +168,12 @@ entity_ids!(
 entity_ids!(
     /// Stable identity of a bucket.
     BucketUid, BucketIx, "bkt");
+entity_ids!(
+    /// Stable identity of a cohort: a named group of issuers.
+    CohortUid, CohortIx, "chrt");
+entity_ids!(
+    /// Stable identity of a saved view.
+    ViewUid, ViewIx, "view");
 
 /// Row index into the flat posting arena - one side of one transaction.
 ///

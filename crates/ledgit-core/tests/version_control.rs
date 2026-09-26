@@ -654,3 +654,121 @@ mod combining_buckets {
         assert!(combined.lines.is_empty());
     }
 }
+
+// ------------------------------------------------------- cohorts and views
+
+#[test]
+fn cohorts_and_views_are_versioned_like_buckets() {
+    let mut f = fixture();
+    let open = d("2024-01-01");
+    let loan_pay = f
+        .repo
+        .add_issuer(
+            "Car payment",
+            "",
+            f.loan,
+            f.cash,
+            Money::from_major(400),
+            Schedule::EveryNDays { n: 14 },
+            open,
+        )
+        .unwrap();
+    let debts = f.repo.add_cohort("Debts", "").unwrap();
+    f.repo.stage(Op::AddToCohort { cohort: debts, issuer: loan_pay }).unwrap();
+    let net = f.repo.add_bucket("Net Worth", "").unwrap();
+    f.repo.stage(Op::AddToBucket { bucket: net, ledger: f.cash }).unwrap();
+    let view = f
+        .repo
+        .add_view(
+            "Debt runway",
+            "",
+            ViewSpec {
+                buckets: vec![Term::plus(net)],
+                cohorts: vec![debts],
+                ..ViewSpec::default()
+            },
+        )
+        .unwrap();
+
+    let report = f.repo.report().unwrap();
+    assert_eq!((report.new_cohorts, report.new_views), (1, 1));
+    f.repo.commit("track the car loan").unwrap();
+
+    // A branch where the view looks further ahead does not change trunk's.
+    f.repo.checkout_new("longer").unwrap();
+    let longer =
+        ViewSpec { horizon: Span::Years(5), ..f.repo.working().views.get(ix_of(&f, view)).spec };
+    f.repo
+        .stage(Op::EditView { uid: view, name: None, description: None, spec: Some(longer) })
+        .unwrap();
+    f.repo.commit("look five years out").unwrap();
+    f.repo.checkout(DEFAULT_BRANCH).unwrap();
+    assert_eq!(f.repo.working().views.get(ix_of(&f, view)).spec.horizon, Span::Months(12));
+
+    // Deleting the cohort and the view, then reverting, brings both back whole.
+    f.repo.stage(Op::DeleteCohort { uid: debts }).unwrap();
+    f.repo.stage(Op::DeleteView { uid: view }).unwrap();
+    f.repo.commit("tidy up").unwrap();
+    assert!(f.repo.working().cohorts.is_empty());
+    assert!(f.repo.working().views.is_empty());
+    f.repo.revert("HEAD").unwrap();
+    f.repo.commit("undo tidy up").unwrap();
+    let w = f.repo.working();
+    let c = w.cohorts.ix(debts).expect("cohort restored");
+    assert_eq!(w.cohorts.get(c, &w.issuers).members, vec![loan_pay]);
+    assert_eq!(w.views.get(ix_of(&f, view)).spec.cohorts, vec![debts]);
+}
+
+fn ix_of(f: &Fixture, view: ViewUid) -> ledgit_core::id::ViewIx {
+    f.repo.working().views.ix(view).expect("view is live")
+}
+
+#[test]
+fn a_view_simulates_without_staging_anything() {
+    let mut f = fixture();
+    f.repo
+        .post("Opening", "", d("2024-01-01"), Money::from_major(5_000), f.cash, f.salary)
+        .unwrap();
+    f.repo
+        .add_issuer(
+            "Car payment",
+            "",
+            f.loan,
+            f.cash,
+            Money::from_major(400),
+            Schedule::EveryNDays { n: 14 },
+            d("2024-01-05"),
+        )
+        .unwrap();
+    f.repo.commit("set up").unwrap();
+
+    let spec = ViewSpec {
+        ledgers: vec![f.cash],
+        lookback: Span::Days(0),
+        horizon: Span::Weeks(4),
+        ..ViewSpec::default()
+    };
+    let r = ledgit_core::view::evaluate(f.repo.working(), &spec, d("2024-01-01"));
+    // Jan 5 and Jan 19 fall inside four weeks of Jan 1; Feb 2 does not.
+    assert_eq!(r.series[0].at_end, Money::from_major(5_000 - 800));
+    assert!(!f.repo.has_staged_changes(), "a simulation is a read");
+    assert_eq!(f.repo.working().transactions.len(), 1);
+}
+
+#[test]
+fn reverting_a_bucket_deletion_restores_its_members() {
+    let mut f = fixture();
+    let net = f.repo.add_bucket("Net Worth", "").unwrap();
+    for a in [f.cash, f.loan] {
+        f.repo.stage(Op::AddToBucket { bucket: net, ledger: a }).unwrap();
+    }
+    f.repo.commit("track net worth").unwrap();
+    f.repo.stage(Op::DeleteBucket { uid: net }).unwrap();
+    f.repo.commit("drop it").unwrap();
+
+    // The inverse is "create, then add each member" - in that order.
+    f.repo.revert("HEAD").unwrap();
+    let w = f.repo.working();
+    let b = w.buckets.ix(net).expect("bucket restored");
+    assert_eq!(w.buckets.get(b, &w.ledgers).members, vec![f.cash, f.loan]);
+}

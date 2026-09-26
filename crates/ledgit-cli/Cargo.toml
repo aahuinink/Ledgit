@@ -13,4 +13,5 @@ path = "src/main.rs"
 [dependencies]
 ledgit-core = { workspace = true }
 ledgit-sqlite = { workspace = true }
+ledgit-plot = { workspace = true }
 clap = { workspace = true }

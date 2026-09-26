@@ -6,7 +6,7 @@
 //! index without touching this file.
 
 use super::{empty, heading, num};
-use crate::app::{Session, View};
+use crate::app::{Screen, Session};
 use crate::fmt;
 use crate::forms::FormKind;
 use egui::{ComboBox, RichText, Ui};
@@ -162,11 +162,11 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
                     if ui.link(&dr).on_hover_text(if split { "split entry" } else { "" }).clicked()
                     {
                         s.selected_ledger = debit_uid;
-                        s.goto = Some(View::Register);
+                        s.goto = Some(Screen::Register);
                     }
                     if ui.link(&cr).clicked() {
                         s.selected_ledger = credit_uid;
-                        s.goto = Some(View::Register);
+                        s.goto = Some(Screen::Register);
                     }
                     num(ui, fmt::mono(fmt::amount(amount)));
                     ui.end_row();

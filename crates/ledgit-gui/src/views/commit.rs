@@ -63,6 +63,17 @@ fn summary(ui: &mut Ui, r: &ChangeReport) {
                 &format!("+{} / -{}", r.new_buckets, r.deleted_buckets),
                 "views only",
             );
+            if r.new_cohorts + r.deleted_cohorts + r.new_views + r.deleted_views > 0 {
+                tile(
+                    ui,
+                    "cohorts / views",
+                    &format!(
+                        "+{} / -{}  \u{b7}  +{} / -{}",
+                        r.new_cohorts, r.deleted_cohorts, r.new_views, r.deleted_views
+                    ),
+                    "readings only",
+                );
+            }
         });
     });
     if !r.balanced {

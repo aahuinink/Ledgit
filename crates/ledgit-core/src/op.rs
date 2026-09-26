@@ -13,8 +13,8 @@
 //! A closure could do none of those things.
 
 use crate::date::Date;
-use crate::id::{BucketUid, IssuerUid, LedgerUid, TxUid};
-use crate::model::{magnitude, Leg, Normality, Parent, Schedule};
+use crate::id::{BucketUid, CohortUid, IssuerUid, LedgerUid, TxUid, ViewUid};
+use crate::model::{magnitude, Leg, Normality, Parent, Schedule, ViewSpec};
 use crate::money::Money;
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +23,8 @@ use serde::{Deserialize, Serialize};
 /// Note what is absent: there is no `DeleteLedger`, `DeleteTransaction` or
 /// `DeleteIssuer`. Those entities are permanent by design; the only way to
 /// take back a transaction is to post its reversal, which leaves both facts in
-/// the record. Buckets are pure views, so they may be deleted.
+/// the record. Buckets, cohorts and saved views are pure readings of the
+/// budget, so they may be deleted.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
@@ -102,6 +103,49 @@ pub enum Op {
         bucket: BucketUid,
         ledger: LedgerUid,
     },
+    /// A cohort is to issuers what a bucket is to ledgers: a named group,
+    /// read for its combined rate and its calendar. It moves no money.
+    CreateCohort {
+        uid: CohortUid,
+        name: String,
+        description: String,
+    },
+    EditCohort {
+        uid: CohortUid,
+        name: Option<String>,
+        description: Option<String>,
+    },
+    DeleteCohort {
+        uid: CohortUid,
+    },
+    AddToCohort {
+        cohort: CohortUid,
+        issuer: IssuerUid,
+    },
+    RemoveFromCohort {
+        cohort: CohortUid,
+        issuer: IssuerUid,
+    },
+    /// Save a view: a reading of the budget across time. It is versioned so
+    /// that it travels with the file and can differ between branches, but
+    /// like a bucket it moves no money and may be deleted.
+    CreateView {
+        uid: ViewUid,
+        name: String,
+        description: String,
+        spec: ViewSpec,
+    },
+    /// A view's spec is small, so an edit replaces it whole rather than
+    /// patching it field by field. `None` leaves a field untouched.
+    EditView {
+        uid: ViewUid,
+        name: Option<String>,
+        description: Option<String>,
+        spec: Option<ViewSpec>,
+    },
+    DeleteView {
+        uid: ViewUid,
+    },
 }
 
 impl Op {
@@ -140,6 +184,18 @@ impl Op {
             Op::RemoveFromBucket { bucket, ledger } => {
                 format!("remove ledger {} from bucket {}", ledger.short(), bucket.short())
             }
+            Op::CreateCohort { name, .. } => format!("create cohort \"{name}\""),
+            Op::EditCohort { uid, .. } => format!("edit cohort {}", uid.short()),
+            Op::DeleteCohort { uid } => format!("delete cohort {}", uid.short()),
+            Op::AddToCohort { cohort, issuer } => {
+                format!("add issuer {} to cohort {}", issuer.short(), cohort.short())
+            }
+            Op::RemoveFromCohort { cohort, issuer } => {
+                format!("remove issuer {} from cohort {}", issuer.short(), cohort.short())
+            }
+            Op::CreateView { name, .. } => format!("save view \"{name}\""),
+            Op::EditView { uid, .. } => format!("edit view {}", uid.short()),
+            Op::DeleteView { uid } => format!("delete view {}", uid.short()),
         }
     }
 

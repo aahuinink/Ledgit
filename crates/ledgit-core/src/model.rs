@@ -2,8 +2,10 @@
 //! bucket *are*, independent of how they are stored or versioned.
 
 use crate::date::{days_in_month, Date};
-use crate::id::{BucketUid, IssuerUid, LedgerUid, TxUid};
+use crate::id::{BucketUid, CohortUid, IssuerUid, LedgerUid, TxUid, ViewUid};
 use crate::money::Money;
+use crate::period::{Period, Span};
+use crate::query::{RollUp, Term, TxFilter};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -200,6 +202,50 @@ impl Schedule {
         }
     }
 
+    /// Every occurrence of a schedule anchored at `start` that falls in
+    /// `from..=to`, oldest first - whether or not it has been emitted yet.
+    ///
+    /// This is the calendar question ("when is this due?"), so unlike
+    /// `issuer::due_dates` it knows nothing about what has been posted. It
+    /// jumps straight to `from` instead of stepping there, so asking about
+    /// next month for a daily issuer started in 1990 costs one month of work.
+    pub fn dates_between(&self, start: Date, from: Date, to: Date) -> Vec<Date> {
+        /// Same safety valve as the issuer runner: two centuries of days.
+        const MAX: usize = 75_000;
+        let anchor = self.first_on_or_after(start);
+        let mut out = Vec::new();
+        if to < from || to < anchor {
+            return out;
+        }
+        let mut cursor = match *self {
+            Schedule::Once => anchor,
+            Schedule::EveryNDays { n } => {
+                let behind = (from.0 - anchor.0).max(0);
+                let steps = (behind + n as i32 - 1) / n as i32;
+                anchor.add_days(steps * n as i32)
+            }
+            Schedule::MonthlyOn { day, every_n_months } => {
+                // Land one step short of `from` and walk the rest, so the
+                // day-of-month clamping is always done by `next_after`.
+                let whole = (months_between(anchor, from) / every_n_months as i32 - 1).max(0);
+                match whole {
+                    0 => anchor,
+                    k => month_day(anchor.add_months(k * every_n_months as i32), day),
+                }
+            }
+        };
+        while cursor <= to && out.len() < MAX {
+            if cursor >= from {
+                out.push(cursor);
+            }
+            match self.next_after(anchor, cursor) {
+                Some(next) if next > cursor => cursor = next,
+                _ => break,
+            }
+        }
+        out
+    }
+
     pub fn describe(&self) -> String {
         match *self {
             Schedule::Once => "once".into(),
@@ -307,6 +353,91 @@ pub struct Bucket {
     pub members: Vec<LedgerUid>,
 }
 
+/// A read-only snapshot of one cohort: a bucket, but of issuers.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Cohort {
+    pub uid: CohortUid,
+    pub name: String,
+    pub description: String,
+    pub members: Vec<IssuerUid>,
+}
+
+/// What a saved view looks at, and over how much time.
+///
+/// Plain data, like every other thing in an op. A view names entities by uid,
+/// never by row, and it names *time* by [`Span`] rather than by date, so the
+/// same saved view keeps meaning "the last six months and the next year"
+/// whenever it is opened.
+///
+/// Buckets and cohorts can be deleted after a view names them; evaluating the
+/// view then reports them as missing rather than failing, exactly as
+/// `query::combine` does for a combination.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ViewSpec {
+    /// Buckets to total, each added or subtracted. Together with `roll` these
+    /// define the view's *scope*: the pot of money whose balance is charted
+    /// and whose ins and outs the flow tables count.
+    pub buckets: Vec<Term>,
+    /// Ledgers charted on their own line. If the view has no buckets, these
+    /// become the scope instead, each counted as displayed.
+    pub ledgers: Vec<LedgerUid>,
+    /// Issuers whose flow the view breaks down.
+    pub issuers: Vec<IssuerUid>,
+    /// Cohorts whose members' flow the view breaks down.
+    pub cohorts: Vec<CohortUid>,
+    /// Which past transactions count as the view's actual history. Empty
+    /// means every transaction that moves the scope.
+    pub transactions: Vec<TxFilter>,
+    pub roll: RollUp,
+    /// The unit flows are reported in: "$ per month".
+    pub period: Period,
+    /// How far back the chart and the history table reach.
+    pub lookback: Span,
+    /// How far ahead to simulate.
+    pub horizon: Span,
+    /// Simulate only the view's own issuers and cohorts rather than every
+    /// active issuer. Off, the projected balances are what will actually
+    /// happen; on, they answer "what if these were all that happened?"
+    pub only_selected_issuers: bool,
+}
+
+impl Default for ViewSpec {
+    fn default() -> Self {
+        ViewSpec {
+            buckets: Vec::new(),
+            ledgers: Vec::new(),
+            issuers: Vec::new(),
+            cohorts: Vec::new(),
+            transactions: Vec::new(),
+            roll: RollUp::ByNormality,
+            period: Period::Month,
+            lookback: Span::Months(6),
+            horizon: Span::Months(12),
+            only_selected_issuers: false,
+        }
+    }
+}
+
+impl ViewSpec {
+    /// Checks that need no budget. Whether the named entities exist is
+    /// checked when the op is applied.
+    pub fn validate(&self) -> Result<(), String> {
+        self.lookback.validate()?;
+        self.horizon.validate()?;
+        Ok(())
+    }
+}
+
+/// A read-only snapshot of one saved view.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SavedView {
+    pub uid: ViewUid,
+    pub name: String,
+    pub description: String,
+    pub spec: ViewSpec,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +529,43 @@ mod tests {
         let s = Schedule::MonthlyOn { day: 5, every_n_months: 1 };
         assert_eq!(s.first_on_or_after(d(2024, 3, 9)), d(2024, 4, 5));
         assert_eq!(s.first_on_or_after(d(2024, 3, 1)), d(2024, 3, 5));
+    }
+
+    #[test]
+    fn dates_between_jumps_to_the_window() {
+        let s = Schedule::EveryNDays { n: 14 };
+        let start = d(2024, 1, 5);
+        assert_eq!(
+            s.dates_between(start, d(2024, 2, 1), d(2024, 3, 1)),
+            vec![d(2024, 2, 2), d(2024, 2, 16), d(2024, 3, 1)]
+        );
+        // A window that ends before the schedule starts is empty.
+        assert!(s.dates_between(start, d(2023, 1, 1), d(2023, 12, 31)).is_empty());
+        // A window opening before the start begins at the start.
+        assert_eq!(s.dates_between(start, d(2023, 1, 1), d(2024, 1, 5)), vec![start]);
+    }
+
+    #[test]
+    fn dates_between_keeps_monthly_clamping_intact() {
+        let s = Schedule::MonthlyOn { day: 31, every_n_months: 1 };
+        let start = d(2020, 1, 1);
+        assert_eq!(
+            s.dates_between(start, d(2024, 2, 1), d(2024, 4, 30)),
+            vec![d(2024, 2, 29), d(2024, 3, 31), d(2024, 4, 30)]
+        );
+        let quarterly = Schedule::MonthlyOn { day: 1, every_n_months: 3 };
+        // Anchored in January: Jan, Apr, Jul, Oct - never Feb or May.
+        assert_eq!(
+            quarterly.dates_between(d(2023, 1, 1), d(2024, 2, 1), d(2024, 12, 31)),
+            vec![d(2024, 4, 1), d(2024, 7, 1), d(2024, 10, 1)]
+        );
+        assert_eq!(
+            Schedule::Once.dates_between(d(2024, 5, 5), d(2024, 1, 1), d(2024, 12, 1)),
+            vec![d(2024, 5, 5)]
+        );
+        assert!(Schedule::Once
+            .dates_between(d(2024, 5, 5), d(2024, 6, 1), d(2024, 12, 1))
+            .is_empty());
     }
 
     #[test]

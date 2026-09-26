@@ -6,7 +6,7 @@
 //! entered on.
 
 use super::{empty, heading};
-use crate::app::{Session, View};
+use crate::app::{Screen, Session};
 use crate::fmt;
 use egui::{RichText, Ui};
 use ledgit_core::prelude::*;
@@ -214,7 +214,7 @@ fn commit_detail(ui: &mut Ui, s: &mut Session, commits: &[Commit]) {
                     }
                     s.note(msg);
                     if staged > 0 {
-                        s.goto = Some(View::Commit);
+                        s.goto = Some(Screen::Commit);
                     }
                 }
                 Err(e) => s.fail(e),

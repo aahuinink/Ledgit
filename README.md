@@ -112,6 +112,26 @@ ledgit search rent                  # ledgers, transactions, issuers, buckets
 ledgit bucket combine --plus Cash --minus Receivables   # total several at once
 ```
 
+## Cohorts and views
+
+A cohort groups issuers the way a bucket groups ledgers; a view charts
+buckets and ledgers across time and simulates your issuers forward.
+
+```sh
+ledgit cohort add Bills
+ledgit cohort include Bills Rent
+ledgit cohort show Bills                 # each issuer per day, week, month, year
+ledgit cohort calendar Bills --to 2026-12-31   # every due date, overdue flagged
+
+ledgit view add "Net worth" --plus Liquid --plus Debt --lookback 6m --horizon 2y
+ledgit view show "Net worth"             # balances, flows, month by month
+ledgit view show "Net worth" --until 2030-01-01 --chart nw.png --csv nw.csv
+```
+
+Views and cohorts are staged and committed like everything else, so they
+travel with the file and can differ between branches. Showing one is a read:
+the simulation never stages a thing.
+
 ## The desktop app
 
 ```sh

@@ -29,14 +29,20 @@ Everything in the feature list falls out of that:
 | Swap the database | persist four kinds of blob, not a schema |
 | Ledgers/transactions/issuers are never deleted | there is no delete op for them |
 | Split entries (a paycheque) | one op with N legs summing to zero |
+| Cohorts, saved views | ops, like buckets; read by pure functions, results never stored |
 
 ## Crates
 
 ```
 ledgit-core     domain types, ops, commit DAG, queries, the Repo API.  No I/O.
 ledgit-sqlite   implements ledgit_core::store::Store against a SQLite file.
+ledgit-plot     exported charts: SVG by hand, PNG through resvg. CSV too.
 ledgit-cli      `ledgit` - a front end, and the fastest way to exercise the core.
+ledgit-gui      the desktop app (egui); live charts through egui_plot.
 ```
+
+`ledgit-plot` is separate for the same reason `ledgit-sqlite` is: the core
+stays at three dependencies, and rasterising text is not a budget concern.
 
 `ledgit-core` has three dependencies (`serde`, `serde_json`, `sha2`) and no
 knowledge that SQLite exists. The boundary is a separate crate rather than a
@@ -90,6 +96,93 @@ slice of signed `Term`s and treats membership as a set:
 So `Cash - Receivables` is a question you ask, not an entity you create. Nothing
 is stored, nothing needs validating on replay, and a combination naming a
 deleted bucket degrades to a warning instead of an unloadable budget.
+
+## Cohorts: buckets for issuers
+
+A cohort is a named, flat group of issuers - `CohortArena.members` is
+`Vec<Vec<IssuerIx>>`, built by `CreateCohort`/`AddToCohort`/... ops that
+mirror the bucket ones exactly, deletable because it moves no money. Two
+reads cover what a cohort is for (`ledgit_core::cohort`), and both take any
+slice of issuers, so a view or the "every issuer" calendar uses them with no
+cohort in sight:
+
+* **Rates.** `period::per_period(amount, schedule, period)` converts a
+  schedule to any unit in exact rational arithmetic, rounded once at the end.
+  Month and year are Gregorian averages (146,097 days per 400 years), so
+  $10/day is $70/week and $304.37/month, a monthly $100 is exactly $100 a
+  month, and nothing drifts on a round trip. A cohort's total counts only
+  running, recurring members; paused ones are totalled separately.
+* **Calendar.** `Schedule::dates_between(start, from, to)` lists every
+  occurrence in a window, jumping straight to `from` rather than stepping
+  there. `cohort::calendar` marks each one against `emitted_through` and
+  today: posted, overdue, upcoming, or paused.
+
+A **rate** and a **calendar period** are kept apart on purpose. "Biweekly
+$400 is $869.63 a month" is a rate; "March had three paydays" is a calendar
+fact. `Period::start_of`/`next_start` carve time into calendar periods, and
+only the timeline tables use them.
+
+## Saved views: a reading across time
+
+A `ViewSpec` is plain data inside `CreateView`/`EditView` ops: signed bucket
+terms, ledgers, issuers, cohorts, `TxFilter`s, a period, and a **lookback and
+horizon as `Span`s** ("6 months back, 1 year ahead"), never as dates - so a
+saved view keeps meaning the same thing whenever it is opened. It is
+versioned, so it travels with the file and can differ per branch, but it
+holds no results: `view::evaluate(budget, spec, today)` recomputes the
+`ViewReport` every time, in well under a millisecond.
+
+**Scope and direction.** "Spent" only means something relative to a pot of
+money, so a view has a scope - its bucket combination (same set rules as
+`query::combine`, shared via `query::members`), or else its ledgers as
+displayed. Scope is one integer weight per ledger, and every effect is
+
+```
+effect of a posting = weight[ledger] * amount     (debit-positive amount)
+```
+
+A ledger outside the scope weighs 0, so a transfer between two of your own
+accounts nets to nothing - neither spending nor income - with no special
+case. A view with no scope is *undirected* and reports volume only.
+
+**The simulation** stages nothing. It asks `issuer::due_dates` - the same
+function that posts issuers for real - for every occurrence still owed up to
+the horizon, expands each into its legs, and sweeps those with the real
+postings in date order through flat `(date, ledger, amount)` columns. Each
+ledger row maps to the series it feeds, so one posting is one index plus a
+multiply-add per series. Overdue occurrences are placed on today: they have
+not happened, so they must not move a past balance. By default every running
+issuer is simulated (the honest forecast); `only_selected_issuers` restricts
+it to the view's own issuers and cohorts (the what-if).
+
+What comes out: step **series** (scope total, each bucket, each ledger) with
+today, the end, and the lowest point ahead; **flow lines** per selected
+issuer, signed against the scope; and a **timeline** of calendar periods
+with actual and projected in/out side by side.
+
+**Validation is deliberately partial.** Saving a view checks that its
+ledgers and issuers exist, since those can never disappear. It does not check
+buckets or cohorts: they are deletable, evaluation already reports a missing
+one, and checking would make history order-sensitive - reverting "delete
+cohort, delete view" recreates the view before the cohort.
+
+**Charts.** Balances are drawn as steps (a balance holds until the next
+posting; a slope would invent money between paydays), solid up to today and
+dashed after, over a faint shading of the future. Series colours are one
+fixed, colour-blind-checked order, shared by the GUI and the exports.
+
+## "Up to date through"
+
+The top bar reads `through 2026-09-24 · issuers 2026-09-25`:
+
+* the first date is `Budget::latest_transaction_date()` - the newest entry on
+  this branch, staged ones included;
+* the second is `cohort::caught_up_through()` - the day before the earliest
+  occurrence any running issuer still owes, i.e. every recurring payment on
+  or before it is in the budget.
+
+It turns red when any running issuer owes something dated before today,
+because that is when the balances on screen stop being true.
 
 ## Data-oriented layout
 
@@ -218,13 +311,16 @@ rather than rediscovered:
 3. **Replay is deterministic.** Same ops, same order, same budget. The tests
    rely on this and so does rebase.
 4. **Nothing is deleted.** There is no op that removes a ledger, transaction
-   or issuer. Buckets are pure views, so they may be deleted.
+   or issuer. Buckets, cohorts and saved views are pure readings, so they may
+   be deleted.
 5. **Every entry's legs sum to zero**, number at least two, contain no zero
    amount, and name no ledger twice. The last one matters: two legs against
    one ledger is always either a typo or a sum the user should have done
    themselves, and netting them silently would hide the typo.
 6. **`AdvanceIssuer` never rewinds.** Replaying an older advance is a no-op, so
    history can be replayed in any valid order without re-posting rent.
+7. **Reading never writes.** Evaluating a view or a cohort, however far
+   ahead it simulates, stages nothing and stores nothing.
 
 ## Performance, and when to worry
 

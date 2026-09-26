@@ -16,26 +16,30 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum View {
+pub enum Screen {
     Dashboard,
     Ledgers,
     Register,
     Transactions,
     Issuers,
     Buckets,
+    Cohorts,
+    Views,
     Commit,
     History,
 }
 
-impl View {
-    const NAV: [(View, &'static str); 7] = [
-        (View::Dashboard, "Dashboard"),
-        (View::Ledgers, "Ledgers"),
-        (View::Transactions, "Transactions"),
-        (View::Issuers, "Issuers"),
-        (View::Buckets, "Buckets"),
-        (View::Commit, "Commit"),
-        (View::History, "History"),
+impl Screen {
+    const NAV: [(Screen, &'static str); 9] = [
+        (Screen::Dashboard, "Dashboard"),
+        (Screen::Ledgers, "Ledgers"),
+        (Screen::Transactions, "Transactions"),
+        (Screen::Issuers, "Issuers"),
+        (Screen::Buckets, "Buckets"),
+        (Screen::Cohorts, "Cohorts"),
+        (Screen::Views, "Views"),
+        (Screen::Commit, "Commit"),
+        (Screen::History, "History"),
     ];
 }
 
@@ -47,10 +51,12 @@ pub struct Status {
 pub struct Session {
     pub repo: Repo<SqliteStore>,
     pub path: PathBuf,
-    pub view: View,
+    pub view: Screen,
     pub search: String,
     pub selected_ledger: Option<LedgerUid>,
     pub selected_bucket: Option<BucketUid>,
+    pub selected_cohort: Option<CohortUid>,
+    pub selected_view: Option<ViewUid>,
     pub selected_commit: Option<CommitId>,
     pub commit_message: String,
     pub issuer_through: String,
@@ -60,7 +66,7 @@ pub struct Session {
     pub forms: Forms,
     pub pins: Vec<LedgerUid>,
     /// Set by a view to ask for a jump after the frame is done drawing.
-    pub goto: Option<View>,
+    pub goto: Option<Screen>,
 
     // --- view state. Kept on the session rather than inside the views so that
     // navigating away and back does not silently reset a filter you set.
@@ -74,6 +80,15 @@ pub struct Session {
     pub tx_to: String,
     pub tx_ledger: Option<LedgerUid>,
     pub tx_source: crate::views::transactions::SourceFilter,
+    /// First day of the month the cohort calendar is showing.
+    pub calendar_month: Date,
+    /// The selected view's spec as it is being edited. The chart draws from
+    /// this, so every pick redraws at once; nothing is staged until "Stage
+    /// changes", which keeps an afternoon of fiddling out of the op log.
+    pub view_draft: Option<(ViewUid, ViewSpec)>,
+    /// "Simulate until" override for the Views screen; empty means the
+    /// view's own horizon.
+    pub view_until: String,
 }
 
 impl Session {
@@ -88,10 +103,12 @@ impl Session {
         Session {
             repo,
             path,
-            view: View::Dashboard,
+            view: Screen::Dashboard,
             search: String::new(),
             selected_ledger: None,
             selected_bucket: None,
+            selected_cohort: None,
+            selected_view: None,
             selected_commit: None,
             commit_message: String::new(),
             issuer_through: Date::today_utc().to_string(),
@@ -108,6 +125,9 @@ impl Session {
             tx_to: String::new(),
             tx_ledger: None,
             tx_source: crate::views::transactions::SourceFilter::default(),
+            calendar_month: Period::Month.start_of(Date::today_utc()),
+            view_draft: None,
+            view_until: String::new(),
         }
     }
 
@@ -319,19 +339,21 @@ impl LedgitApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             // A search bar with text in it beats whatever tab is selected;
             // that is what people expect a search bar to do.
-            if !session.search.trim().is_empty() && session.view != View::Transactions {
+            if !session.search.trim().is_empty() && session.view != Screen::Transactions {
                 views::search::show(ui, &mut session);
                 return;
             }
             match session.view {
-                View::Dashboard => views::dashboard::show(ui, &mut session),
-                View::Ledgers => views::ledgers::show(ui, &mut session),
-                View::Register => views::ledgers::register(ui, &mut session),
-                View::Transactions => views::transactions::show(ui, &mut session),
-                View::Issuers => views::issuers::show(ui, &mut session),
-                View::Buckets => views::buckets::show(ui, &mut session),
-                View::Commit => views::commit::show(ui, &mut session),
-                View::History => views::history::show(ui, &mut session),
+                Screen::Dashboard => views::dashboard::show(ui, &mut session),
+                Screen::Ledgers => views::ledgers::show(ui, &mut session),
+                Screen::Register => views::ledgers::register(ui, &mut session),
+                Screen::Transactions => views::transactions::show(ui, &mut session),
+                Screen::Issuers => views::issuers::show(ui, &mut session),
+                Screen::Buckets => views::buckets::show(ui, &mut session),
+                Screen::Cohorts => views::cohorts::show(ui, &mut session),
+                Screen::Views => views::saved::show(ui, &mut session),
+                Screen::Commit => views::commit::show(ui, &mut session),
+                Screen::History => views::history::show(ui, &mut session),
             }
         });
 
@@ -396,6 +418,7 @@ fn top_bar(ctx: &egui::Context, s: &mut Session) {
                 .unwrap_or_else(|| "budget".into());
             ui.heading(name);
             ui.label(RichText::new(format!("on {}", s.repo.head())).color(fmt::dim()));
+            freshness(ui, s.budget());
 
             ui.separator();
             ui.menu_button("New", |ui| {
@@ -404,6 +427,8 @@ fn top_bar(ctx: &egui::Context, s: &mut Session) {
                     (FormKind::Ledger, "Ledger"),
                     (FormKind::Bucket, "Bucket"),
                     (FormKind::Issuer, "Issuer"),
+                    (FormKind::Cohort, "Cohort"),
+                    (FormKind::View, "View"),
                 ] {
                     if ui.button(label).clicked() {
                         s.forms.open(kind, s.repo.working());
@@ -420,7 +445,7 @@ fn top_bar(ctx: &egui::Context, s: &mut Session) {
                     RichText::new(format!("{staged} staged")).color(Color32::from_rgb(220, 170, 60))
                 };
                 if ui.button(text).clicked() {
-                    s.goto = Some(View::Commit);
+                    s.goto = Some(Screen::Commit);
                 }
                 ui.separator();
                 ui.add(
@@ -434,11 +459,48 @@ fn top_bar(ctx: &egui::Context, s: &mut Session) {
     });
 }
 
+/// "through 2026-09-24 · issuers 2026-09-15": how current this branch is.
+///
+/// The first date is the newest transaction on record, staged or not. The
+/// second is how far the issuers have been run - every recurring payment up
+/// to that day is in. It turns red when an issuer owes something dated before
+/// today, because that is the moment the balances on screen stop being true.
+fn freshness(ui: &mut egui::Ui, l: &Budget) {
+    let today = Date::today_utc();
+    let latest = l.latest_transaction_date();
+    let issuers = ledgit_core::cohort::caught_up_through(l);
+    let overdue = ledgit_core::cohort::overdue_issuers(l, today);
+    let mut text = match latest {
+        Some(d) => format!("through {d}"),
+        None => "no transactions yet".into(),
+    };
+    if let Some(d) = issuers {
+        text.push_str(&format!("  \u{b7}  issuers {d}"));
+    }
+    let colour = if overdue > 0 { fmt::bad() } else { fmt::dim() };
+    let mut hover = String::from(
+        "Up to date through: the date of the newest transaction on this branch, staged ones included.",
+    );
+    if issuers.is_some() {
+        hover.push_str(
+            "\nIssuers: every recurring payment dated on or before this day has been posted.",
+        );
+    }
+    if overdue > 0 {
+        hover.push_str(&format!(
+            "\n\n{overdue} issuer(s) owe payments dated before today. Run them on the Issuers screen."
+        ));
+    }
+    ui.separator();
+    ui.label(RichText::new(text).color(colour)).on_hover_text(hover);
+}
+
 fn nav_panel(ctx: &egui::Context, s: &mut Session) {
     egui::SidePanel::left("nav").resizable(false).exact_width(180.0).show(ctx, |ui| {
         ui.add_space(8.0);
-        for (view, label) in View::NAV {
-            let selected = s.view == view || (view == View::Ledgers && s.view == View::Register);
+        for (view, label) in Screen::NAV {
+            let selected =
+                s.view == view || (view == Screen::Ledgers && s.view == Screen::Register);
             if ui.selectable_label(selected, label).clicked() {
                 s.view = view;
             }
@@ -462,7 +524,7 @@ fn nav_panel(ctx: &egui::Context, s: &mut Session) {
                     .inner;
                 if clicked {
                     s.selected_ledger = Some(uid);
-                    s.view = View::Register;
+                    s.view = Screen::Register;
                 }
             }
         }

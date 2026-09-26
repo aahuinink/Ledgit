@@ -59,6 +59,10 @@ pub struct ChangeReport {
     pub new_buckets: usize,
     pub deleted_buckets: usize,
     pub new_issuers: usize,
+    pub new_cohorts: usize,
+    pub deleted_cohorts: usize,
+    pub new_views: usize,
+    pub deleted_views: usize,
     pub manual_transactions: usize,
     pub issuer_transactions: usize,
     /// How many of the above have more than two sides.
@@ -103,6 +107,10 @@ pub fn build(base: &Budget, staged: &[Op]) -> Result<ChangeReport> {
             Op::CreateBucket { .. } => r.new_buckets += 1,
             Op::DeleteBucket { .. } => r.deleted_buckets += 1,
             Op::CreateIssuer { .. } => r.new_issuers += 1,
+            Op::CreateCohort { .. } => r.new_cohorts += 1,
+            Op::DeleteCohort { .. } => r.deleted_cohorts += 1,
+            Op::CreateView { .. } => r.new_views += 1,
+            Op::DeleteView { .. } => r.deleted_views += 1,
             Op::PostTransaction { parent, legs, .. } => {
                 // The size of a split entry is what it debits, not the sum of
                 // every leg - a $2,400 paycheque is $2,400, not $4,800.

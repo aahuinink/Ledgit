@@ -15,6 +15,8 @@ pub enum FormKind {
     Transaction,
     Bucket,
     Issuer,
+    Cohort,
+    View,
 }
 
 impl FormKind {
@@ -24,7 +26,7 @@ impl FormKind {
     /// form wants.
     pub fn width(self) -> f32 {
         match self {
-            FormKind::Ledger | FormKind::Bucket => 460.0,
+            FormKind::Ledger | FormKind::Bucket | FormKind::Cohort | FormKind::View => 460.0,
             FormKind::Transaction | FormKind::Issuer => 640.0,
         }
     }
@@ -35,6 +37,8 @@ impl FormKind {
             FormKind::Transaction => "New transaction",
             FormKind::Bucket => "New bucket",
             FormKind::Issuer => "New issuer",
+            FormKind::Cohort => "New cohort",
+            FormKind::View => "New view",
         }
     }
 }
@@ -55,6 +59,8 @@ pub struct Forms {
     transaction: TxForm,
     bucket: BucketForm,
     issuer: IssuerForm,
+    cohort: CohortForm,
+    view: ViewForm,
 }
 
 impl Forms {
@@ -69,6 +75,8 @@ impl Forms {
                     TxForm { date: today, legs: LegEditor::seed(budget), ..Default::default() };
             }
             FormKind::Bucket => self.bucket = BucketForm::default(),
+            FormKind::Cohort => self.cohort = CohortForm::default(),
+            FormKind::View => self.view = ViewForm { all_buckets: true, ..Default::default() },
             FormKind::Issuer => {
                 self.issuer = IssuerForm {
                     start: today,
@@ -93,6 +101,8 @@ impl Forms {
             FormKind::Transaction => self.transaction.show(ui, budget),
             FormKind::Bucket => self.bucket.show(ui),
             FormKind::Issuer => self.issuer.show(ui, budget),
+            FormKind::Cohort => self.cohort.show(ui),
+            FormKind::View => self.view.show(ui, budget),
         };
         match outcome {
             Ok(o) => {
@@ -430,6 +440,91 @@ impl TxForm {
             date,
             legs,
             parent: Parent::Manual,
+        }]))
+    }
+}
+
+// ------------------------------------------------------- cohort and view
+
+#[derive(Default)]
+struct CohortForm {
+    name: String,
+    description: String,
+}
+
+impl CohortForm {
+    fn show(&mut self, ui: &mut Ui) -> Filled {
+        ui.label(
+            egui::RichText::new(
+                "A cohort groups issuers, the way a bucket groups ledgers. It stops or changes no payment.",
+            )
+            .color(fmt::dim()),
+        );
+        ui.add_space(6.0);
+        egui::Grid::new("cohort_form").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            label_row(ui, "Name", &mut self.name, "Bills");
+            label_row(ui, "Description", &mut self.description, "optional");
+        });
+        let (save, cancel) = footer(ui, "Stage cohort");
+        if cancel {
+            return Ok(Outcome::Cancelled);
+        }
+        if !save {
+            return Ok(Outcome::Pending);
+        }
+        if self.name.trim().is_empty() {
+            return Err("A cohort needs a name".into());
+        }
+        Ok(Outcome::Submit(vec![Op::CreateCohort {
+            uid: CohortUid::new(),
+            name: self.name.trim().to_string(),
+            description: self.description.trim().to_string(),
+        }]))
+    }
+}
+
+/// Only the name is asked for here. What a view looks at is picked on the
+/// Views screen, where the chart redraws as you pick it.
+#[derive(Default)]
+struct ViewForm {
+    name: String,
+    description: String,
+    all_buckets: bool,
+}
+
+impl ViewForm {
+    fn show(&mut self, ui: &mut Ui, budget: &Budget) -> Filled {
+        ui.label(
+            egui::RichText::new(
+                "A view charts buckets and ledgers across time and simulates your issuers forward. It moves no money.",
+            )
+            .color(fmt::dim()),
+        );
+        ui.add_space(6.0);
+        egui::Grid::new("view_form").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            label_row(ui, "Name", &mut self.name, "Net worth, next year");
+            label_row(ui, "Description", &mut self.description, "optional");
+            ui.label("");
+            ui.checkbox(&mut self.all_buckets, "Start with every bucket");
+            ui.end_row();
+        });
+        let (save, cancel) = footer(ui, "Stage view");
+        if cancel {
+            return Ok(Outcome::Cancelled);
+        }
+        if !save {
+            return Ok(Outcome::Pending);
+        }
+        if self.name.trim().is_empty() {
+            return Err("A view needs a name".into());
+        }
+        let spec =
+            if self.all_buckets { ViewSpec::all_buckets(budget) } else { ViewSpec::default() };
+        Ok(Outcome::Submit(vec![Op::CreateView {
+            uid: ViewUid::new(),
+            name: self.name.trim().to_string(),
+            description: self.description.trim().to_string(),
+            spec,
         }]))
     }
 }

@@ -476,29 +476,7 @@ pub fn combine(
     sort: LedgerSort,
     order: Order,
 ) -> Combination {
-    let mut missing = Vec::new();
-    // Membership per side. `LedgerIx` is a u32 row index, so these stay small
-    // even for a combination spanning every bucket in the budget.
-    let mut plus: Vec<LedgerIx> = Vec::new();
-    let mut minus: Vec<LedgerIx> = Vec::new();
-
-    for term in terms {
-        let Some(bix) = l.buckets.ix(term.bucket) else {
-            if !missing.contains(&term.bucket) {
-                missing.push(term.bucket);
-            }
-            continue;
-        };
-        let side = match term.sign {
-            Sign::Plus => &mut plus,
-            Sign::Minus => &mut minus,
-        };
-        for ix in &l.buckets.members[bix.get()] {
-            if !side.contains(ix) {
-                side.push(*ix);
-            }
-        }
-    }
+    let Members { plus, minus, missing } = members(l, terms);
 
     let mut lines = Vec::new();
     let mut cancelled = Vec::new();
@@ -525,6 +503,42 @@ pub fn combine(
 
     let total = lines.iter().map(|l| l.contribution).sum();
     Combination { total, lines, cancelled, missing }
+}
+
+/// Which ledgers a combination adds and subtracts, before cancellation.
+pub(crate) struct Members {
+    pub plus: Vec<LedgerIx>,
+    pub minus: Vec<LedgerIx>,
+    pub missing: Vec<BucketUid>,
+}
+
+/// Membership per side, each ledger once. Shared with saved views, whose
+/// scope must agree with `combine` about what a combination contains.
+pub(crate) fn members(l: &Budget, terms: &[Term]) -> Members {
+    let mut missing = Vec::new();
+    // `LedgerIx` is a u32 row index, so these stay small even for a
+    // combination spanning every bucket in the budget.
+    let mut plus: Vec<LedgerIx> = Vec::new();
+    let mut minus: Vec<LedgerIx> = Vec::new();
+
+    for term in terms {
+        let Some(bix) = l.buckets.ix(term.bucket) else {
+            if !missing.contains(&term.bucket) {
+                missing.push(term.bucket);
+            }
+            continue;
+        };
+        let side = match term.sign {
+            Sign::Plus => &mut plus,
+            Sign::Minus => &mut minus,
+        };
+        for ix in &l.buckets.members[bix.get()] {
+            if !side.contains(ix) {
+                side.push(*ix);
+            }
+        }
+    }
+    Members { plus, minus, missing }
 }
 
 /// A cancelled row keeps its balance for display but contributes nothing.

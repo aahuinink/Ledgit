@@ -8,7 +8,7 @@
 //! They are not a substitute for looking at the thing. They are a substitute
 //! for shipping a screen that crashes.
 
-use crate::app::{Session, View};
+use crate::app::{Screen, Session};
 use crate::forms::FormKind;
 use crate::views;
 use ledgit_core::prelude::*;
@@ -84,8 +84,16 @@ fn session() -> Session {
         .post("Groceries", "", "2024-01-20".parse().unwrap(), Money::from_major(150), loan, cash)
         .unwrap();
 
+    // A cohort and a saved view, so their screens have something to draw.
+    let pay = s.repo.working().issuers.uid[0];
+    let bills = s.repo.add_cohort("Bills", "").unwrap();
+    s.repo.stage(Op::AddToCohort { cohort: bills, issuer: pay }).unwrap();
+    let net = s.repo.add_view("Net worth", "", ViewSpec::all_buckets(s.repo.working())).unwrap();
+
     s.selected_ledger = Some(cash);
     s.selected_bucket = Some(bucket);
+    s.selected_cohort = Some(bills);
+    s.selected_view = Some(net);
     s.pins = vec![cash];
     s
 }
@@ -100,28 +108,32 @@ fn run_ui(mut f: impl FnMut(&mut egui::Ui)) {
     });
 }
 
-fn draw(s: &mut Session, view: View) {
+fn draw(s: &mut Session, view: Screen) {
     run_ui(|ui| match view {
-        View::Dashboard => views::dashboard::show(ui, s),
-        View::Ledgers => views::ledgers::show(ui, s),
-        View::Register => views::ledgers::register(ui, s),
-        View::Transactions => views::transactions::show(ui, s),
-        View::Issuers => views::issuers::show(ui, s),
-        View::Buckets => views::buckets::show(ui, s),
-        View::Commit => views::commit::show(ui, s),
-        View::History => views::history::show(ui, s),
+        Screen::Dashboard => views::dashboard::show(ui, s),
+        Screen::Ledgers => views::ledgers::show(ui, s),
+        Screen::Register => views::ledgers::register(ui, s),
+        Screen::Transactions => views::transactions::show(ui, s),
+        Screen::Issuers => views::issuers::show(ui, s),
+        Screen::Buckets => views::buckets::show(ui, s),
+        Screen::Cohorts => views::cohorts::show(ui, s),
+        Screen::Views => views::saved::show(ui, s),
+        Screen::Commit => views::commit::show(ui, s),
+        Screen::History => views::history::show(ui, s),
     });
 }
 
-const EVERY_VIEW: [View; 8] = [
-    View::Dashboard,
-    View::Ledgers,
-    View::Register,
-    View::Transactions,
-    View::Issuers,
-    View::Buckets,
-    View::Commit,
-    View::History,
+const EVERY_VIEW: [Screen; 10] = [
+    Screen::Dashboard,
+    Screen::Ledgers,
+    Screen::Register,
+    Screen::Transactions,
+    Screen::Issuers,
+    Screen::Buckets,
+    Screen::Cohorts,
+    Screen::Views,
+    Screen::Commit,
+    Screen::History,
 ];
 
 #[test]
@@ -151,6 +163,9 @@ fn every_view_survives_a_dangling_selection() {
     let mut s = session();
     s.selected_ledger = Some(LedgerUid::new());
     s.selected_bucket = Some(BucketUid::new());
+    s.selected_cohort = Some(CohortUid::new());
+    s.selected_view = Some(ViewUid::new());
+    s.view_draft = Some((ViewUid::new(), ViewSpec::default()));
     s.pins = vec![LedgerUid::new()];
     for view in EVERY_VIEW {
         draw(&mut s, view);
@@ -169,7 +184,14 @@ fn search_draws_hits_and_misses() {
 #[test]
 fn every_form_opens_and_draws() {
     let mut s = session();
-    for kind in [FormKind::Ledger, FormKind::Transaction, FormKind::Bucket, FormKind::Issuer] {
+    for kind in [
+        FormKind::Ledger,
+        FormKind::Transaction,
+        FormKind::Bucket,
+        FormKind::Issuer,
+        FormKind::Cohort,
+        FormKind::View,
+    ] {
         s.forms.open(kind, s.repo.working());
         let budget = s.repo.working().clone();
         let forms = &mut s.forms;
@@ -201,10 +223,10 @@ fn the_leg_editor_builds_and_refuses_entries() {
 #[test]
 fn transaction_filters_narrow_the_list() {
     let mut s = session();
-    s.view = View::Transactions;
+    s.view = Screen::Transactions;
     s.tx_from = "2024-01-06".into();
     s.tx_to = "2024-01-06".into();
-    draw(&mut s, View::Transactions);
+    draw(&mut s, Screen::Transactions);
 
     // The same filters, executed directly, to check the view is not lying.
     let rows = TxQuery::new()
@@ -215,7 +237,7 @@ fn transaction_filters_narrow_the_list() {
 
     // A malformed date must render a complaint, not panic or silently filter.
     s.tx_from = "not a date".into();
-    draw(&mut s, View::Transactions);
+    draw(&mut s, Screen::Transactions);
 }
 
 /// The combining branch of the Buckets screen is a whole second layout that the
@@ -231,16 +253,60 @@ fn the_buckets_screen_draws_a_combination() {
     // One added, one subtracted, and the subtracted one overlaps the added one
     // so the cancelled section draws too.
     s.bucket_combo = vec![Term::plus(net), Term::minus(spending)];
-    draw(&mut s, View::Buckets);
+    draw(&mut s, Screen::Buckets);
 
     let c = combine(s.budget(), &s.bucket_combo, s.bucket_roll, s.ledger_sort, Order::Asc);
     assert_eq!(c.cancelled.len(), 1, "cash is in both buckets");
 
     // A term naming a bucket that is not on this branch must render, not panic.
     s.bucket_combo = vec![Term::plus(BucketUid::new())];
-    draw(&mut s, View::Buckets);
+    draw(&mut s, Screen::Buckets);
 
     // And a leading subtraction is a legitimate, if odd, thing to ask for.
     s.bucket_combo = vec![Term::minus(net)];
-    draw(&mut s, View::Buckets);
+    draw(&mut s, Screen::Buckets);
+}
+
+/// The cohort screen's two layouts - one cohort, and "every issuer" - and a
+/// calendar month holding posted, overdue and upcoming payments at once.
+#[test]
+fn the_cohorts_screen_draws_rates_and_a_calendar() {
+    let mut s = session();
+    s.calendar_month = "2024-01-01".parse().unwrap();
+    draw(&mut s, Screen::Cohorts);
+    s.selected_cohort = None;
+    draw(&mut s, Screen::Cohorts);
+    // Far from any payment, the calendar is simply empty.
+    s.calendar_month = "1990-06-01".parse().unwrap();
+    draw(&mut s, Screen::Cohorts);
+}
+
+/// The Views screen keeps an edited draft apart from the stored spec, and
+/// redraws from it; the chart, tables and every editor widget run here.
+#[test]
+fn the_views_screen_draws_a_draft_and_never_stages_it_by_itself() {
+    let mut s = session();
+    draw(&mut s, Screen::Views);
+    let (uid, stored) = s.view_draft.clone().expect("drawing starts a draft");
+    let staged_before = s.repo.staged().len();
+
+    // Edit the draft as the screen would, and draw it with every option on.
+    let (_, draft) = s.view_draft.as_mut().unwrap();
+    draft.horizon = Span::Years(2);
+    draft.period = Period::Week;
+    draft.only_selected_issuers = true;
+    draft.ledgers = s.repo.working().ledgers.uid.clone();
+    draft.transactions = vec![TxFilter::Text("pay".into())];
+    for until in ["", "2031-12-31", "not a date", "1999-01-01"] {
+        s.view_until = until.into();
+        draw(&mut s, Screen::Views);
+    }
+    assert_eq!(s.repo.staged().len(), staged_before, "a draft is not an op");
+    assert_ne!(s.view_draft.as_ref().unwrap().1, stored);
+    assert_eq!(s.view_draft.as_ref().unwrap().0, uid);
+
+    // A view with no scope - issuers only - draws flows without a chart.
+    let issuers = s.repo.working().issuers.uid.clone();
+    s.view_draft = Some((uid, ViewSpec { issuers, ..ViewSpec::default() }));
+    draw(&mut s, Screen::Views);
 }

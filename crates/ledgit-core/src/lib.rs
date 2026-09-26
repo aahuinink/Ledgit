@@ -50,6 +50,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+pub mod cohort;
 pub mod commit;
 pub mod date;
 pub mod error;
@@ -58,26 +59,30 @@ pub mod issuer;
 pub mod model;
 pub mod money;
 pub mod op;
+pub mod period;
 pub mod query;
 pub mod repo;
 pub mod report;
 pub mod state;
 pub mod store;
+pub mod view;
 
 pub use error::{Error, Result};
 
 /// Everything a front end normally needs, in one `use`.
 pub mod prelude {
+    pub use crate::cohort::{CalendarEntry, CohortBreakdown, DueStatus, RateLine};
     pub use crate::commit::{Commit, CommitId, Head};
     pub use crate::date::Date;
     pub use crate::error::{Error, Result};
-    pub use crate::id::{BucketUid, IssuerUid, LedgerUid, TxUid};
+    pub use crate::id::{BucketUid, CohortUid, IssuerUid, LedgerUid, TxUid, ViewUid};
     pub use crate::model::{
-        magnitude, simple_legs, validate_legs, Bucket, Issuer, Ledger, Leg, Normality, Parent,
-        Schedule, Transaction,
+        magnitude, simple_legs, validate_legs, Bucket, Cohort, Issuer, Ledger, Leg, Normality,
+        Parent, SavedView, Schedule, Transaction, ViewSpec,
     };
     pub use crate::money::Money;
     pub use crate::op::Op;
+    pub use crate::period::{per_period, Period, Span};
     pub use crate::query::{
         balance_as_of, combine, register, roll_up, search, BucketLine, BucketRollUp, Combination,
         IssuerFilter, IssuerQuery, LedgerFilter, LedgerQuery, LedgerSort, Order, RegisterLine,
@@ -87,4 +92,5 @@ pub mod prelude {
     pub use crate::report::ChangeReport;
     pub use crate::state::Budget;
     pub use crate::store::{MemStore, Store, DEFAULT_BRANCH};
+    pub use crate::view::{Flow, FlowLine, PeriodRow, Series, SeriesKind, ViewReport};
 }

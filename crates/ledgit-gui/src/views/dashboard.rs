@@ -2,7 +2,7 @@
 //! about to happen, and what you have not committed yet.
 
 use super::{empty, heading, num};
-use crate::app::{Session, View};
+use crate::app::{Screen, Session};
 use crate::fmt;
 use crate::forms::FormKind;
 use egui::{RichText, Ui};
@@ -51,7 +51,7 @@ fn pending_banner(ui: &mut Ui, s: &mut Session) {
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Review and commit").clicked() {
-                    s.goto = Some(View::Commit);
+                    s.goto = Some(Screen::Commit);
                 }
             });
         });
@@ -101,7 +101,7 @@ fn bucket_tiles(ui: &mut Ui, s: &mut Session) {
                         );
                         if ui.small_button("open").clicked() {
                             s.selected_bucket = Some(*uid);
-                            s.goto = Some(View::Buckets);
+                            s.goto = Some(Screen::Buckets);
                         }
                     });
                 });
@@ -130,7 +130,7 @@ fn pinned(ui: &mut Ui, s: &mut Session) {
             let balance = s.budget().ledgers.balance(ix);
             if ui.link(name).clicked() {
                 s.selected_ledger = Some(uid);
-                s.goto = Some(View::Register);
+                s.goto = Some(Screen::Register);
             }
             num(ui, fmt::money_text(balance));
             ui.end_row();
@@ -177,7 +177,7 @@ fn upcoming(ui: &mut Ui, s: &mut Session) {
         ui.horizontal(|ui| {
             ui.colored_label(fmt::bad(), format!("{overdue} issuer(s) owe something"));
             if ui.small_button("Run issuers").clicked() {
-                s.goto = Some(View::Issuers);
+                s.goto = Some(Screen::Issuers);
             }
         });
     }

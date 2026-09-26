@@ -2,7 +2,7 @@
 //! view is selected, because that is what a search bar is for.
 
 use super::{empty, heading, num};
-use crate::app::{Session, View};
+use crate::app::{Screen, Session};
 use crate::fmt;
 use egui::{RichText, Ui};
 
@@ -32,7 +32,7 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
                     let uid = s.budget().ledgers.uid[ix.get()];
                     if ui.link(&s.budget().ledgers.name[ix.get()]).clicked() {
                         s.selected_ledger = Some(uid);
-                        s.goto = Some(View::Register);
+                        s.goto = Some(Screen::Register);
                         s.search.clear();
                     }
                     ui.label(
@@ -69,7 +69,7 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
             for ix in &hits.issuers {
                 let name = s.budget().issuers.name[ix.get()].clone();
                 if ui.link(name).clicked() {
-                    s.goto = Some(View::Issuers);
+                    s.goto = Some(Screen::Issuers);
                     s.search.clear();
                 }
             }
@@ -83,7 +83,7 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
                 let name = s.budget().buckets.name[ix.get()].clone();
                 if ui.link(name).clicked() {
                     s.selected_bucket = Some(uid);
-                    s.goto = Some(View::Buckets);
+                    s.goto = Some(Screen::Buckets);
                     s.search.clear();
                 }
             }

@@ -3,11 +3,13 @@
 //! there is exactly one copy of the truth.
 
 pub mod buckets;
+pub mod cohorts;
 pub mod commit;
 pub mod dashboard;
 pub mod history;
 pub mod issuers;
 pub mod ledgers;
+pub mod saved;
 pub mod search;
 pub mod transactions;
 

@@ -1,7 +1,7 @@
 //! Buckets: named groups of ledgers, and the totals you read off them.
 
 use super::{empty, heading, num};
-use crate::app::{Session, View};
+use crate::app::{Screen, Session};
 use crate::fmt;
 use crate::forms::FormKind;
 use egui::{RichText, Ui};
@@ -143,7 +143,7 @@ fn combined(ui: &mut Ui, s: &mut Session) {
                 let ledger_uid = s.budget().ledgers.uid[line.ledger.get()];
                 if ui.link(&line.name).clicked() {
                     s.selected_ledger = Some(ledger_uid);
-                    s.goto = Some(View::Register);
+                    s.goto = Some(Screen::Register);
                 }
                 ui.label(RichText::new(line.normality.to_string()).color(fmt::dim()));
                 num(ui, fmt::money_text(line.balance));
@@ -256,7 +256,7 @@ fn detail(ui: &mut Ui, s: &mut Session) {
                 let ledger_uid = s.budget().ledgers.uid[line.ledger.get()];
                 if ui.link(&line.name).clicked() {
                     s.selected_ledger = Some(ledger_uid);
-                    s.goto = Some(View::Register);
+                    s.goto = Some(Screen::Register);
                 }
                 ui.label(RichText::new(line.normality.to_string()).color(fmt::dim()));
                 num(ui, fmt::money_text(line.balance));

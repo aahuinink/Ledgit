@@ -1,0 +1,12 @@
+[package]
+name = "ledgit-plot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Charts of Ledgit views, as SVG and PNG files."
+
+[dependencies]
+ledgit-core = { workspace = true }
+resvg = { workspace = true }
+epaint_default_fonts = { workspace = true }

@@ -12,10 +12,12 @@
 use crate::date::Date;
 use crate::error::{invalid, Error, Result};
 use crate::id::{
-    BucketIx, BucketUid, IssuerIx, IssuerUid, LedgerIx, LedgerUid, PostingIx, TxIx, TxUid,
+    BucketIx, BucketUid, CohortIx, CohortUid, IssuerIx, IssuerUid, LedgerIx, LedgerUid, PostingIx,
+    TxIx, TxUid, ViewIx, ViewUid,
 };
 use crate::model::{
-    magnitude, validate_legs, Bucket, Issuer, Ledger, Leg, Normality, Parent, Schedule, Transaction,
+    magnitude, validate_legs, Bucket, Cohort, Issuer, Ledger, Leg, Normality, Parent, SavedView,
+    Schedule, Transaction, ViewSpec,
 };
 use crate::money::Money;
 use crate::op::Op;
@@ -226,6 +228,78 @@ impl BucketArena {
     }
 }
 
+/// Columnar storage for cohorts: groups of issuers. Laid out exactly like
+/// [`BucketArena`], deleted rows included.
+#[derive(Clone, Default, Debug)]
+pub struct CohortArena {
+    pub uid: Vec<CohortUid>,
+    pub name: Vec<String>,
+    pub description: Vec<String>,
+    pub members: Vec<Vec<IssuerIx>>,
+    pub alive: Vec<bool>,
+    by_uid: HashMap<CohortUid, u32>,
+}
+
+impl CohortArena {
+    pub fn len(&self) -> usize {
+        self.uid.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.live().next().is_none()
+    }
+    pub fn ix(&self, uid: CohortUid) -> Option<CohortIx> {
+        self.by_uid.get(&uid).copied().filter(|i| self.alive[*i as usize]).map(CohortIx)
+    }
+    pub fn live(&self) -> impl Iterator<Item = CohortIx> + '_ {
+        (0..self.uid.len() as u32).filter(|i| self.alive[*i as usize]).map(CohortIx)
+    }
+    pub fn get(&self, ix: CohortIx, issuers: &IssuerArena) -> Cohort {
+        let i = ix.get();
+        Cohort {
+            uid: self.uid[i],
+            name: self.name[i].clone(),
+            description: self.description[i].clone(),
+            members: self.members[i].iter().map(|s| issuers.uid[s.get()]).collect(),
+        }
+    }
+}
+
+/// Columnar storage for saved views. A spec is a handful of uids, read only
+/// when that view is opened, so it is kept whole rather than split further.
+#[derive(Clone, Default, Debug)]
+pub struct ViewArena {
+    pub uid: Vec<ViewUid>,
+    pub name: Vec<String>,
+    pub description: Vec<String>,
+    pub spec: Vec<ViewSpec>,
+    pub alive: Vec<bool>,
+    by_uid: HashMap<ViewUid, u32>,
+}
+
+impl ViewArena {
+    pub fn len(&self) -> usize {
+        self.uid.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.live().next().is_none()
+    }
+    pub fn ix(&self, uid: ViewUid) -> Option<ViewIx> {
+        self.by_uid.get(&uid).copied().filter(|i| self.alive[*i as usize]).map(ViewIx)
+    }
+    pub fn live(&self) -> impl Iterator<Item = ViewIx> + '_ {
+        (0..self.uid.len() as u32).filter(|i| self.alive[*i as usize]).map(ViewIx)
+    }
+    pub fn get(&self, ix: ViewIx) -> SavedView {
+        let i = ix.get();
+        SavedView {
+            uid: self.uid[i],
+            name: self.name[i].clone(),
+            description: self.description[i].clone(),
+            spec: self.spec[i].clone(),
+        }
+    }
+}
+
 /// The whole budget, materialised.
 #[derive(Clone, Default, Debug)]
 pub struct Budget {
@@ -234,6 +308,8 @@ pub struct Budget {
     pub postings: PostingArena,
     pub issuers: IssuerArena,
     pub buckets: BucketArena,
+    pub cohorts: CohortArena,
+    pub views: ViewArena,
 }
 
 impl Budget {
@@ -491,8 +567,135 @@ impl Budget {
                 let aix = self.ledger_ix(ledger)?;
                 self.buckets.members[bix].retain(|m| *m != aix);
             }
+            Op::CreateCohort { uid, name, description } => {
+                if self.cohorts.ix(uid).is_some() {
+                    return Err(Error::Duplicate { kind: "cohort", uid: uid.0 });
+                }
+                let name = check_name(name, "cohort name")?;
+                let c = &mut self.cohorts;
+                match c.by_uid.get(&uid).copied() {
+                    // Resurrecting a deleted cohort reuses its row, as buckets do.
+                    Some(i) => {
+                        let i = i as usize;
+                        c.name[i] = name;
+                        c.description[i] = description;
+                        c.members[i].clear();
+                        c.alive[i] = true;
+                    }
+                    None => {
+                        c.by_uid.insert(uid, c.uid.len() as u32);
+                        c.uid.push(uid);
+                        c.name.push(name);
+                        c.description.push(description);
+                        c.members.push(Vec::new());
+                        c.alive.push(true);
+                    }
+                }
+            }
+            Op::EditCohort { uid, name, description } => {
+                let ix = self.cohort_ix(uid)?.get();
+                if let Some(n) = name {
+                    self.cohorts.name[ix] = check_name(n, "cohort name")?;
+                }
+                if let Some(d) = description {
+                    self.cohorts.description[ix] = d;
+                }
+            }
+            Op::DeleteCohort { uid } => {
+                let ix = self.cohort_ix(uid)?.get();
+                self.cohorts.alive[ix] = false;
+                self.cohorts.members[ix].clear();
+            }
+            Op::AddToCohort { cohort, issuer } => {
+                let cix = self.cohort_ix(cohort)?.get();
+                let six = self.issuer_ix(issuer)?;
+                if !self.cohorts.members[cix].contains(&six) {
+                    self.cohorts.members[cix].push(six);
+                }
+            }
+            Op::RemoveFromCohort { cohort, issuer } => {
+                let cix = self.cohort_ix(cohort)?.get();
+                let six = self.issuer_ix(issuer)?;
+                self.cohorts.members[cix].retain(|m| *m != six);
+            }
+            Op::CreateView { uid, name, description, spec } => {
+                if self.views.ix(uid).is_some() {
+                    return Err(Error::Duplicate { kind: "view", uid: uid.0 });
+                }
+                let name = check_name(name, "view name")?;
+                self.check_spec(&spec)?;
+                let v = &mut self.views;
+                match v.by_uid.get(&uid).copied() {
+                    Some(i) => {
+                        let i = i as usize;
+                        v.name[i] = name;
+                        v.description[i] = description;
+                        v.spec[i] = spec;
+                        v.alive[i] = true;
+                    }
+                    None => {
+                        v.by_uid.insert(uid, v.uid.len() as u32);
+                        v.uid.push(uid);
+                        v.name.push(name);
+                        v.description.push(description);
+                        v.spec.push(spec);
+                        v.alive.push(true);
+                    }
+                }
+            }
+            Op::EditView { uid, name, description, spec } => {
+                let ix = self.view_ix(uid)?.get();
+                // Validate everything before writing anything.
+                let name = name.map(|n| check_name(n, "view name")).transpose()?;
+                if let Some(s) = &spec {
+                    self.check_spec(s)?;
+                }
+                if let Some(n) = name {
+                    self.views.name[ix] = n;
+                }
+                if let Some(d) = description {
+                    self.views.description[ix] = d;
+                }
+                if let Some(s) = spec {
+                    self.views.spec[ix] = s;
+                }
+            }
+            Op::DeleteView { uid } => {
+                let ix = self.view_ix(uid)?.get();
+                self.views.alive[ix] = false;
+            }
         }
         Ok(())
+    }
+
+    /// A view must name ledgers and issuers that exist, since those can never
+    /// disappear. Buckets and cohorts are not checked: they can be deleted at
+    /// any time, evaluation already reports a missing one, and a check here
+    /// would make history order-sensitive - reverting "delete cohort, delete
+    /// view" recreates the view before the cohort it names.
+    fn check_spec(&self, spec: &ViewSpec) -> Result<()> {
+        spec.validate().map_err(invalid)?;
+        for l in &spec.ledgers {
+            self.ledger_ix(*l)?;
+        }
+        for s in &spec.issuers {
+            self.issuer_ix(*s)?;
+        }
+        Ok(())
+    }
+
+    fn cohort_ix(&self, uid: CohortUid) -> Result<CohortIx> {
+        self.cohorts.ix(uid).ok_or(Error::NoSuchEntity { kind: "cohort", uid: uid.0 })
+    }
+
+    fn view_ix(&self, uid: ViewUid) -> Result<ViewIx> {
+        self.views.ix(uid).ok_or(Error::NoSuchEntity { kind: "view", uid: uid.0 })
+    }
+
+    /// The date of the newest transaction on record, staged or committed.
+    /// "This budget is up to date through ..." in the GUI's top bar.
+    pub fn latest_transaction_date(&self) -> Option<Date> {
+        self.transactions.date.iter().copied().max()
     }
 
     fn issuer_ix(&self, uid: IssuerUid) -> Result<IssuerIx> {
@@ -521,6 +724,14 @@ impl Budget {
 
     pub fn bucket_by_name(&self, name: &str) -> Option<BucketIx> {
         self.buckets.live().find(|ix| self.buckets.name[ix.get()].eq_ignore_ascii_case(name))
+    }
+
+    pub fn cohort_by_name(&self, name: &str) -> Option<CohortIx> {
+        self.cohorts.live().find(|ix| self.cohorts.name[ix.get()].eq_ignore_ascii_case(name))
+    }
+
+    pub fn view_by_name(&self, name: &str) -> Option<ViewIx> {
+        self.views.live().find(|ix| self.views.name[ix.get()].eq_ignore_ascii_case(name))
     }
 
     pub fn issuer_by_name(&self, name: &str) -> Option<IssuerIx> {

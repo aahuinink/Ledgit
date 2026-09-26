@@ -1,7 +1,7 @@
 //! The ledger list and the per-ledger register.
 
 use super::{empty, heading, num};
-use crate::app::{Session, View};
+use crate::app::{Screen, Session};
 use crate::fmt;
 use crate::forms::FormKind;
 use egui::{RichText, Ui};
@@ -71,7 +71,7 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
 
                     if ui.link(&name).clicked() {
                         s.selected_ledger = Some(uid);
-                        s.goto = Some(View::Register);
+                        s.goto = Some(Screen::Register);
                     }
                     ui.label(RichText::new(normality.to_string()).color(fmt::dim()));
                     ui.label(fmt::mono(opened.to_string()));

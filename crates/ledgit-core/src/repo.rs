@@ -12,9 +12,9 @@
 use crate::commit::{validate_branch_name, Commit, CommitId, Head};
 use crate::date::Date;
 use crate::error::{Error, Result};
-use crate::id::{BucketUid, IssuerUid, LedgerUid, TxUid};
+use crate::id::{BucketUid, CohortUid, IssuerUid, LedgerUid, TxUid, ViewUid};
 use crate::issuer::{self, IssuerRun};
-use crate::model::{simple_legs, Leg, Normality, Parent, Schedule};
+use crate::model::{simple_legs, Leg, Normality, Parent, Schedule, ViewSpec};
 use crate::money::Money;
 use crate::op::Op;
 use crate::report::{self, ChangeReport};
@@ -474,17 +474,20 @@ impl<S: Store> Repo<S> {
             None => Budget::new(),
         };
 
-        let mut inverses: Vec<Op> = Vec::new();
+        // One group per original op. The groups are undone newest first, but
+        // each group keeps its own order: restoring a deleted bucket must
+        // create it before adding its members back.
+        let mut groups: Vec<Vec<Op>> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
         for op in &commit.ops {
             match invert(op, &before, &commit.id.short()) {
-                Inverse::Op(inv) => inverses.push(inv),
-                Inverse::Many(mut v) => inverses.append(&mut v),
+                Inverse::Op(inv) => groups.push(vec![inv]),
+                Inverse::Many(v) => groups.push(v),
                 Inverse::Nothing(why) => notes.push(why),
             }
             before.apply(op)?;
         }
-        inverses.reverse();
+        let inverses: Vec<Op> = groups.into_iter().rev().flatten().collect();
 
         if inverses.is_empty() {
             if notes.is_empty() {
@@ -732,6 +735,32 @@ impl<S: Store> Repo<S> {
         Ok(uid)
     }
 
+    pub fn add_cohort(
+        &mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<CohortUid> {
+        let uid = CohortUid::new();
+        self.stage(Op::CreateCohort { uid, name: name.into(), description: description.into() })?;
+        Ok(uid)
+    }
+
+    pub fn add_view(
+        &mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        spec: ViewSpec,
+    ) -> Result<ViewUid> {
+        let uid = ViewUid::new();
+        self.stage(Op::CreateView {
+            uid,
+            name: name.into(),
+            description: description.into(),
+            spec,
+        })?;
+        Ok(uid)
+    }
+
     pub fn store(&self) -> &S {
         &self.store
     }
@@ -848,6 +877,64 @@ fn invert(op: &Op, before: &Budget, source: &str) -> Inverse {
         Op::RemoveFromBucket { bucket, ledger } => {
             Inverse::Op(Op::AddToBucket { bucket: *bucket, ledger: *ledger })
         }
+        Op::CreateCohort { uid, .. } => Inverse::Op(Op::DeleteCohort { uid: *uid }),
+        Op::EditCohort { uid, name, description } => match before.cohorts.ix(*uid) {
+            Some(ix) => Inverse::Op(Op::EditCohort {
+                uid: *uid,
+                name: name.as_ref().map(|_| before.cohorts.name[ix.get()].clone()),
+                description: description
+                    .as_ref()
+                    .map(|_| before.cohorts.description[ix.get()].clone()),
+            }),
+            None => Inverse::Nothing(format!("cohort {} is gone; edit not reverted", uid.short())),
+        },
+        Op::DeleteCohort { uid } => match before.cohorts.ix(*uid) {
+            Some(ix) => {
+                let i = ix.get();
+                let mut ops = vec![Op::CreateCohort {
+                    uid: *uid,
+                    name: before.cohorts.name[i].clone(),
+                    description: before.cohorts.description[i].clone(),
+                }];
+                ops.extend(before.cohorts.members[i].iter().map(|s| Op::AddToCohort {
+                    cohort: *uid,
+                    issuer: before.issuers.uid[s.get()],
+                }));
+                Inverse::Many(ops)
+            }
+            None => Inverse::Nothing(format!("cohort {} was already gone", uid.short())),
+        },
+        Op::AddToCohort { cohort, issuer } => {
+            Inverse::Op(Op::RemoveFromCohort { cohort: *cohort, issuer: *issuer })
+        }
+        Op::RemoveFromCohort { cohort, issuer } => {
+            Inverse::Op(Op::AddToCohort { cohort: *cohort, issuer: *issuer })
+        }
+        Op::CreateView { uid, .. } => Inverse::Op(Op::DeleteView { uid: *uid }),
+        Op::EditView { uid, name, description, spec } => match before.views.ix(*uid) {
+            Some(ix) => {
+                let i = ix.get();
+                Inverse::Op(Op::EditView {
+                    uid: *uid,
+                    name: name.as_ref().map(|_| before.views.name[i].clone()),
+                    description: description.as_ref().map(|_| before.views.description[i].clone()),
+                    spec: spec.as_ref().map(|_| before.views.spec[i].clone()),
+                })
+            }
+            None => Inverse::Nothing(format!("view {} is gone; edit not reverted", uid.short())),
+        },
+        Op::DeleteView { uid } => match before.views.ix(*uid) {
+            Some(ix) => {
+                let i = ix.get();
+                Inverse::Op(Op::CreateView {
+                    uid: *uid,
+                    name: before.views.name[i].clone(),
+                    description: before.views.description[i].clone(),
+                    spec: before.views.spec[i].clone(),
+                })
+            }
+            None => Inverse::Nothing(format!("view {} was already gone", uid.short())),
+        },
     }
 }
 

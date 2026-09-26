@@ -24,7 +24,7 @@ Context you would otherwise have to rediscover:
   `Op` - plain, serialisable data. If a fix tempts you to add a closure, a
   delete operation for a ledger/transaction/issuer, or a derived table in
   SQLite, it is the wrong fix. `docs/ARCHITECTURE.md` says why.
-- **Keep it green.** 80 tests and `cargo clippy --all-targets` clean. A GUI fix
+- **Keep it green.** 119 tests and `cargo clippy --all-targets` clean. A GUI fix
   that needs a new behaviour usually wants a case added to `smoke.rs`.
 
 If he reports nothing and wants to move on, the next work is the GUI gaps
@@ -59,6 +59,16 @@ drew without panicking; what no test can check is whether it *looks* right.
    *`fmt.rs`, `clip()`; callers in `views/transactions.rs`, `views/ledgers.rs`,
    `views/search.rs`.*
 
+6. **The cohort calendar.** Day cells are fixed at 118x72 with three entries
+   and a "+N more"; a busy month may want taller cells or a list instead.
+   *`views/cohorts.rs`, `calendar()` and `day_cell()`.*
+7. **The Views chart.** egui_plot 0.34, step lines, solid to today and dashed
+   after, month grid lines. Check the dashed tail joins the solid line at the
+   today marker, and that the legend (top left) does not sit on the data.
+   *`views/saved.rs`, `chart()`.*
+8. **The top-bar freshness label** ("through ... · issuers ...") may crowd
+   the "New" menu on a narrow window. *`app.rs`, `freshness()`.*
+
 Run it against a throwaway budget rather than a real one:
 
 ```sh
@@ -85,9 +95,21 @@ cargo run -p ledgit-gui -- /tmp/scratch.ledgit
   a `.ledgit` file association and an optional `PATH` entry for the CLI.
 - **Split entries**: transactions and issuers carry N legs summing to zero,
   stored in one flat posting arena. Paycheques are a single entry.
-- **Tests**: 80, covering the money and date edge cases, budget invariants,
-  recurrence arithmetic, GUI zoom, bucket combination, and the version-control
-  behaviours end to end.
+- **Cohorts**: groups of issuers as ops, like buckets. Rates per day, week,
+  month and year in exact arithmetic; a due-date calendar marking posted,
+  overdue, upcoming and paused. CLI `ledgit cohort ...`, GUI Cohorts screen.
+- **Saved views**: versioned specs over buckets, ledgers, issuers, cohorts and
+  transaction filters, with a lookback and a horizon. Balances across time,
+  flows per period, and a forward simulation of the issuers (all running ones,
+  or only the view's own for a what-if). CLI `ledgit view ...`, GUI Views
+  screen with a live chart; charts export as SVG or PNG (`ledgit-plot`) and
+  series as CSV.
+- **"Up to date through"** in the top bar and in `ledgit status`: the newest
+  transaction, and how far the issuers have been run.
+- **Tests**: 119, covering the money and date edge cases, budget invariants,
+  recurrence arithmetic, rate conversion, the view simulation, GUI zoom,
+  bucket combination, chart rendering, and the version-control behaviours end
+  to end.
 
 ## Next
 
@@ -97,14 +119,12 @@ The app covers every screen you asked for, but these are thin:
 
 1. **Editing.** You can create everything and pause issuers; you cannot yet edit
    a name or description from the GUI, though `EditLedger`, `EditTransaction`,
-   `EditIssuer` and `EditBucket` all exist in the core and work from the CLI.
-2. **No graphs.** "Lots of data reading and analysis power" currently means
-   tables and filters. `balance_as_of()` already gives a balance at any date, so
-   a balance-over-time chart per ledger or bucket is the obvious next feature -
-   and the one that makes the buckets actually useful.
-   Splits make a second one worth building: spending by ledger over a period is
-   now a meaningful question, because a paycheque's tax leg is a real posting
-   rather than a separate invented transaction.
+   `EditIssuer`, `EditBucket`, `EditCohort` and `EditView` all exist in the core.
+   (A view's *spec* is editable on the Views screen; its name is not.)
+2. **Graphs outside Views.** Saved views now chart balances across time and
+   simulate forward. A one-click "chart this ledger/bucket" from the Ledgers
+   and Buckets screens would reuse `view::evaluate` with a one-item spec.
+   Spending by ledger over a period is still a table-only question.
 3. **Keyboard.** No shortcuts, no quick-entry. For a tool you open daily to type
    three transactions, that matters more than it sounds.
 4. **Nobody has seen it run.** Every screen is exercised by headless egui
