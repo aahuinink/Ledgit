@@ -299,7 +299,7 @@ fn day_cell(
 ) {
     const SHOWN: usize = 3;
     let stroke = if is_today {
-        egui::Stroke::new(1.5, ui.visuals().selection.stroke.color)
+        egui::Stroke::new(1.5_f32, ui.visuals().selection.stroke.color)
     } else {
         ui.visuals().widgets.noninteractive.bg_stroke
     };

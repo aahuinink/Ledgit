@@ -404,15 +404,15 @@ fn chart(ui: &mut Ui, r: &ViewReport) {
             for (i, s) in r.series.iter().take(MAX_SERIES).enumerate() {
                 let colour = series_colour(i, dark);
                 let (past, ahead) = steps(&s.points, today);
-                plot.line(Line::new(s.label.clone(), past).color(colour).width(2.0));
+                plot.line(Line::new(s.label.clone(), past).color(colour).width(2.0_f32));
                 plot.line(
                     Line::new(s.label.clone(), ahead)
                         .color(colour)
-                        .width(2.0)
+                        .width(2.0_f32)
                         .style(LineStyle::Dashed { length: 8.0 }),
                 );
             }
-            plot.vline(VLine::new("today", today.0 as f64).color(fmt::dim()).width(1.0));
+            plot.vline(VLine::new("today", today.0 as f64).color(fmt::dim()).width(1.0_f32));
         });
     if r.series.len() > MAX_SERIES {
         ui.label(
@@ -474,7 +474,7 @@ fn balances(ui: &mut Ui, r: &ViewReport) {
                     ui.painter().hline(
                         rect.x_range(),
                         rect.center().y,
-                        egui::Stroke::new(3.0, colour),
+                        egui::Stroke::new(3.0_f32, colour),
                     );
                     ui.label(&s.label);
                 });
