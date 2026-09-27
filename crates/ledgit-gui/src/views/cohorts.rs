@@ -114,7 +114,7 @@ fn detail(ui: &mut Ui, s: &mut Session) {
         let mut cols =
             vec![text("issuer").max(280.0), text("schedule").max(240.0), figures("each")];
         cols.extend(Period::ALL.iter().map(|p| figures(format!("per {p}"))));
-        cols.push(text(""));
+        cols.push(text("").narrow());
         let n = breakdown.lines.len();
         Table::new(("cohort_rates", uid), cols).show(ui, n + 1, |row| {
             let Some(line) = breakdown.lines.get(row.index()) else {

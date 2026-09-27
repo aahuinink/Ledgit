@@ -10,6 +10,7 @@ use super::{empty, heading, num};
 use crate::app::Session;
 use crate::fmt;
 use crate::forms::FormKind;
+use crate::picker::{Pick, Picker};
 use crate::table::{figures, text, Height, Table};
 use egui::{Color32, ComboBox, RichText, Ui};
 use egui_plot::{GridInput, GridMark, HLine, Line, LineStyle, Plot, VLine};
@@ -56,7 +57,10 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
             for uid in &live {
                 let Some(ix) = s.budget().views.ix(*uid) else { continue };
                 let name = s.budget().views.name[ix.get()].clone();
-                if ui.selectable_label(s.selected_view == Some(*uid), name).clicked() {
+                let about = s.budget().views.description[ix.get()].clone();
+                let item = ui.selectable_label(s.selected_view == Some(*uid), name);
+                let item = if about.is_empty() { item } else { item.on_hover_text(about) };
+                if item.clicked() {
                     s.selected_view = Some(*uid);
                 }
             }
@@ -104,10 +108,7 @@ fn detail(ui: &mut Ui, s: &mut Session) {
             ui.label(RichText::new("edited, not staged").color(fmt::dim()));
         }
     });
-    let d = &l.views.description[ix.get()];
-    if !d.is_empty() {
-        ui.label(RichText::new(d).color(fmt::dim()));
-    }
+    description(ui, &mut s.view_description, uid, &l.views.description[ix.get()], &mut actions);
     ui.add_space(4.0);
 
     egui::CollapsingHeader::new("What this view looks at")
@@ -208,10 +209,69 @@ fn detail(ui: &mut Ui, s: &mut Session) {
     }
 }
 
+/// What the view is for, in your words - shown under its name, written or
+/// rewritten in place, and staged like any other edit.
+fn description(
+    ui: &mut Ui,
+    draft: &mut Option<(ViewUid, String)>,
+    uid: ViewUid,
+    stored: &str,
+    actions: &mut Vec<Action>,
+) {
+    let editing = draft.as_ref().is_some_and(|(v, _)| *v == uid);
+    if !editing {
+        ui.horizontal_wrapped(|ui| {
+            if !stored.is_empty() {
+                ui.label(RichText::new(stored).color(fmt::dim()));
+            }
+            let label = if stored.is_empty() { "add a description" } else { "edit description" };
+            if ui
+                .small_button(label)
+                .on_hover_text("Note what this view looks at and why")
+                .clicked()
+            {
+                *draft = Some((uid, stored.to_string()));
+                ui.data_mut(|d| {
+                    d.insert_temp(egui::Id::new(("view_description_focus", uid)), true)
+                });
+            }
+        });
+        return;
+    }
+    let Some((_, text)) = draft.as_mut() else { return };
+    let edit = ui.add(
+        egui::TextEdit::multiline(text)
+            .desired_rows(3)
+            .desired_width(ui.available_width().min(640.0))
+            .hint_text("What this view looks at, e.g. net worth with the car loan paid off early"),
+    );
+    // Ready to type the moment it opens - once, so clicking away still works.
+    let focus_id = egui::Id::new(("view_description_focus", uid));
+    if ui.data_mut(|d| d.remove_temp::<bool>(focus_id)).unwrap_or(false) {
+        edit.request_focus();
+    }
+    let text = text.trim().to_string();
+    ui.horizontal(|ui| {
+        let changed = text != stored;
+        if ui
+            .add_enabled(changed, egui::Button::new("Stage description"))
+            .on_hover_text("Committed with everything else on the Commit screen.")
+            .clicked()
+        {
+            let op = Op::EditView { uid, name: None, description: Some(text), spec: None };
+            actions.push(Action::Stage(Box::new(op), "a view's description"));
+            *draft = None;
+        }
+        if ui.button("Cancel").clicked() {
+            *draft = None;
+        }
+    });
+}
+
 // ------------------------------------------------------------------ editor
 
-/// Chips that wrap: as tall as they need, up to this, then they scroll.
-const CHIPS_MAX_HEIGHT: f32 = 110.0;
+/// Chips that wrap: as many lines as they need, up to this, then they scroll.
+const CHIP_LINES: f32 = 4.0;
 
 /// One labelled line of the editor: the label on the left, the control
 /// beside it, taking only the height it needs.
@@ -235,11 +295,14 @@ fn field(ui: &mut Ui, label: &str, hover: &str, add: impl FnOnce(&mut Ui)) {
     ui.add_space(4.0);
 }
 
-/// A wrapping run of chips that grows to fit them, then scrolls.
+/// A wrapping run of chips that grows to fit them, then scrolls - in whole
+/// lines, so the last one on show is never sliced through the middle.
 fn chips(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
+    let line = ui.spacing().interact_size.y;
+    let gap = ui.spacing().item_spacing.y;
     egui::ScrollArea::vertical()
         .id_salt(("view_chips", id))
-        .max_height(CHIPS_MAX_HEIGHT)
+        .max_height(CHIP_LINES * (line + gap) - gap)
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.horizontal_wrapped(add);
@@ -265,41 +328,7 @@ fn editor(ui: &mut Ui, l: &Budget, spec: &mut ViewSpec) {
         ui,
         "Ledgers",
         "Each gets its own line. With no buckets, the ledgers together are the view's total.",
-        |ui| {
-            // A long ledger list gets a filter; picked ones always show.
-            let filter_id = ui.id().with("ledger_filter");
-            let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
-            let order = LedgerTree::build(l).order;
-            if order.len() > 12 {
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut filter)
-                            .hint_text("filter ledgers...")
-                            .desired_width(200.0),
-                    );
-                    ui.label(
-                        RichText::new(format!("{} of {} picked", spec.ledgers.len(), order.len()))
-                            .small()
-                            .color(fmt::dim()),
-                    );
-                });
-                ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
-            }
-            let needle = filter.trim().to_lowercase();
-            chips(ui, "ledgers", |ui| {
-                // In tree order, so a subtree's ledgers sit together.
-                for a in order {
-                    let uid = l.ledgers.uid[a.get()];
-                    let name = &l.ledgers.name[a.get()];
-                    if needle.is_empty()
-                        || spec.ledgers.contains(&uid)
-                        || name.to_lowercase().contains(&needle)
-                    {
-                        toggle_chip(ui, &mut spec.ledgers, uid, name);
-                    }
-                }
-            });
-        },
+        |ui| ledger_picks(ui, l, spec),
     );
 
     field(ui, "Issuers", "Their flow is broken down per period.", |ui| {
@@ -400,6 +429,71 @@ fn editor(ui: &mut Ui, l: &Budget, spec: &mut ViewSpec) {
             .on_hover_text("What if these were all that happened?");
         });
     });
+}
+
+/// The view's own ledgers: the ones picked, as chips to click off, and the
+/// ledger tree picker to add more - one ledger, or everything under a path.
+/// Every ledger in the budget as a chip was a wall, cut off wherever the
+/// box happened to end.
+fn ledger_picks(ui: &mut Ui, l: &Budget, spec: &mut ViewSpec) {
+    // In tree order, so a subtree's ledgers sit together.
+    let picked: Vec<(LedgerUid, &str)> = LedgerTree::build(l)
+        .order
+        .into_iter()
+        .map(|a| (l.ledgers.uid[a.get()], l.ledgers.name[a.get()].as_str()))
+        .filter(|(uid, _)| spec.ledgers.contains(uid))
+        .collect();
+
+    ui.horizontal(|ui| {
+        let add = Picker::new("view_ledger_add", l)
+            .selected_text("add a ledger...")
+            .width(240.0)
+            .subtrees(true)
+            .hide(spec.ledgers.clone())
+            .show(ui);
+        match add {
+            Some(Pick::Ledger(uid)) => spec.ledgers.push(uid),
+            Some(Pick::Subtree(path)) => {
+                for a in LedgerTree::build(l).order {
+                    let uid = l.ledgers.uid[a.get()];
+                    let name = &l.ledgers.name[a.get()];
+                    let under = name.eq_ignore_ascii_case(&path)
+                        || ledgit_core::tree::is_under(name, &path);
+                    if under && !spec.ledgers.contains(&uid) {
+                        spec.ledgers.push(uid);
+                    }
+                }
+            }
+            None => {}
+        }
+        if picked.is_empty() {
+            ui.label(RichText::new("none picked").small().color(fmt::dim()));
+        } else {
+            ui.label(RichText::new(format!("{} picked", picked.len())).small().color(fmt::dim()));
+            if ui.small_button("clear").on_hover_text("Take every ledger off this view").clicked() {
+                spec.ledgers.clear();
+            }
+        }
+    });
+    if picked.is_empty() {
+        return;
+    }
+    let mut drop = None;
+    chips(ui, "ledgers", |ui| {
+        for (uid, name) in &picked {
+            let chip = RichText::new(format!("{}  \u{00D7}", fmt::clip(name, 40)));
+            if ui
+                .selectable_label(true, chip)
+                .on_hover_text(format!("{name}\nClick to take it off this view."))
+                .clicked()
+            {
+                drop = Some(*uid);
+            }
+        }
+    });
+    if let Some(uid) = drop {
+        spec.ledgers.retain(|x| *x != uid);
+    }
 }
 
 fn span_editor(ui: &mut Ui, id: &str, span: &mut Span) {

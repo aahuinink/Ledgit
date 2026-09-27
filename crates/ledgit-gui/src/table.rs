@@ -3,10 +3,13 @@
 //! One place decides how a table behaves, because a budget screen is mostly
 //! tables and they must all read the same way:
 //!
-//! * **Columns fit their content, up to a cap.** Past the cap a cell is cut
-//!   short with an ellipsis and shows the whole text on hover, so one long
-//!   ledger name cannot push the figures off the screen or spill into the
-//!   next column. Every column can be dragged wider.
+//! * **Columns fit their content, between a floor and a cap.** The floor is
+//!   [`MIN_CHARS`] characters, so no column is ever squeezed unreadable and
+//!   nothing needs dragging open to be read; a table wider than the window
+//!   scrolls sideways instead. Past the cap a cell is cut short with an
+//!   ellipsis and shows the whole text on hover, so one long ledger name
+//!   cannot push the figures off the screen or spill into the next column.
+//!   Every column can be dragged wider.
 //! * **Figures are right-aligned inside their own column**, not against the
 //!   window edge, so a balance sits under its header.
 //! * **Stripes run under every column**, the last one included.
@@ -21,28 +24,41 @@ use egui::{Align, Layout, RichText, Ui, WidgetText};
 use egui_extras::{Column, TableBuilder, TableRow};
 use std::hash::{Hash, Hasher};
 
+/// The narrowest a column gets, in characters: room for `-1,234,567.89`
+/// with space to spare, or a date, or most names.
+pub const MIN_CHARS: f32 = 16.0;
+
 /// One column: its header, which side its cells hug, and how wide it may grow
 /// before its cells are cut short.
 pub struct Col {
     head: String,
     right: bool,
     max: f32,
+    /// Exempt from the [`MIN_CHARS`] floor: a pin, a row number, a button.
+    narrow: bool,
 }
 
 /// A column of text, left-aligned.
 pub fn text(head: impl Into<String>) -> Col {
-    Col { head: head.into(), right: false, max: 340.0 }
+    Col { head: head.into(), right: false, max: 340.0, narrow: false }
 }
 
 /// A column of figures, right-aligned. Put figures in it with [`num`].
 pub fn figures(head: impl Into<String>) -> Col {
-    Col { head: head.into(), right: true, max: 240.0 }
+    Col { head: head.into(), right: true, max: 240.0, narrow: false }
 }
 
 impl Col {
     /// The widest this column fits itself to. Wider cells are cut short.
     pub fn max(mut self, width: f32) -> Col {
         self.max = width;
+        self
+    }
+
+    /// Only as wide as what is in it: for a pin star, a row number, a
+    /// button - not for anything that is read.
+    pub fn narrow(mut self) -> Col {
+        self.narrow = true;
         self
     }
 }
@@ -108,6 +124,7 @@ impl Table {
     pub fn show(self, ui: &mut Ui, rows: usize, mut add_row: impl FnMut(&mut TableRow<'_, '_>)) {
         let Table { id, cols, height, row_height, heights, fit } = self;
         let row_height = row_height.unwrap_or_else(|| row_height_for(ui));
+        let floor = min_column_width(ui);
         let n = heights.as_ref().map_or(rows, Vec::len);
 
         // Refit when the content changes shape. Columns the user has dragged
@@ -140,8 +157,13 @@ impl Table {
                     Height::Fill => tb.max_scroll_height(f32::INFINITY),
                 };
                 for c in &cols {
+                    let min = if c.narrow { 0.0 } else { floor };
                     tb = tb.column(
-                        Column::auto().at_most(c.max).clip(true).auto_size_this_frame(refit),
+                        Column::auto()
+                            .at_least(min)
+                            .at_most(c.max.max(min))
+                            .clip(true)
+                            .auto_size_this_frame(refit),
                     );
                 }
                 tb.header(row_height, |mut header| {
@@ -163,6 +185,14 @@ impl Table {
             },
         );
     }
+}
+
+/// [`MIN_CHARS`] characters of body text, in points - so it follows the
+/// text size rather than assuming one.
+pub fn min_column_width(ui: &Ui) -> f32 {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let digit = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+    (digit * MIN_CHARS).round()
 }
 
 /// The ordinary row: one line of text or a small button, with a little air.

@@ -61,7 +61,7 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
     Table::new(
         "ledgers",
         vec![
-            text(""),
+            text("").narrow(),
             text("ledger").max(420.0),
             text("normal"),
             text("opened"),
@@ -135,7 +135,7 @@ fn tree(ui: &mut Ui, s: &mut Session) {
     Table::new(
         "ledger_tree",
         vec![
-            text(""),
+            text("").narrow(),
             text("ledger").max(560.0),
             text("normal"),
             figures("postings"),

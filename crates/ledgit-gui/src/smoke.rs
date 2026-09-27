@@ -943,9 +943,9 @@ fn a_long_name_does_not_bleed_into_the_next_column() {
     assert!(long.1.right() < normal.1.left(), "{:?} runs into {:?}", long.1, normal.1);
 }
 
-/// The Views editor's chip rows fit what they hold, then scroll: a hundred
-/// ledgers must not push everything below them off the page, and a few
-/// buckets must not leave a gap.
+/// The Views editor's sections fit what they hold, then scroll: a hundred
+/// picked ledgers must not push everything below them off the page, and a
+/// few buckets must not leave a gap.
 #[test]
 fn the_view_editor_sections_fit_then_scroll() {
     let mut s = crowded(100);
@@ -953,9 +953,111 @@ fn the_view_editor_sections_fit_then_scroll() {
         egui::CentralPanel::default().show(ctx, |ui| views::saved::show(ui, &mut s));
     });
     let y = |t: &str| centre_of(&texts, t).y;
-    let row = 18.0;
-    assert!(y("Ledgers") - y("Buckets") < 3.0 * row + 12.0, "gap after a short bucket list");
+    let short = y("Issuers") - y("Ledgers");
+    assert!(short < 40.0, "with none picked, the ledger section is one line: {short}");
+    assert!(y("Ledgers") - y("Buckets") < 3.0 * 22.0, "gap after a short bucket list");
+
+    let (uid, mut spec) = s.view_draft.clone().unwrap();
+    spec.ledgers = s.budget().ledgers.uid.clone();
+    s.view_draft = Some((uid, spec));
+    let texts = painted_text(egui::vec2(1400.0, 900.0), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| views::saved::show(ui, &mut s));
+    });
+    let y = |t: &str| centre_of(&texts, t).y;
     let tall = y("Issuers") - y("Ledgers");
-    assert!(tall < 160.0, "the ledger chips run {tall} tall instead of scrolling");
-    assert!(tall > 60.0, "the ledger chips show more than a sliver");
+    // The picker line, then four lines of chips.
+    assert!(tall < 22.0 * 6.0, "the ledger chips run {tall} tall instead of scrolling");
+    assert!(tall > 22.0 * 3.0, "the ledger chips show more than a sliver");
+}
+
+/// Ledgers join a view from the tree picker - one, or a whole subtree - and
+/// leave it by clicking their chip.
+#[test]
+fn a_view_takes_ledgers_from_the_picker_and_drops_them_by_chip() {
+    let s = std::cell::RefCell::new(session());
+    let w = Window::new(1400.0, 1000.0);
+    let mut draw = |ctx: &egui::Context| {
+        egui::CentralPanel::default().show(ctx, |ui| views::saved::show(ui, &mut s.borrow_mut()));
+    };
+    w.settle(&mut draw);
+    {
+        let mut s = s.borrow_mut();
+        let (uid, mut spec) = s.view_draft.clone().unwrap();
+        spec.ledgers.clear();
+        s.view_draft = Some((uid, spec));
+    }
+    let texts = w.settle(&mut draw);
+    assert!(texts.iter().any(|(t, _)| t == "none picked"));
+    let texts = w.click(centre_of(&texts, "add a ledger..."), &mut draw);
+    let texts = w.click(centre_of(&texts, "all 3 under"), &mut draw);
+    let picked = |s: &Session| s.view_draft.as_ref().unwrap().1.ledgers.len();
+    assert_eq!(picked(&s.borrow()), 3, "the whole Wedding subtree joined");
+    assert!(texts.iter().any(|(t, _)| t == "3 picked"), "{texts:?}");
+
+    let chip = texts
+        .iter()
+        .find(|(t, _)| t.starts_with("Wedding:Tuxedo"))
+        .map(|(_, r)| r.center())
+        .expect("a chip for each picked ledger");
+    w.click(chip, &mut draw);
+    assert_eq!(picked(&s.borrow()), 2, "clicking a chip takes it off");
+    assert!(
+        s.borrow().repo.staged().iter().all(|op| !matches!(op, Op::EditView { .. })),
+        "picking edits the draft, not the budget"
+    );
+}
+
+/// A view's description is written in place and staged like any edit.
+#[test]
+fn a_view_description_is_written_and_staged() {
+    let s = std::cell::RefCell::new(session());
+    let w = Window::new(1400.0, 1000.0);
+    let mut draw = |ctx: &egui::Context| {
+        egui::CentralPanel::default().show(ctx, |ui| views::saved::show(ui, &mut s.borrow_mut()));
+    };
+    let texts = w.settle(&mut draw);
+    w.click(centre_of(&texts, "add a description"), &mut draw);
+    w.pass(vec![egui::Event::Text("Net worth, car paid early".into())], &mut draw);
+    let texts = w.settle(&mut draw);
+    w.click(centre_of(&texts, "Stage description"), &mut draw);
+
+    let s = s.borrow();
+    let uid = s.selected_view.unwrap();
+    let l = s.budget();
+    assert_eq!(l.views.description[l.views.ix(uid).unwrap().get()], "Net worth, car paid early");
+    assert!(matches!(
+        s.repo.staged().last(),
+        Some(Op::EditView { description: Some(_), spec: None, name: None, .. })
+    ));
+    assert!(s.view_description.is_none(), "the editor closes once staged");
+}
+
+/// No column is squeezed below sixteen characters; a table too wide for the
+/// window scrolls sideways instead of crushing its columns.
+#[test]
+fn table_columns_never_go_below_sixteen_characters() {
+    let mut s = session();
+    let floor = std::cell::Cell::new(0.0);
+    let texts = painted_text(egui::vec2(900.0, 1600.0), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            floor.set(crate::table::min_column_width(ui));
+            views::saved::show(ui, &mut s)
+        });
+    });
+    let floor = floor.get();
+    assert!(floor > 80.0, "sixteen characters is a real width: {floor}");
+    let low = centre_of(&texts, "lowest ahead").y;
+    let mut heads: Vec<f32> = texts
+        .iter()
+        .filter(|(t, r)| {
+            ["today", "at end", "change", "lowest ahead"].contains(&t.as_str())
+                && (r.center().y - low).abs() < 2.0
+        })
+        .map(|(_, r)| r.right())
+        .collect();
+    heads.sort_by(f32::total_cmp);
+    assert_eq!(heads.len(), 4, "the balances headers: {texts:?}");
+    for pair in heads.windows(2) {
+        assert!(pair[1] - pair[0] >= floor, "a column {} wide", pair[1] - pair[0]);
+    }
 }

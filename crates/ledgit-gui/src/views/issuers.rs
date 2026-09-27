@@ -46,7 +46,7 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
             text("schedule").max(260.0),
             text("moves").max(380.0),
             text("next due"),
-            text(""),
+            text("").narrow(),
             figures("amount"),
         ],
     )

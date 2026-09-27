@@ -127,40 +127,41 @@ fn staged_list(ui: &mut Ui, s: &mut Session) {
     let staged = s.repo.staged();
     // Its own scroll past a screenful, so a long issuer run does not bury
     // the report and the commit box under it.
-    Table::new("staged", vec![text(""), text("change").max(640.0), text(""), text("")])
-        .height(Height::Max(360.0))
-        .row_heights(heights)
-        .fit_to(broken.len())
-        .show(ui, 0, |row| {
-            let i = row.index();
-            let op = &staged[i];
-            row.col(|ui| {
-                ui.label(RichText::new(format!("{}.", i + 1)).color(fmt::dim()).monospace());
-            });
-            row.col(|ui| match broken.iter().find(|b| b.index == i) {
-                Some(b) => {
-                    ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new(format!("\u{26A0} {}", op.summary())).color(fmt::bad()),
-                        );
-                        ui.label(RichText::new(&b.reason).small().color(fmt::bad()));
-                    });
-                }
-                None => {
-                    ui.label(op.summary());
-                }
-            });
-            row.col(|ui| {
-                if editable(op) && ui.small_button("edit").clicked() {
-                    edit = Some(i);
-                }
-            });
-            row.col(|ui| {
-                if ui.small_button("drop").clicked() {
-                    drop = Some(i);
-                }
-            });
+    Table::new(
+        "staged",
+        vec![text("").narrow(), text("change").max(640.0), text("").narrow(), text("").narrow()],
+    )
+    .height(Height::Max(360.0))
+    .row_heights(heights)
+    .fit_to(broken.len())
+    .show(ui, 0, |row| {
+        let i = row.index();
+        let op = &staged[i];
+        row.col(|ui| {
+            ui.label(RichText::new(format!("{}.", i + 1)).color(fmt::dim()).monospace());
         });
+        row.col(|ui| match broken.iter().find(|b| b.index == i) {
+            Some(b) => {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(format!("\u{26A0} {}", op.summary())).color(fmt::bad()));
+                    ui.label(RichText::new(&b.reason).small().color(fmt::bad()));
+                });
+            }
+            None => {
+                ui.label(op.summary());
+            }
+        });
+        row.col(|ui| {
+            if editable(op) && ui.small_button("edit").clicked() {
+                edit = Some(i);
+            }
+        });
+        row.col(|ui| {
+            if ui.small_button("drop").clicked() {
+                drop = Some(i);
+            }
+        });
+    });
     if let Some(i) = edit {
         let op = s.repo.staged()[i].clone();
         s.forms.edit_staged(i, &op);

@@ -53,31 +53,34 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
     let mut edit: Option<usize> = None;
     let mut delete: Option<String> = None;
     let v = &s.budget().variables;
-    Table::new("variables", vec![text("name"), text("value").max(420.0), text("kind"), text("")])
-        .height(Height::Fill)
-        .show(ui, v.len(), |row| {
-            let i = row.index();
-            row.col(|ui| {
-                ui.label(RichText::new(&v.name[i]).monospace().strong());
-            });
-            row.col(|ui| {
-                ui.label(RichText::new(v.value[i].as_str()).monospace());
-            });
-            row.col(|ui| {
-                ui.label(
-                    RichText::new(if v.value[i].is_number() { "number" } else { "text" })
-                        .color(fmt::dim()),
-                );
-            });
-            row.col(|ui| {
-                if ui.small_button("edit").clicked() {
-                    edit = Some(i);
-                }
-                if ui.small_button("delete").clicked() {
-                    delete = Some(v.name[i].clone());
-                }
-            });
+    Table::new(
+        "variables",
+        vec![text("name"), text("value").max(420.0), text("kind"), text("").narrow()],
+    )
+    .height(Height::Fill)
+    .show(ui, v.len(), |row| {
+        let i = row.index();
+        row.col(|ui| {
+            ui.label(RichText::new(&v.name[i]).monospace().strong());
         });
+        row.col(|ui| {
+            ui.label(RichText::new(v.value[i].as_str()).monospace());
+        });
+        row.col(|ui| {
+            ui.label(
+                RichText::new(if v.value[i].is_number() { "number" } else { "text" })
+                    .color(fmt::dim()),
+            );
+        });
+        row.col(|ui| {
+            if ui.small_button("edit").clicked() {
+                edit = Some(i);
+            }
+            if ui.small_button("delete").clicked() {
+                delete = Some(v.name[i].clone());
+            }
+        });
+    });
 
     if let Some(i) = edit {
         let v = &s.budget().variables;

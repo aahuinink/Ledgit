@@ -108,6 +108,8 @@ pub struct Session {
     /// this, so every pick redraws at once; nothing is staged until "Stage
     /// changes", which keeps an afternoon of fiddling out of the op log.
     pub view_draft: Option<(ViewUid, ViewSpec)>,
+    /// A view's description as it is being written, until it is staged.
+    pub view_description: Option<(ViewUid, String)>,
     /// "Simulate until" override for the Views screen; empty means the
     /// view's own horizon.
     pub view_until: String,
@@ -186,6 +188,7 @@ impl Session {
             calendar_month: Period::Month.start_of(Date::today_utc()),
             calendar_list: false,
             view_draft: None,
+            view_description: None,
             view_until: String::new(),
             view_compare: None,
             compare_cache: None,

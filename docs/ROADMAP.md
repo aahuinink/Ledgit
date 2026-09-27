@@ -30,7 +30,7 @@ Context you would otherwise have to rediscover:
   `Op` - plain, serialisable data. If a fix tempts you to add a closure, a
   delete operation for a ledger/transaction/issuer, or a derived table in
   SQLite, it is the wrong fix. `docs/ARCHITECTURE.md` says why.
-- **Keep it green.** 186 tests and `cargo clippy --all-targets` clean, and
+- **Keep it green.** 189 tests and `cargo clippy --all-targets` clean, and
   `cargo fmt` applied. A GUI fix that needs a new behaviour usually wants a
   case added to `smoke.rs`.
 
@@ -67,10 +67,12 @@ first run's feedback is summarised in italics.
    900x560 to 720x480. Buckets, Cohorts and Views use the same draggable,
    scrolling list on the left.
 5. **The Views editor** (*too much space under Buckets; ledger chips bleeding
-   into the rows below*). The editor is no longer a Grid: each section is as
-   tall as its chips, up to about five lines, then scrolls. More than 12
-   ledgers adds a filter box above the ledger chips (picked ones always
-   show).
+   into the rows below*; then, second pass: *the ledger section cuts off
+   strangely*). The editor is no longer a Grid. Ledgers are no longer a chip
+   for every ledger in the budget: the view's own ledgers show as chips
+   (click one to take it off, "clear" for all), and "add a ledger..." is the
+   searchable tree picker, which also adds a whole subtree. Chip sections
+   grow to four whole lines, then scroll - never cut through a line.
 6. **Busy calendar months.** Cohorts has Month / List beside the month
    arrows. List is one line per payment, the date shown once per day, with
    status. A month with a day over three payments says so under the grid,
@@ -85,6 +87,13 @@ first run's feedback is summarised in italics.
    clicks the box, types "tux" and picks the match.
 9. **Ledgers tree far-right column** - same fix as 1.
 10. **"Fresh through ..."** in the top bar, and in `ledgit status`.
+13. **No squashed columns** (*the Views "Balances" table was crushed*). Every
+    table column is at least 16 characters wide (`table::MIN_CHARS`), except
+    pins, row numbers and buttons; a table wider than the window scrolls
+    sideways instead.
+14. **View descriptions.** Under a view's name: "add a description" / "edit
+    description" writes it in place and stages it. The list of views shows
+    it on hover.
 
 New:
 
@@ -256,7 +265,7 @@ broken staged entry.
   up ledgers created there later), and subtree renames that carry buckets
   along. CLI `ledger tree`, `ledger move`, `bucket include-tree`; GUI tree
   view and a searchable tree picker.
-- **Tests**: 186, covering the money and date edge cases, budget invariants,
+- **Tests**: 189, covering the money and date edge cases, budget invariants,
   recurrence arithmetic, rate conversion, the view simulation, GUI zoom,
   bucket combination, chart rendering, and the version-control behaviours end
   to end.
