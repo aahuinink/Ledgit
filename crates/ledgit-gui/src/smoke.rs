@@ -356,3 +356,30 @@ fn a_subtree_bucket_draws_and_grows() {
     assert_eq!(count(&s), before + 1);
     draw(&mut s, Screen::Buckets);
 }
+
+/// The top bar carries the brand mark and the freshness label; draw it in
+/// both themes, since each picks its own copy of the artwork.
+#[test]
+fn the_top_bar_draws_the_mark_in_both_themes() {
+    let mut s = session();
+    for dark in [false, true] {
+        egui::__run_test_ctx(|ctx| {
+            ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
+            let mut brand = crate::brand::Brand::load(ctx);
+            brand.sync_window_icon(ctx);
+            crate::app::top_bar(ctx, &mut s, &brand);
+        });
+    }
+}
+
+/// Start-up pays for rasterising the artwork once; keep an eye on what that
+/// costs. Run with `cargo test --release -p ledgit-gui -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn how_long_the_artwork_takes_to_load() {
+    let ctx = egui::Context::default();
+    let t = std::time::Instant::now();
+    let _ = crate::brand::Brand::load(&ctx);
+    let _ = crate::brand::window_icon(true);
+    println!("brand artwork loaded in {:?}", t.elapsed());
+}

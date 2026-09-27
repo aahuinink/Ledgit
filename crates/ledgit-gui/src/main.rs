@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod brand;
 mod fmt;
 mod forms;
 mod picker;
@@ -25,7 +26,10 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("Ledgit")
             .with_inner_size([1180.0, 760.0])
-            .with_min_inner_size([900.0, 560.0]),
+            .with_min_inner_size([900.0, 560.0])
+            // Replaced on the first frame by the copy matching the system
+            // theme; this is only what shows while the window opens.
+            .with_icon(brand::window_icon(false)),
         ..Default::default()
     };
 

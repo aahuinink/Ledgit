@@ -6,6 +6,7 @@
 //! dashboard, the register and the bucket totals the instant it is made, and
 //! the Commit screen is the only place that talks about what is permanent.
 
+use crate::brand::Brand;
 use crate::fmt;
 use crate::forms::{FormKind, Forms, Outcome};
 use crate::views;
@@ -198,6 +199,7 @@ pub struct LedgitApp {
     /// not a fact about money, so it lives in eframe's storage.
     zoom: f32,
     startup_error: Option<String>,
+    brand: Brand,
 }
 
 impl LedgitApp {
@@ -219,8 +221,17 @@ impl LedgitApp {
         // than trust it, or one bad value leaves the app unreadable on start.
         let zoom = clamp_zoom(zoom);
         cc.egui_ctx.set_zoom_factor(zoom);
-        let mut app =
-            LedgitApp { session: None, author, pins, combos, recent, zoom, startup_error: None };
+        let brand = Brand::load(&cc.egui_ctx);
+        let mut app = LedgitApp {
+            session: None,
+            author,
+            pins,
+            combos,
+            recent,
+            zoom,
+            startup_error: None,
+            brand,
+        };
         if let Some(p) = initial {
             app.open_path(p);
         }
@@ -268,6 +279,7 @@ impl LedgitApp {
 impl eframe::App for LedgitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_zoom(ctx);
+        self.brand.sync_window_icon(ctx);
         // Read it back rather than tracking it ourselves: this also picks up
         // Ctrl+Plus/Minus/0, which egui handles on its own.
         self.zoom = ctx.zoom_factor();
@@ -291,7 +303,12 @@ impl LedgitApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(48.0);
             ui.vertical_centered(|ui| {
-                ui.heading("Ledgit");
+                let logo = self.brand.logo(ui);
+                let width = 300.0;
+                let height = width * logo.size()[1] as f32 / logo.size()[0] as f32;
+                ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(width, height)))
+                    .on_hover_text("Ledgit");
+                ui.add_space(6.0);
                 ui.label(
                     RichText::new("A budget you can commit, branch and revert.").color(fmt::dim()),
                 );
@@ -338,7 +355,7 @@ impl LedgitApp {
         // borrow checker over `self`.
         let mut session = self.session.take().expect("workspace only runs with a session");
 
-        top_bar(ctx, &mut session);
+        top_bar(ctx, &mut session, &self.brand);
         nav_panel(ctx, &mut session);
         status_bar(ctx, &mut session);
 
@@ -413,7 +430,7 @@ fn apply_zoom(ctx: &egui::Context) {
     }
 }
 
-fn top_bar(ctx: &egui::Context, s: &mut Session) {
+pub(crate) fn top_bar(ctx: &egui::Context, s: &mut Session, brand: &Brand) {
     egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -422,6 +439,7 @@ fn top_bar(ctx: &egui::Context, s: &mut Session) {
                 .file_stem()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "budget".into());
+            ui.add(egui::Image::new(brand.mark(ui)).fit_to_exact_size(egui::vec2(26.0, 26.0)));
             ui.heading(name);
             ui.label(RichText::new(format!("on {}", s.repo.head())).color(fmt::dim()));
             freshness(ui, s.budget());

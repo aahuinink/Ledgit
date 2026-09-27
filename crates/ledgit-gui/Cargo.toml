@@ -17,5 +17,6 @@ eframe = { workspace = true }
 egui = { workspace = true }
 rfd = { workspace = true }
 egui_plot = { workspace = true }
+resvg = { workspace = true }
 ledgit-plot = { workspace = true }
 serde = { workspace = true }

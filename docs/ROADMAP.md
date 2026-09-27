@@ -75,6 +75,12 @@ drew without panicking; what no test can check is whether it *looks* right.
    `tree()`.*
 10. **The top-bar freshness label** ("through ... · issuers ...") may crowd
    the "New" menu on a narrow window. *`app.rs`, `freshness()`.*
+11. **The logo and icon.** The welcome screen shows the logo (300px wide), the
+   top bar a 26px mark, each picking the `_dark` copy under the dark theme.
+   The window icon follows the *system* theme, not the app's, since the
+   taskbar is painted by Windows. Check the taskbar icon under both Windows
+   themes, and that switching the system theme swaps it while running.
+   *`brand.rs`; artwork in `assets/`.*
 
 Run it against a throwaway budget rather than a real one:
 

@@ -1978,6 +1978,7 @@ dependencies = [
  "ledgit-core",
  "ledgit-plot",
  "ledgit-sqlite",
+ "resvg",
  "rfd",
  "serde",
 ]
