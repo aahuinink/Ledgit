@@ -365,8 +365,7 @@ fn the_top_bar_draws_the_mark_in_both_themes() {
     for dark in [false, true] {
         egui::__run_test_ctx(|ctx| {
             ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
-            let mut brand = crate::brand::Brand::load(ctx);
-            brand.sync_window_icon(ctx);
+            let brand = crate::brand::Brand::load(ctx);
             crate::app::top_bar(ctx, &mut s, &brand);
         });
     }
@@ -380,6 +379,6 @@ fn how_long_the_artwork_takes_to_load() {
     let ctx = egui::Context::default();
     let t = std::time::Instant::now();
     let _ = crate::brand::Brand::load(&ctx);
-    let _ = crate::brand::window_icon(true);
+    let _ = crate::brand::window_icon();
     println!("brand artwork loaded in {:?}", t.elapsed());
 }

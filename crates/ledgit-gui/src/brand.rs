@@ -1,7 +1,10 @@
 //! The logo and the app icon, drawn from the SVGs in `assets/`.
 //!
 //! Each comes in two copies: the original, black on a light surface, and a
-//! `_dark` copy with its colours inverted for a dark one. All four files are
+//! `_dark` copy with its colours inverted for a dark one. Inside the app the
+//! copy follows the app's theme. The window icon does not: it is whichever
+//! file `build.rs` chose for the exe, so the title bar, the taskbar and the
+//! pinned shortcut always show the same thing. All four files are
 //! produced from the Canva export by `assets/rebuild.py`; edit the design
 //! there, not by hand. All four are
 //! compiled into the binary and rasterised once at start-up, so the SVGs stay
@@ -9,12 +12,13 @@
 //! when the design changes.
 
 use resvg::{tiny_skia, usvg};
-use std::sync::Arc;
 
 const ICON: &[u8] = include_bytes!("../../../assets/Icon.svg");
 const ICON_DARK: &[u8] = include_bytes!("../../../assets/Icon_dark.svg");
 const LOGO: &[u8] = include_bytes!("../../../assets/Ledgit_logo.svg");
 const LOGO_DARK: &[u8] = include_bytes!("../../../assets/Ledgit_logo_dark.svg");
+/// The app icon `build.rs` embeds in the exe; see `ICON` there to change it.
+const APP_ICON: &[u8] = include_bytes!(env!("LEDGIT_APP_ICON"));
 
 /// An RGBA image, straight (not premultiplied) alpha.
 pub struct Raster {
@@ -23,9 +27,15 @@ pub struct Raster {
     pub rgba: Vec<u8>,
 }
 
-/// The window and taskbar icon for a light or dark desktop.
-pub fn window_icon(dark: bool) -> egui::IconData {
-    let r = icon(256, dark);
+/// The window and taskbar icon: the same artwork as the exe's.
+///
+/// It deliberately ignores the theme. egui reports Windows' *app* mode, but
+/// the taskbar follows the separate *Windows* mode; with light apps on a dark
+/// taskbar, following the app mode put the light icon on the dark taskbar.
+pub fn window_icon() -> egui::IconData {
+    let mut pixmap = tiny_skia::Pixmap::new(256, 256).expect("non-zero size");
+    draw(&mut pixmap, APP_ICON);
+    let r = into_raster(&pixmap);
     egui::IconData { rgba: r.rgba, width: r.width, height: r.height }
 }
 
@@ -55,8 +65,6 @@ fn texture(ctx: &egui::Context, name: &str, r: &Raster) -> egui::TextureHandle {
 pub struct Brand {
     logo: [egui::TextureHandle; 2],
     mark: [egui::TextureHandle; 2],
-    /// The system theme the window icon was last set for.
-    icon_dark: Option<bool>,
 }
 
 impl Brand {
@@ -65,7 +73,6 @@ impl Brand {
         Brand {
             logo: [false, true].map(|d| texture(ctx, &format!("logo_{d}"), &logo(640, d))),
             mark: [false, true].map(|d| texture(ctx, &format!("mark_{d}"), &icon(96, d))),
-            icon_dark: None,
         }
     }
 
@@ -77,19 +84,6 @@ impl Brand {
     /// The icon, for small places like the top bar.
     pub fn mark(&self, ui: &egui::Ui) -> &egui::TextureHandle {
         &self.mark[ui.visuals().dark_mode as usize]
-    }
-
-    /// Keep the window icon matched to the desktop's theme.
-    ///
-    /// It follows the *system* theme rather than the app's, because the
-    /// taskbar and title bar it sits on are painted by the system. Cheap to
-    /// call every frame: it only sends a command when the theme changes.
-    pub fn sync_window_icon(&mut self, ctx: &egui::Context) {
-        let dark = ctx.system_theme().unwrap_or(ctx.theme()) == egui::Theme::Dark;
-        if self.icon_dark != Some(dark) {
-            self.icon_dark = Some(dark);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(window_icon(dark)))));
-        }
     }
 }
 
@@ -160,10 +154,10 @@ mod tests {
 
     #[test]
     fn every_bundled_svg_renders() {
+        let i = window_icon();
+        assert_eq!((i.width, i.height), (256, 256));
+        assert_eq!(i.rgba[3], 0, "the icon's background is transparent");
         for dark in [false, true] {
-            let i = window_icon(dark);
-            assert_eq!((i.width, i.height), (256, 256));
-            assert_eq!(i.rgba[3], 0, "the icon's background is transparent");
             let l = logo(640, dark);
             assert!(
                 l.width > l.height,
@@ -193,7 +187,7 @@ mod tests {
     /// the right size for every entry.
     #[test]
     fn the_exe_icon_is_a_valid_ico() {
-        let data = ico::ico(ICON);
+        let data = ico::ico(APP_ICON);
         let u16_at = |i: usize| u16::from_le_bytes([data[i], data[i + 1]]) as usize;
         let u32_at = |i: usize| u32::from_le_bytes(data[i..i + 4].try_into().unwrap()) as usize;
         assert_eq!((u16_at(0), u16_at(2), u16_at(4)), (0, 1, ico::SIZES.len()));
@@ -213,4 +207,13 @@ mod tests {
         let last = 6 + 16 * (ico::SIZES.len() - 1);
         assert_eq!(u32_at(last + 12) + u32_at(last + 8), data.len(), "no trailing bytes");
     }
+}
+
+/// The window icon is the exe's icon, not a copy picked by theme.
+#[cfg(test)]
+#[test]
+fn the_window_icon_is_the_exe_icon() {
+    let chosen = std::fs::read(env!("LEDGIT_APP_ICON")).unwrap();
+    assert_eq!(APP_ICON, chosen.as_slice());
+    assert!(APP_ICON == ICON || APP_ICON == ICON_DARK, "build.rs names one of the two copies");
 }

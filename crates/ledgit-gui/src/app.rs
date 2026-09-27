@@ -279,7 +279,6 @@ impl LedgitApp {
 impl eframe::App for LedgitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_zoom(ctx);
-        self.brand.sync_window_icon(ctx);
         // Read it back rather than tracking it ourselves: this also picks up
         // Ctrl+Plus/Minus/0, which egui handles on its own.
         self.zoom = ctx.zoom_factor();

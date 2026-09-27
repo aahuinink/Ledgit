@@ -77,11 +77,14 @@ drew without panicking; what no test can check is whether it *looks* right.
    the "New" menu on a narrow window. *`app.rs`, `freshness()`.*
 11. **The logo and icon.** The welcome screen shows the logo (300px wide), the
    top bar a 26px mark, each picking the `_dark` copy under the dark theme.
-   The window icon follows the *system* theme, not the app's, since the
-   taskbar is painted by Windows. Check the taskbar icon under both Windows
-   themes, and that switching the system theme swaps it while running.
+   The window icon (title bar, taskbar while running) is *not* themed: it is
+   the exe's icon, whichever file `ICON` in `build.rs` names. An earlier
+   version followed the theme egui reports, which is Windows' *app* mode, not
+   the *Windows* mode the taskbar uses - so light apps on a dark taskbar got
+   the light icon. Check the running app's taskbar and title-bar icon is the
+   same dark one as the pinned/Start-menu shortcut.
    *`brand.rs`; artwork in `assets/`.*
-12. **The exe icon.** `crates/ledgit-gui/build.rs` renders `assets/Icon.svg`
+12. **The exe icon.** `crates/ledgit-gui/build.rs` renders `assets/Icon_dark.svg`
    into a 7-size `.ico` and embeds it with `winresource`, which needs `rc.exe`
    from the Windows SDK (it comes with the VS Build Tools that MSVC Rust
    uses). It has never run on Windows. Check, after `cargo build --release`:
@@ -96,11 +99,14 @@ drew without panicking; what no test can check is whether it *looks* right.
    - that the hollow rings still read at 16-32px (taskbar, title bar, list
      views): at those sizes each ring is about one pixel wide, so the mark is
      lighter than it was with filled circles;
-   - which copy reads better on your Explorer and taskbar. The exe can carry
-     only one; it is the original (black strokes). If the dark copy suits
-     better, change `ICON` in `build.rs` to `Icon_dark.svg`.
-   Explorer caches icons hard: if an old one sticks, rename the exe or run
-   `ie4uinit.exe -show`.
+   - that it reads in Explorer's light views too: Windows uses one icon
+     everywhere, and it is now the dark copy (light strokes). `ICON` in
+     `build.rs` is the one place to switch back; the running app follows.
+   Explorer caches icons per file path, so reinstalling over an old version
+   can keep showing the old icon. If it sticks, run `ie4uinit.exe -show`, or
+   uninstall, then delete `%LOCALAPPDATA%\IconCache.db` and the
+   `iconcache_*.db` files in `%LOCALAPPDATA%\Microsoft\Windows\Explorer`
+   and sign out and back in.
 
 Run it against a throwaway budget rather than a real one:
 

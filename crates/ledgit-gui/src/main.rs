@@ -27,9 +27,8 @@ fn main() -> eframe::Result {
             .with_title("Ledgit")
             .with_inner_size([1180.0, 760.0])
             .with_min_inner_size([900.0, 560.0])
-            // Replaced on the first frame by the copy matching the system
-            // theme; this is only what shows while the window opens.
-            .with_icon(brand::window_icon(false)),
+            // The same artwork as the exe's icon; `ICON` in build.rs picks it.
+            .with_icon(brand::window_icon()),
         ..Default::default()
     };
 

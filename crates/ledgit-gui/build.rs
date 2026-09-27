@@ -1,9 +1,10 @@
-//! Embed the app icon in `ledgit-gui.exe`.
+//! Choose the app icon, and embed it in `ledgit-gui.exe`.
 //!
-//! The window icon is set at run time (`src/brand.rs`), but Explorer, the
-//! Start menu, the installer's shortcuts and the `.ledgit` file association
-//! all read the icon *resource* inside the exe, which only a build step can
-//! put there.
+//! Explorer, the Start menu, the installer's shortcuts and the `.ledgit` file
+//! association read the icon *resource* inside the exe, which only a build
+//! step can put there. The running window's icon (title bar, taskbar) is set
+//! by the app from the same file, which this script names for it through the
+//! `LEDGIT_APP_ICON` environment variable - so the two can never disagree.
 //!
 //! Only when building for Windows. If the resource compiler cannot be found
 //! (no Windows SDK, or a cross build without `windres`), the build warns and
@@ -15,10 +16,11 @@ mod ico;
 
 use std::path::PathBuf;
 
-/// Which artwork the exe carries. Unlike the window icon it cannot follow
-/// the system theme - Windows reads one icon for Explorer, the Start menu and
-/// the taskbar alike - so this picks one. The original reads on light
-/// surfaces; `Icon_dark.svg` on dark ones.
+/// The app icon, everywhere Windows shows one: Explorer, the Start menu, the
+/// taskbar and the title bar. Windows reads a single icon for all of them, so
+/// this picks one. `Icon.svg` reads on light surfaces, `Icon_dark.svg` on dark.
+///
+/// This is the only place to change it; the running app follows.
 const ICON: &str = "../../assets/Icon_dark.svg";
 
 fn main() {
@@ -26,11 +28,19 @@ fn main() {
     println!("cargo:rerun-if-changed=build/ico.rs");
     println!("cargo:rerun-if-changed={ICON}");
 
+    // For every target: the app includes this file as its window icon.
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets it"));
+    // Joined rather than canonicalised: on Windows `canonicalize` returns a
+    // `\\?\` path, which is more than `include_bytes!` needs to be trusted with.
+    let icon = manifest.join(ICON);
+    assert!(icon.exists(), "{} is not in assets/", icon.display());
+    println!("cargo:rustc-env=LEDGIT_APP_ICON={}", icon.display());
+
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
 
-    let svg = std::fs::read(ICON).expect("the icon SVG is in assets/");
+    let svg = std::fs::read(&icon).expect("the icon SVG is readable");
     let out =
         PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR")).join("ledgit.ico");
     std::fs::write(&out, ico::ico(&svg)).expect("OUT_DIR is writable");
