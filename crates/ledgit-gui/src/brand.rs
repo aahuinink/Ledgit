@@ -1,7 +1,9 @@
 //! The logo and the app icon, drawn from the SVGs in `assets/`.
 //!
 //! Each comes in two copies: the original, black on a light surface, and a
-//! `_dark` copy with its colours inverted for a dark one. All four are
+//! `_dark` copy with its colours inverted for a dark one. All four files are
+//! produced from the Canva export by `assets/rebuild.py`; edit the design
+//! there, not by hand. All four are
 //! compiled into the binary and rasterised once at start-up, so the SVGs stay
 //! the only copy of the artwork - there is no exported PNG to fall out of date
 //! when the design changes.
