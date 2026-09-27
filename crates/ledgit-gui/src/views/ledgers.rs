@@ -292,7 +292,7 @@ pub fn register(ui: &mut Ui, s: &mut Session) {
         ui.label(fmt::money_text(balance).size(20.0));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("New transaction").clicked() {
-                s.forms.open(FormKind::Transaction, s.repo.working());
+                s.forms.open_transaction_on(uid, s.repo.working());
             }
             let pinned = s.is_pinned(uid);
             if ui.button(if pinned { "Unpin" } else { "Pin" }).clicked() {

@@ -242,16 +242,16 @@ fn paint_lines(ui: &Ui, rect: egui::Rect, row: &Row, dark: bool) {
     let (top, mid, bottom) = (rect.top(), rect.center().y, rect.bottom());
     let painter = ui.painter();
     for (from, to, b) in &row.up {
-        let stroke = Stroke::new(2.0, colour(*b, dark));
+        let stroke = Stroke::new(2.0_f32, colour(*b, dark));
         painter.line_segment([egui::pos2(x(*from), top), egui::pos2(x(*to), mid)], stroke);
     }
     for (from, to, b) in &row.down {
-        let stroke = Stroke::new(2.0, colour(*b, dark));
+        let stroke = Stroke::new(2.0_f32, colour(*b, dark));
         painter.line_segment([egui::pos2(x(*from), mid), egui::pos2(x(*to), bottom)], stroke);
     }
     let centre = egui::pos2(x(row.lane), mid);
     let fill = colour(row.branch, dark);
-    painter.circle(centre, 4.5, fill, Stroke::new(1.5, ui.visuals().panel_fill));
+    painter.circle(centre, 4.5, fill, Stroke::new(1.5_f32, ui.visuals().panel_fill));
 }
 
 #[cfg(test)]

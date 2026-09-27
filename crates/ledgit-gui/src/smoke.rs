@@ -1160,3 +1160,22 @@ fn a_long_text_pops_out_into_a_full_editor() {
     let texts = w.click(centre_of(&texts, "Done"), &mut draw);
     assert!(!texts.iter().any(|(t, _)| t == "Alert message"), "Done closes it");
 }
+
+/// "New transaction" on a ledger's page starts with that ledger on both
+/// sides; you change whichever one it is not.
+#[test]
+fn new_transaction_from_a_ledger_starts_on_that_ledger() {
+    let s = std::cell::RefCell::new(session());
+    let loan = s.borrow().budget().ledgers.uid[1];
+    s.borrow_mut().selected_ledger = Some(loan);
+    let w = Window::new(1400.0, 900.0);
+    let mut draw = |ctx: &egui::Context| {
+        egui::CentralPanel::default()
+            .show(ctx, |ui| views::ledgers::register(ui, &mut s.borrow_mut()));
+    };
+    let texts = w.settle(&mut draw);
+    w.click(centre_of(&texts, "New transaction"), &mut draw);
+    let s = s.borrow();
+    assert_eq!(s.forms.open, Some(FormKind::Transaction));
+    assert_eq!(s.forms.transaction_sides(), vec![Some(loan), Some(loan)]);
+}

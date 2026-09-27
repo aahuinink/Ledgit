@@ -109,6 +109,22 @@ impl Forms {
         self.open = Some(kind);
     }
 
+    /// Open the transaction form from a ledger's page: both sides start on
+    /// that ledger, since it is almost certainly one of them - change
+    /// whichever is not.
+    pub fn open_transaction_on(&mut self, ledger: LedgerUid, budget: &Budget) {
+        self.open(FormKind::Transaction, budget);
+        for row in &mut self.transaction.legs.rows {
+            row.ledger = Some(ledger);
+        }
+    }
+
+    /// The ledgers on each side of the transaction form, for tests.
+    #[cfg(test)]
+    pub fn transaction_sides(&self) -> Vec<Option<LedgerUid>> {
+        self.transaction.legs.rows.iter().map(|r| r.ledger).collect()
+    }
+
     /// Open the ledger form with its place in the tree already chosen, e.g.
     /// from a level's "+" on the Ledgers screen.
     pub fn open_ledger_under(&mut self, parent: &str, budget: &Budget) {
