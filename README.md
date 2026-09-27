@@ -112,6 +112,20 @@ ledgit search rent                  # ledgers, transactions, issuers, buckets
 ledgit bucket combine --plus Cash --minus Receivables   # total several at once
 ```
 
+## The ledger tree
+
+Name a ledger with colons and it sits in a tree, as in hledger:
+
+```sh
+ledgit ledger add "Wedding:Tuxedo" --normality debit
+ledgit ledger add "Wedding:Venue"  --normality debit
+ledgit post "Tux rental" 450 --debit Tuxedo --credit Chequing   # a unique last segment is enough
+ledgit post "Deposit" --debit Wedding:Venue:3000 --credit Chequing
+ledgit ledger tree                        # indented, with a subtotal on every level
+ledgit bucket include-tree Wedding Wedding   # everything under Wedding, now and later
+ledgit ledger move Wedding Events:Wedding    # rename a whole subtree; buckets follow
+```
+
 ## Cohorts and views
 
 A cohort groups issuers the way a bucket groups ledgers; a view charts

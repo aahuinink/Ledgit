@@ -30,6 +30,7 @@ Everything in the feature list falls out of that:
 | Ledgers/transactions/issuers are never deleted | there is no delete op for them |
 | Split entries (a paycheque) | one op with N legs summing to zero |
 | Cohorts, saved views | ops, like buckets; read by pure functions, results never stored |
+| A ledger tree (`Wedding:Tuxedo`) | paths in names; the tree is derived, never stored |
 
 ## Crates
 
@@ -96,6 +97,48 @@ slice of signed `Term`s and treats membership as a set:
 So `Cash - Receivables` is a question you ask, not an entity you create. Nothing
 is stored, nothing needs validating on replay, and a combination naming a
 deleted bucket degrades to a warning instead of an unloadable budget.
+
+## The ledger tree lives in the names
+
+`Wedding:Tuxedo` sits under `Wedding` because of its name, exactly as in
+hledger. There is no parent field and no op that sets one:
+
+* **No graph in the op log.** A parent pointer would need a cycle check on
+  every replay - the reason buckets do not nest. A string prefix cannot form a
+  cycle.
+* **Levels need not exist.** `Wedding` is a node because something below it
+  names it. It holds money only if a ledger is actually called `Wedding`.
+* **Reorganising is renaming.** `tree::rename_ops` is a batch of `EditLedger`
+  ops; uids, balances and postings never move.
+
+Names are normalised on apply (`tree::normalize`: trim each segment, drop
+empty ones), never rejected - it runs on replay, and a budget from before
+paths existed may hold a stray colon. Paths compare case-insensitively (ASCII)
+and level by level (`tree::path_cmp`): plain string order would put
+`Wedding-fund` between `Wedding` and `Wedding:Tuxedo` and split the subtree.
+
+`LedgerTree::build` sorts ledgers by path into `order` and lists nodes depth
+first, implied levels included. Every subtree is then a contiguous range of
+both arrays, so a subtotal is a sum over one slice of row numbers. A subtree
+of one normality totals as its ledgers read; a mixed one (wedding costs and
+the gifts that paid for them) totals as the debit-positive net and says so.
+
+**Buckets can hold a subtree.** `AddSubtreeToBucket { path }` includes
+everything at or below `path`, including ledgers created or renamed into it
+later. The arena keeps what was put in (`explicit` ledgers and `subtrees`)
+apart from what the bucket counts (`members`, their union). `apply` recomputes
+`members` when a bucket changes and whenever a ledger is created or renamed,
+so every reader - roll-ups, combinations, views, the commit report - still
+sees one plain list and none of them knows paths exist. Two consequences,
+both deliberate:
+
+* removing a ledger that is also under one of the bucket's subtrees removes
+  only the individual entry; the subtree still counts it;
+* reverting a bucket deletion restores the *subtrees*, not a snapshot of their
+  members, so ledgers added under the path since come back too.
+
+`rename_ops` re-points a bucket's subtree along with the ledgers, so moving
+`Wedding` to `Events:Wedding` does not quietly empty the Wedding bucket.
 
 ## Cohorts: buckets for issuers
 

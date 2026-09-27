@@ -71,6 +71,10 @@ pub struct Session {
     // --- view state. Kept on the session rather than inside the views so that
     // navigating away and back does not silently reset a filter you set.
     pub ledger_sort: LedgerSort,
+    /// Show the Ledgers screen as the path tree rather than a flat list.
+    pub ledger_tree: bool,
+    /// Tree levels folded shut, by lowercased path.
+    pub collapsed: std::collections::HashSet<String>,
     pub bucket_roll: RollUp,
     /// Buckets being totalled together on the Buckets screen, in the order
     /// picked so the formula reads the way it was built. Empty means the
@@ -119,6 +123,8 @@ impl Session {
             pins: Vec::new(),
             goto: None,
             ledger_sort: LedgerSort::Name,
+            ledger_tree: true,
+            collapsed: Default::default(),
             bucket_roll: RollUp::ByNormality,
             bucket_combo: Vec::new(),
             tx_from: String::new(),

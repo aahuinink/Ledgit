@@ -211,7 +211,8 @@ fn editor(ui: &mut Ui, l: &Budget, spec: &mut ViewSpec) {
             "Each gets its own line. With no buckets, the ledgers together are the view's total.",
         );
         ui.horizontal_wrapped(|ui| {
-            for a in l.ledgers.indices() {
+            // In tree order, so a subtree's ledgers sit together.
+            for a in LedgerTree::build(l).order {
                 toggle_chip(ui, &mut spec.ledgers, l.ledgers.uid[a.get()], &l.ledgers.name[a.get()]);
             }
         });

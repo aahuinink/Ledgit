@@ -4,7 +4,9 @@ use super::{empty, heading, num};
 use crate::app::{Screen, Session};
 use crate::fmt;
 use crate::forms::FormKind;
+use crate::picker::{Pick, Picker};
 use egui::{RichText, Ui};
+use ledgit_core::id::LedgerIx;
 use ledgit_core::prelude::*;
 
 pub fn show(ui: &mut Ui, s: &mut Session) {
@@ -240,6 +242,30 @@ fn detail(ui: &mut Ui, s: &mut Session) {
     ui.label(fmt::money_text(roll.total).size(26.0));
     ui.add_space(8.0);
 
+    let explicit: Vec<LedgerIx> = s.budget().buckets.explicit[bix.get()].clone();
+    let subtrees: Vec<String> = s.budget().buckets.subtrees[bix.get()].clone();
+    let mut drop_subtree: Option<String> = None;
+    if !subtrees.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Includes everything under").color(fmt::dim()));
+            for path in &subtrees {
+                if ui
+                    .button(format!("{path}  \u{2715}"))
+                    .on_hover_text("Stop including this subtree")
+                    .clicked()
+                {
+                    drop_subtree = Some(path.clone());
+                }
+            }
+        });
+        ui.label(
+            RichText::new("Ledgers created or renamed under these paths join automatically.")
+                .small()
+                .color(fmt::dim()),
+        );
+        ui.add_space(6.0);
+    }
+
     let mut remove: Option<LedgerUid> = None;
     egui::Grid::new("bucket_lines").num_columns(5).striped(true).spacing([16.0, 6.0]).show(
         ui,
@@ -261,8 +287,19 @@ fn detail(ui: &mut Ui, s: &mut Session) {
                 ui.label(RichText::new(line.normality.to_string()).color(fmt::dim()));
                 num(ui, fmt::money_text(line.balance));
                 num(ui, fmt::delta_text(line.contribution));
-                if ui.small_button("remove").clicked() {
-                    remove = Some(ledger_uid);
+                if explicit.contains(&line.ledger) {
+                    if ui.small_button("remove").clicked() {
+                        remove = Some(ledger_uid);
+                    }
+                } else {
+                    // In only through a subtree: removing it alone would be
+                    // undone by the subtree, so say where it comes from.
+                    let via = subtrees
+                        .iter()
+                        .find(|p| ledgit_core::tree::is_under(&line.name, p))
+                        .cloned()
+                        .unwrap_or_default();
+                    ui.label(RichText::new(format!("via {via}")).small().color(fmt::dim()));
                 }
                 ui.end_row();
             }
@@ -271,25 +308,25 @@ fn detail(ui: &mut Ui, s: &mut Session) {
 
     ui.add_space(12.0);
     ui.horizontal(|ui| {
-        ui.label("Add a ledger");
+        ui.label("Add");
         let members: Vec<LedgerUid> =
             roll.lines.iter().map(|l| s.budget().ledgers.uid[l.ledger.get()]).collect();
-        let candidates: Vec<LedgerUid> =
-            s.budget().ledgers.uid.iter().copied().filter(|a| !members.contains(a)).collect();
-        let mut chosen: Option<LedgerUid> = None;
-        egui::ComboBox::from_id_salt("bucket_add")
-            .selected_text(if candidates.is_empty() { "every ledger is in" } else { "choose..." })
-            .width(240.0)
-            .show_ui(ui, |ui| {
-                for uid in &candidates {
-                    if ui.selectable_label(false, fmt::ledger_label(s.budget(), *uid)).clicked() {
-                        chosen = Some(*uid);
-                    }
-                }
-            });
-        if let Some(ledger) = chosen {
-            let ops = vec![Op::AddToBucket { bucket: uid, ledger }];
-            s.stage(ops, "adding a ledger to the bucket");
+        let picked = Picker::new(("bucket_add", uid), s.budget())
+            .selected_text("a ledger, or everything under a path...")
+            .width(280.0)
+            .subtrees(true)
+            .hide(members)
+            .show(ui);
+        match picked {
+            Some(Pick::Ledger(ledger)) => {
+                let ops = vec![Op::AddToBucket { bucket: uid, ledger }];
+                s.stage(ops, "adding a ledger to the bucket");
+            }
+            Some(Pick::Subtree(path)) => {
+                let ops = vec![Op::AddSubtreeToBucket { bucket: uid, path }];
+                s.stage(ops, "adding a subtree to the bucket");
+            }
+            None => {}
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -309,5 +346,9 @@ fn detail(ui: &mut Ui, s: &mut Session) {
     if let Some(ledger) = remove {
         let ops = vec![Op::RemoveFromBucket { bucket: uid, ledger }];
         s.stage(ops, "removing a ledger from the bucket");
+    }
+    if let Some(path) = drop_subtree {
+        let ops = vec![Op::RemoveSubtreeFromBucket { bucket: uid, path }];
+        s.stage(ops, "removing a subtree from the bucket");
     }
 }

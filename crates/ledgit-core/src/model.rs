@@ -350,7 +350,11 @@ pub struct Bucket {
     pub uid: BucketUid,
     pub name: String,
     pub description: String,
+    /// Every ledger the bucket counts: those added one by one, then those
+    /// under its subtrees.
     pub members: Vec<LedgerUid>,
+    /// Paths whose whole subtree the bucket includes, now and later.
+    pub subtrees: Vec<String>,
 }
 
 /// A read-only snapshot of one cohort: a bucket, but of issuers.

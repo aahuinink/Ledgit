@@ -65,6 +65,7 @@ pub mod repo;
 pub mod report;
 pub mod state;
 pub mod store;
+pub mod tree;
 pub mod view;
 
 pub use error::{Error, Result};
@@ -92,5 +93,6 @@ pub mod prelude {
     pub use crate::report::ChangeReport;
     pub use crate::state::Budget;
     pub use crate::store::{MemStore, Store, DEFAULT_BRANCH};
+    pub use crate::tree::LedgerTree;
     pub use crate::view::{Flow, FlowLine, PeriodRow, Series, SeriesKind, ViewReport};
 }

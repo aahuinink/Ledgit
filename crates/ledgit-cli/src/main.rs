@@ -132,6 +132,9 @@ enum Command {
 #[derive(Subcommand, Debug)]
 enum LedgerCmd {
     /// Open a ledger. Ledgers can never be deleted.
+    ///
+    /// Use colons to place it in the tree: `Wedding:Tuxedo` sits under
+    /// `Wedding`, which need not exist as a ledger itself.
     Add {
         name: String,
         /// debit (assets, expenses) or credit (liabilities, income, equity)
@@ -150,6 +153,15 @@ enum LedgerCmd {
         #[arg(long)]
         desc: Option<String>,
     },
+    /// The ledgers as a tree, with a subtotal at every level.
+    Tree {
+        /// Show only this subtree, e.g. Wedding.
+        path: Option<String>,
+    },
+    /// Move everything at or under one path to another, e.g.
+    /// `ledgit ledger move Wedding Events:Wedding`. Buckets that include the
+    /// subtree follow it. Only names change; no money moves.
+    Move { from: String, to: String },
     List {
         /// Only credit- or debit-normal ledgers.
         #[arg(long)]
@@ -213,6 +225,16 @@ enum BucketCmd {
     Exclude {
         bucket: String,
         ledger: String,
+    },
+    /// Include every ledger at or under a path - now, and any created there
+    /// later. `ledgit bucket include-tree Wedding Wedding`
+    IncludeTree {
+        bucket: String,
+        path: String,
+    },
+    ExcludeTree {
+        bucket: String,
+        path: String,
     },
     List,
     /// Total a bucket and break it down by ledger.
@@ -535,6 +557,11 @@ fn ledger_cmd(repo: &mut Repo<SqliteStore>, cmd: LedgerCmd) -> Result<()> {
             repo.stage(Op::EditLedger { uid, name, description: desc })?;
             println!("Staged edit to ledger {}.", uid.short());
         }
+        LedgerCmd::Tree { path } => show::tree(repo.working(), path.as_deref())?,
+        LedgerCmd::Move { from, to } => {
+            let n = repo.rename_subtree(&from, &to)?;
+            println!("Staged: move {n} ledger(s) from {from} to {to}.");
+        }
         LedgerCmd::List { normality, sort } => {
             let mut q = LedgerQuery::new().sort_by(show::ledger_sort(&sort)?, Order::Asc);
             if let Some(n) = normality {
@@ -619,6 +646,23 @@ fn bucket_cmd(repo: &mut Repo<SqliteStore>, cmd: BucketCmd) -> Result<()> {
             let (b, a) = (resolve::bucket(l, &bucket)?, resolve::ledger(l, &ledger)?);
             repo.stage(Op::RemoveFromBucket { bucket: b, ledger: a })?;
             println!("Staged: remove {ledger} from {bucket}.");
+        }
+        BucketCmd::IncludeTree { bucket, path } => {
+            let b = resolve::bucket(repo.working(), &bucket)?;
+            // Store the tree's own spelling when the path exists, so the
+            // bucket reads "Wedding" however it was typed.
+            let tree = LedgerTree::build(repo.working());
+            let normal = ledgit_core::tree::normalize(&path);
+            let path = tree.find(&normal).map_or(normal, |n| tree.nodes[n].path.clone());
+            repo.stage(Op::AddSubtreeToBucket { bucket: b, path: path.clone() })?;
+            let l = repo.working();
+            let n = l.buckets.members[l.buckets.ix(b).expect("resolved").get()].len();
+            println!("Staged: {bucket} includes everything under {path} ({n} ledger(s) now).");
+        }
+        BucketCmd::ExcludeTree { bucket, path } => {
+            let b = resolve::bucket(repo.working(), &bucket)?;
+            repo.stage(Op::RemoveSubtreeFromBucket { bucket: b, path: path.clone() })?;
+            println!("Staged: {bucket} no longer includes {path}.");
         }
         BucketCmd::List => show::buckets(repo.working()),
         BucketCmd::Show { bucket, sum, sort } => {

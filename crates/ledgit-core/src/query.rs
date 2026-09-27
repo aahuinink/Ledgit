@@ -47,6 +47,9 @@ pub enum LedgerFilter {
     OpenedOnOrAfter(Date),
     OpenedOnOrBefore(Date),
     InBucket(BucketUid),
+    /// At or below a path in the ledger tree: `Wedding` matches
+    /// `Wedding:Tuxedo`.
+    Under(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -118,6 +121,7 @@ fn ledger_matches(l: &Budget, ix: LedgerIx, f: &LedgerFilter) -> bool {
         LedgerFilter::BalanceAtMost(m) => a.balance(ix) <= *m,
         LedgerFilter::OpenedOnOrAfter(d) => a.opened[i] >= *d,
         LedgerFilter::OpenedOnOrBefore(d) => a.opened[i] <= *d,
+        LedgerFilter::Under(p) => crate::tree::is_under(&a.name[i], p),
         LedgerFilter::InBucket(b) => {
             l.buckets.ix(*b).is_some_and(|bix| l.buckets.members[bix.get()].contains(&ix))
         }
@@ -137,6 +141,9 @@ pub enum TxFilter {
     CreditedFrom(LedgerUid),
     /// Any leg of the entry is against a ledger in this bucket.
     TouchesBucket(BucketUid),
+    /// Any leg of the entry is against a ledger at or below this path.
+    /// "Everything I spent on the wedding."
+    TouchesUnder(String),
     /// Entries with more than two sides. "Show me my paycheques."
     IsSplit(bool),
     OnOrAfter(Date),
@@ -253,6 +260,9 @@ fn tx_matches(l: &Budget, ix: TxIx, f: &TxFilter) -> bool {
             let m = &l.buckets.members[bix.get()];
             legs.clone().any(|p| m.contains(&l.postings.ledger[p]))
         }),
+        TxFilter::TouchesUnder(path) => legs
+            .clone()
+            .any(|p| crate::tree::is_under(&l.ledgers.name[l.postings.ledger[p].get()], path)),
         TxFilter::IsSplit(want) => t.is_split(ix) == *want,
         TxFilter::OnOrAfter(d) => t.date[i] >= *d,
         TxFilter::OnOrBefore(d) => t.date[i] <= *d,

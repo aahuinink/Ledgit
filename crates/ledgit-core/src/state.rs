@@ -194,12 +194,23 @@ impl IssuerArena {
 
 /// Columnar storage for buckets. Deleted buckets keep their row (so indices
 /// stay stable) and are marked not `alive`.
+///
+/// A bucket is filled two ways: ledgers added one by one (`explicit`), and
+/// whole subtrees by path (`subtrees`). `members` is the union, kept current
+/// by [`Budget::apply`] whenever a bucket changes or a ledger is created or
+/// renamed - so every reader sees one plain list of rows and none of them
+/// has to know that paths exist.
 #[derive(Clone, Default, Debug)]
 pub struct BucketArena {
     pub uid: Vec<BucketUid>,
     pub name: Vec<String>,
     pub description: Vec<String>,
+    /// Everything the bucket counts. Derived; see above.
     pub members: Vec<Vec<LedgerIx>>,
+    /// Ledgers added individually, in the order they were added.
+    pub explicit: Vec<Vec<LedgerIx>>,
+    /// Paths included whole, e.g. `Wedding`.
+    pub subtrees: Vec<Vec<String>>,
     pub alive: Vec<bool>,
     by_uid: HashMap<BucketUid, u32>,
 }
@@ -224,6 +235,34 @@ impl BucketArena {
             name: self.name[i].clone(),
             description: self.description[i].clone(),
             members: self.members[i].iter().map(|a| ledgers.uid[a.get()]).collect(),
+            subtrees: self.subtrees[i].clone(),
+        }
+    }
+
+    /// Recompute one bucket's members: its explicit ledgers, then every other
+    /// ledger under one of its subtrees, in row order.
+    fn refresh(&mut self, b: usize, ledgers: &LedgerArena) {
+        let mut members = self.explicit[b].clone();
+        if !self.subtrees[b].is_empty() {
+            for ix in ledgers.indices() {
+                let name = &ledgers.name[ix.get()];
+                if !members.contains(&ix)
+                    && self.subtrees[b].iter().any(|p| crate::tree::is_under(name, p))
+                {
+                    members.push(ix);
+                }
+            }
+        }
+        self.members[b] = members;
+    }
+
+    /// Refresh every live bucket that tracks a subtree. Called when a ledger
+    /// appears or is renamed, since either can move it into or out of one.
+    fn refresh_subtrees(&mut self, ledgers: &LedgerArena) {
+        for b in 0..self.uid.len() {
+            if self.alive[b] && !self.subtrees[b].is_empty() {
+                self.refresh(b, ledgers);
+            }
         }
     }
 }
@@ -403,7 +442,7 @@ impl Budget {
                 if self.ledgers.ix(uid).is_some() {
                     return Err(Error::Duplicate { kind: "ledger", uid: uid.0 });
                 }
-                let name = check_name(name, "ledger name")?;
+                let name = check_path(name)?;
                 let a = &mut self.ledgers;
                 a.by_uid.insert(uid, a.uid.len() as u32);
                 a.uid.push(uid);
@@ -413,14 +452,18 @@ impl Budget {
                 a.opened.push(opened);
                 a.raw_balance.push(Money::ZERO);
                 a.postings.push(Vec::new());
+                self.buckets.refresh_subtrees(&self.ledgers);
             }
             Op::EditLedger { uid, name, description } => {
                 let ix = self.ledger_ix(uid)?.get();
-                if let Some(n) = name {
-                    self.ledgers.name[ix] = check_name(n, "ledger name")?;
-                }
+                let name = name.map(check_path).transpose()?;
                 if let Some(d) = description {
                     self.ledgers.description[ix] = d;
+                }
+                if let Some(n) = name {
+                    self.ledgers.name[ix] = n;
+                    // A rename can move a ledger into or out of a subtree.
+                    self.buckets.refresh_subtrees(&self.ledgers);
                 }
             }
             Op::PostTransaction { uid, name, description, date, legs, parent } => {
@@ -529,6 +572,8 @@ impl Budget {
                         b.name[i] = name;
                         b.description[i] = description;
                         b.members[i].clear();
+                        b.explicit[i].clear();
+                        b.subtrees[i].clear();
                         b.alive[i] = true;
                     }
                     None => {
@@ -537,6 +582,8 @@ impl Budget {
                         b.name.push(name);
                         b.description.push(description);
                         b.members.push(Vec::new());
+                        b.explicit.push(Vec::new());
+                        b.subtrees.push(Vec::new());
                         b.alive.push(true);
                     }
                 }
@@ -554,18 +601,40 @@ impl Budget {
                 let ix = self.bucket_ix(uid)?.get();
                 self.buckets.alive[ix] = false;
                 self.buckets.members[ix].clear();
+                self.buckets.explicit[ix].clear();
+                self.buckets.subtrees[ix].clear();
             }
             Op::AddToBucket { bucket, ledger } => {
                 let bix = self.bucket_ix(bucket)?.get();
                 let aix = self.ledger_ix(ledger)?;
-                if !self.buckets.members[bix].contains(&aix) {
-                    self.buckets.members[bix].push(aix);
+                if !self.buckets.explicit[bix].contains(&aix) {
+                    self.buckets.explicit[bix].push(aix);
                 }
+                self.buckets.refresh(bix, &self.ledgers);
             }
             Op::RemoveFromBucket { bucket, ledger } => {
+                // Removes the individual entry only. A ledger that is also
+                // under one of the bucket's subtrees stays counted; take the
+                // subtree out to drop it.
                 let bix = self.bucket_ix(bucket)?.get();
                 let aix = self.ledger_ix(ledger)?;
-                self.buckets.members[bix].retain(|m| *m != aix);
+                self.buckets.explicit[bix].retain(|m| *m != aix);
+                self.buckets.refresh(bix, &self.ledgers);
+            }
+            Op::AddSubtreeToBucket { bucket, path } => {
+                let bix = self.bucket_ix(bucket)?.get();
+                let path = check_path(path)?;
+                let subtrees = &mut self.buckets.subtrees[bix];
+                if !subtrees.iter().any(|p| p.eq_ignore_ascii_case(&path)) {
+                    subtrees.push(path);
+                }
+                self.buckets.refresh(bix, &self.ledgers);
+            }
+            Op::RemoveSubtreeFromBucket { bucket, path } => {
+                let bix = self.bucket_ix(bucket)?.get();
+                let path = crate::tree::normalize(&path);
+                self.buckets.subtrees[bix].retain(|p| !p.eq_ignore_ascii_case(&path));
+                self.buckets.refresh(bix, &self.ledgers);
             }
             Op::CreateCohort { uid, name, description } => {
                 if self.cohorts.ix(uid).is_some() {
@@ -741,6 +810,15 @@ impl Budget {
             .position(|n| n.eq_ignore_ascii_case(name))
             .map(|i| IssuerIx(i as u32))
     }
+}
+
+/// A ledger name is a path: tidied by `tree::normalize`, and never blank.
+fn check_path(name: String) -> Result<String> {
+    let path = crate::tree::normalize(&name);
+    if path.is_empty() {
+        return Err(invalid("ledger name cannot be blank"));
+    }
+    Ok(path)
 }
 
 fn check_name(name: String, what: &str) -> Result<String> {

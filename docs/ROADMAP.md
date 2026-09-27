@@ -24,7 +24,7 @@ Context you would otherwise have to rediscover:
   `Op` - plain, serialisable data. If a fix tempts you to add a closure, a
   delete operation for a ledger/transaction/issuer, or a derived table in
   SQLite, it is the wrong fix. `docs/ARCHITECTURE.md` says why.
-- **Keep it green.** 119 tests and `cargo clippy --all-targets` clean. A GUI fix
+- **Keep it green.** 134 tests and `cargo clippy --all-targets` clean. A GUI fix
   that needs a new behaviour usually wants a case added to `smoke.rs`.
 
 If he reports nothing and wants to move on, the next work is the GUI gaps
@@ -66,7 +66,14 @@ drew without panicking; what no test can check is whether it *looks* right.
    after, month grid lines. Check the dashed tail joins the solid line at the
    today marker, and that the legend (top left) does not sit on the data.
    *`views/saved.rs`, `chart()`.*
-8. **The top-bar freshness label** ("through ... · issuers ...") may crowd
+8. **The ledger tree picker.** A searchable tree inside a combo box, used for
+   entry sides and bucket members. Check the popup's height (360px) and that
+   typing in its search box does not close it.
+   *`picker.rs`.*
+9. **The Ledgers tree.** Indented rows with fold arrows, a "move" button on
+   every level with children, subtotals right-aligned. *`views/ledgers.rs`,
+   `tree()`.*
+10. **The top-bar freshness label** ("through ... · issuers ...") may crowd
    the "New" menu on a narrow window. *`app.rs`, `freshness()`.*
 
 Run it against a throwaway budget rather than a real one:
@@ -106,7 +113,12 @@ cargo run -p ledgit-gui -- /tmp/scratch.ledgit
   series as CSV.
 - **"Up to date through"** in the top bar and in `ledgit status`: the newest
   transaction, and how far the issuers have been run.
-- **Tests**: 119, covering the money and date edge cases, budget invariants,
+- **Ledger tree**: hledger-style paths in ledger names (`Wedding:Tuxedo`), a
+  derived tree with subtotals, buckets that include a whole subtree (and pick
+  up ledgers created there later), and subtree renames that carry buckets
+  along. CLI `ledger tree`, `ledger move`, `bucket include-tree`; GUI tree
+  view and a searchable tree picker.
+- **Tests**: 134, covering the money and date edge cases, budget invariants,
   recurrence arithmetic, rate conversion, the view simulation, GUI zoom,
   bucket combination, chart rendering, and the version-control behaviours end
   to end.

@@ -772,3 +772,112 @@ fn reverting_a_bucket_deletion_restores_its_members() {
     let b = w.buckets.ix(net).expect("bucket restored");
     assert_eq!(w.buckets.get(b, &w.ledgers).members, vec![f.cash, f.loan]);
 }
+
+// ------------------------------------------------------------ ledger tree
+
+/// A bucket that includes a subtree keeps including it: a ledger opened
+/// under `Wedding` next month joins the Wedding bucket with no further work.
+#[test]
+fn a_subtree_bucket_picks_up_ledgers_created_later() {
+    let mut f = fixture();
+    let open = d("2024-01-01");
+    let tux = f.repo.add_ledger("Wedding:Tuxedo", "", Normality::Debit, open).unwrap();
+    let wedding = f.repo.add_bucket("Wedding", "").unwrap();
+    f.repo.stage(Op::AddSubtreeToBucket { bucket: wedding, path: "wedding".into() }).unwrap();
+    f.repo.post("Tux rental", "", open, Money::from_major(250), tux, f.cash).unwrap();
+    f.repo.commit("start planning").unwrap();
+
+    let total = |r: &Repo<MemStore>| {
+        roll_up(r.working(), wedding, RollUp::ByNormality, LedgerSort::Name, Order::Asc)
+            .unwrap()
+            .total
+    };
+    assert_eq!(total(&f.repo), Money::from_major(250));
+
+    // A new ledger under the path, typed a little carelessly.
+    let venue = f.repo.add_ledger(" Wedding : Venue ", "", Normality::Debit, open).unwrap();
+    let w = f.repo.working();
+    assert_eq!(w.ledgers.name[w.ledgers.ix(venue).unwrap().get()], "Wedding:Venue");
+    f.repo.post("Deposit", "", open, Money::from_major(2_000), venue, f.cash).unwrap();
+    assert_eq!(total(&f.repo), Money::from_major(2_250));
+
+    // The commit report says the bucket's membership moved, not just its total.
+    let report = f.repo.report().unwrap();
+    let effect = report.bucket_effects.iter().find(|b| b.name == "Wedding").unwrap();
+    assert!(effect.membership_changed);
+    f.repo.commit("book the venue").unwrap();
+
+    // Renaming a ledger out of the subtree takes it out of the bucket.
+    f.repo
+        .stage(Op::EditLedger {
+            uid: venue,
+            name: Some("Reception:Venue".into()),
+            description: None,
+        })
+        .unwrap();
+    assert_eq!(total(&f.repo), Money::from_major(250));
+}
+
+#[test]
+fn removing_one_ledger_does_not_override_its_subtree() {
+    let mut f = fixture();
+    let open = d("2024-01-01");
+    let tux = f.repo.add_ledger("Wedding:Tuxedo", "", Normality::Debit, open).unwrap();
+    let b = f.repo.add_bucket("Wedding", "").unwrap();
+    f.repo.stage(Op::AddToBucket { bucket: b, ledger: tux }).unwrap();
+    f.repo.stage(Op::AddSubtreeToBucket { bucket: b, path: "Wedding".into() }).unwrap();
+    f.repo.stage(Op::RemoveFromBucket { bucket: b, ledger: tux }).unwrap();
+    let w = f.repo.working();
+    let bix = w.buckets.ix(b).unwrap().get();
+    assert!(w.buckets.explicit[bix].is_empty());
+    assert_eq!(w.buckets.members[bix].len(), 1, "still under the subtree");
+
+    f.repo.stage(Op::RemoveSubtreeFromBucket { bucket: b, path: "WEDDING".into() }).unwrap();
+    assert!(f.repo.working().buckets.members[bix].is_empty());
+}
+
+#[test]
+fn reverting_a_subtree_bucket_deletion_restores_the_subtree_not_a_snapshot() {
+    let mut f = fixture();
+    let open = d("2024-01-01");
+    f.repo.add_ledger("Wedding:Tuxedo", "", Normality::Debit, open).unwrap();
+    let b = f.repo.add_bucket("Wedding", "").unwrap();
+    f.repo.stage(Op::AddSubtreeToBucket { bucket: b, path: "Wedding".into() }).unwrap();
+    f.repo.stage(Op::AddToBucket { bucket: b, ledger: f.cash }).unwrap();
+    f.repo.commit("track it").unwrap();
+    f.repo.stage(Op::DeleteBucket { uid: b }).unwrap();
+    f.repo.commit("drop it").unwrap();
+
+    f.repo.revert("HEAD").unwrap();
+    let w = f.repo.working();
+    let bix = w.buckets.ix(b).expect("restored").get();
+    assert_eq!(w.buckets.subtrees[bix], vec!["Wedding".to_string()]);
+    assert_eq!(w.buckets.explicit[bix], vec![w.ledgers.ix(f.cash).unwrap()]);
+    assert_eq!(w.buckets.members[bix].len(), 2);
+}
+
+#[test]
+fn renaming_a_subtree_moves_every_ledger_and_keeps_every_posting() {
+    let mut f = fixture();
+    let open = d("2024-01-01");
+    let tux = f.repo.add_ledger("Wedding:Tuxedo", "", Normality::Debit, open).unwrap();
+    f.repo.add_ledger("Wedding:Venue", "", Normality::Debit, open).unwrap();
+    f.repo.add_ledger("Wedding-fund", "", Normality::Debit, open).unwrap();
+    f.repo.post("Tux", "", open, Money::from_major(250), tux, f.cash).unwrap();
+    f.repo.commit("plan").unwrap();
+
+    assert_eq!(f.repo.rename_subtree("wedding", "Marriage").unwrap(), 2);
+    assert!(f.repo.rename_subtree("Nope", "X").is_err());
+    let w = f.repo.working();
+    let names: Vec<&str> = w.ledgers.name.iter().map(String::as_str).collect();
+    assert!(names.contains(&"Marriage:Tuxedo") && names.contains(&"Marriage:Venue"));
+    assert!(names.contains(&"Wedding-fund"), "not under Wedding");
+    let tix = w.ledgers.ix(tux).unwrap();
+    assert_eq!(w.ledgers.balance(tix), Money::from_major(250));
+
+    // And the tree filters see the new shape.
+    let under = LedgerQuery::new().filter(LedgerFilter::Under("marriage".into())).run(w);
+    assert_eq!(under.len(), 2);
+    let spent = TxQuery::new().filter(TxFilter::TouchesUnder("Marriage".into())).run(w);
+    assert_eq!(spent.len(), 1);
+}

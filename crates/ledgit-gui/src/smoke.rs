@@ -84,6 +84,12 @@ fn session() -> Session {
         .post("Groceries", "", "2024-01-20".parse().unwrap(), Money::from_major(150), loan, cash)
         .unwrap();
 
+    // A small ledger tree, with an implied level and a subtree bucket.
+    s.repo.add_ledger("Wedding:Tuxedo", "", Normality::Debit, open).unwrap();
+    s.repo.add_ledger("Wedding:Venue:Deposit", "", Normality::Debit, open).unwrap();
+    s.repo.add_ledger("Wedding:Gifts", "", Normality::Credit, open).unwrap();
+    s.repo.stage(Op::AddSubtreeToBucket { bucket, path: "Wedding".into() }).unwrap();
+
     // A cohort and a saved view, so their screens have something to draw.
     let pay = s.repo.working().issuers.uid[0];
     let bills = s.repo.add_cohort("Bills", "").unwrap();
@@ -191,6 +197,7 @@ fn every_form_opens_and_draws() {
         FormKind::Issuer,
         FormKind::Cohort,
         FormKind::View,
+        FormKind::Move,
     ] {
         s.forms.open(kind, s.repo.working());
         let budget = s.repo.working().clone();
@@ -309,4 +316,43 @@ fn the_views_screen_draws_a_draft_and_never_stages_it_by_itself() {
     let issuers = s.repo.working().issuers.uid.clone();
     s.view_draft = Some((uid, ViewSpec { issuers, ..ViewSpec::default() }));
     draw(&mut s, Screen::Views);
+}
+
+/// Both layouts of the Ledgers screen, with a level folded shut, and the move
+/// form opened the way its row button opens it.
+#[test]
+fn the_ledger_tree_draws_folded_and_flat() {
+    let mut s = session();
+    assert!(s.ledger_tree, "the tree is the default");
+    draw(&mut s, Screen::Ledgers);
+    s.collapsed.insert("wedding".into());
+    draw(&mut s, Screen::Ledgers);
+    s.ledger_tree = false;
+    draw(&mut s, Screen::Ledgers);
+
+    s.forms.open_move("Wedding");
+    let budget = s.repo.working().clone();
+    let forms = &mut s.forms;
+    run_ui(|ui| {
+        forms.show(ui, &budget);
+    });
+    assert_eq!(s.forms.open, Some(FormKind::Move));
+}
+
+/// The bucket screen shows subtree members as "via" rather than removable,
+/// and a ledger created under the path later joins the bucket.
+#[test]
+fn a_subtree_bucket_draws_and_grows() {
+    let mut s = session();
+    draw(&mut s, Screen::Buckets);
+    let bucket = s.selected_bucket.unwrap();
+    let count = |s: &Session| {
+        let l = s.budget();
+        l.buckets.members[l.buckets.ix(bucket).unwrap().get()].len()
+    };
+    let before = count(&s);
+    let open = "2024-01-01".parse().unwrap();
+    s.repo.add_ledger("Wedding:Flowers", "", Normality::Debit, open).unwrap();
+    assert_eq!(count(&s), before + 1);
+    draw(&mut s, Screen::Buckets);
 }

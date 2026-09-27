@@ -34,9 +34,22 @@ pub fn ledger(l: &Budget, s: &str) -> Result<LedgerUid> {
         .filter(|u| u.to_string().starts_with(&s.to_lowercase()))
         .collect();
     match by_uid.len() {
-        1 => Ok(by_uid[0]),
+        1 => return Ok(by_uid[0]),
+        0 => {}
+        n => return Err(Error::Invalid(format!("\"{s}\" matches {n} ledgers by uid"))),
+    }
+    // Last, the final segment of a path: "Tuxedo" for "Wedding:Tuxedo", if
+    // exactly one ledger ends that way.
+    let by_leaf: Vec<usize> = (0..l.ledgers.len())
+        .filter(|i| ledgit_core::tree::leaf(&l.ledgers.name[*i]).eq_ignore_ascii_case(s))
+        .collect();
+    match by_leaf.len() {
+        1 => Ok(l.ledgers.uid[by_leaf[0]]),
         0 => Err(Error::Invalid(format!("no ledger called \"{s}\""))),
-        n => Err(Error::Invalid(format!("\"{s}\" matches {n} ledgers by uid"))),
+        n => Err(Error::Invalid(format!(
+            "\"{s}\" ends {n} paths; give the whole path: {}",
+            by_leaf.iter().map(|i| l.ledgers.name[*i].as_str()).collect::<Vec<_>>().join(", ")
+        ))),
     }
 }
 
@@ -138,6 +151,23 @@ pub fn money(s: &str) -> Result<Money> {
 ///
 /// A bare positional amount is the two-leg shorthand and may only be used when
 /// there is one debit and one credit, neither carrying its own amount.
+/// Split `LEDGER` or `LEDGER:AMOUNT`, now that a ledger name may itself hold
+/// colons (`Wedding:Venue`, `Wedding:Venue:3000`).
+///
+/// The whole argument is tried as a ledger first, so a path is never
+/// mistaken for an amount. Only if that fails is a trailing `:AMOUNT` split
+/// off - and only if it actually parses as money, so a typo in a path reads
+/// as "no such ledger" rather than as a baffling amount error.
+fn side_spec<'a>(l: &Budget, spec: &'a str) -> Result<(&'a str, Option<Money>)> {
+    if ledger(l, spec).is_ok() {
+        return Ok((spec, None));
+    }
+    match spec.rsplit_once(':') {
+        Some((n, a)) if Money::parse(a.trim()).is_ok() => Ok((n, Some(money(a.trim())?))),
+        _ => Ok((spec, None)),
+    }
+}
+
 pub fn legs(
     l: &Budget,
     debits: &[String],
@@ -151,10 +181,7 @@ pub fn legs(
     let mut parsed: Vec<(LedgerUid, Option<Money>, i64)> = Vec::new();
     for (side, sign) in [(debits, 1i64), (credits, -1i64)] {
         for spec in side {
-            let (name, amount) = match spec.rsplit_once(':') {
-                Some((n, a)) => (n, Some(money(a)?)),
-                None => (spec.as_str(), None),
-            };
+            let (name, amount) = side_spec(l, spec)?;
             if amount.is_some_and(|m| m.cents() <= 0) {
                 return Err(Error::Invalid(format!(
                     "\"{spec}\": each side names a positive amount; --debit and --credit \
@@ -255,4 +282,46 @@ pub fn period(s: &str) -> Result<Period> {
 /// `90d`, `6w`, `12m`, `2y`.
 pub fn span(s: &str) -> Result<Span> {
     s.parse::<Span>().map_err(Error::Invalid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn budget() -> Budget {
+        let mk = |name: &str| Op::CreateLedger {
+            uid: LedgerUid::new(),
+            name: name.into(),
+            description: String::new(),
+            normality: Normality::Debit,
+            opened: Date::from_ymd(2024, 1, 1).unwrap(),
+        };
+        Budget::replay(&[
+            mk("Chequing"),
+            mk("Wedding:Venue"),
+            mk("Wedding:Tuxedo"),
+            mk("Gifts:Tuxedo"),
+        ])
+        .unwrap()
+    }
+
+    /// A path's colons must never be read as the `LEDGER:AMOUNT` separator.
+    #[test]
+    fn a_path_is_a_ledger_and_a_trailing_number_is_an_amount() {
+        let l = budget();
+        let venue = ledger(&l, "Wedding:Venue").unwrap();
+        assert_eq!(side_spec(&l, "Wedding:Venue").unwrap(), ("Wedding:Venue", None));
+        let (name, amount) = side_spec(&l, "Wedding:Venue:120.50").unwrap();
+        assert_eq!((ledger(&l, name).unwrap(), amount), (venue, Some(Money(12_050))));
+        // A typo stays a ledger problem, not an amount one.
+        assert!(ledger(&l, side_spec(&l, "Wedding:Venu").unwrap().0).is_err());
+    }
+
+    #[test]
+    fn a_unique_last_segment_names_its_ledger() {
+        let l = budget();
+        assert_eq!(ledger(&l, "venue").unwrap(), ledger(&l, "Wedding:Venue").unwrap());
+        let err = ledger(&l, "Tuxedo").unwrap_err().to_string();
+        assert!(err.contains("Wedding:Tuxedo") && err.contains("Gifts:Tuxedo"), "{err}");
+    }
 }

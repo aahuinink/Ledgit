@@ -103,6 +103,17 @@ pub enum Op {
         bucket: BucketUid,
         ledger: LedgerUid,
     },
+    /// Include every ledger at or below a path - `Wedding` takes in
+    /// `Wedding:Tuxedo` and `Wedding:Venue` - including ledgers created or
+    /// renamed into it later. The path need not name any ledger yet.
+    AddSubtreeToBucket {
+        bucket: BucketUid,
+        path: String,
+    },
+    RemoveSubtreeFromBucket {
+        bucket: BucketUid,
+        path: String,
+    },
     /// A cohort is to issuers what a bucket is to ledgers: a named group,
     /// read for its combined rate and its calendar. It moves no money.
     CreateCohort {
@@ -183,6 +194,12 @@ impl Op {
             }
             Op::RemoveFromBucket { bucket, ledger } => {
                 format!("remove ledger {} from bucket {}", ledger.short(), bucket.short())
+            }
+            Op::AddSubtreeToBucket { bucket, path } => {
+                format!("add everything under \"{path}\" to bucket {}", bucket.short())
+            }
+            Op::RemoveSubtreeFromBucket { bucket, path } => {
+                format!("remove everything under \"{path}\" from bucket {}", bucket.short())
             }
             Op::CreateCohort { name, .. } => format!("create cohort \"{name}\""),
             Op::EditCohort { uid, .. } => format!("edit cohort {}", uid.short()),

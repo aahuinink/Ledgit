@@ -19,6 +19,16 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
             s.forms.open(FormKind::Ledger, s.repo.working());
         }
         ui.separator();
+        ui.selectable_value(&mut s.ledger_tree, true, "Tree")
+            .on_hover_text("Grouped by path: Wedding:Tuxedo sits under Wedding");
+        ui.selectable_value(&mut s.ledger_tree, false, "List");
+        ui.separator();
+        if s.ledger_tree {
+            if ui.button("Move ledgers...").on_hover_text("Rename a whole subtree").clicked() {
+                s.forms.open_move("");
+            }
+            return;
+        }
         ui.label(RichText::new("Sort by").color(fmt::dim()));
         for (sort, label) in [
             (LedgerSort::Name, "name"),
@@ -36,6 +46,10 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
 
     if s.budget().ledgers.is_empty() {
         empty(ui, "No ledgers yet.");
+        return;
+    }
+    if s.ledger_tree {
+        tree(ui, s);
         return;
     }
 
@@ -82,6 +96,138 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
             },
         );
     });
+}
+
+/// The ledgers as their path tree: a subtotal on every level with children,
+/// levels that fold shut, and a "move" on each to rename the whole subtree.
+fn tree(ui: &mut Ui, s: &mut Session) {
+    let t = LedgerTree::build(s.budget());
+    let mut toggle: Option<String> = None;
+    let mut open: Option<LedgerUid> = None;
+    let mut pin: Option<LedgerUid> = None;
+    let mut move_from: Option<String> = None;
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::Grid::new("ledger_tree").num_columns(6).striped(true).spacing([16.0, 5.0]).show(
+            ui,
+            |ui| {
+                for h in ["", "ledger", "normal", "postings"] {
+                    ui.label(RichText::new(h).small().color(fmt::dim()));
+                }
+                num(ui, RichText::new("balance").small().color(fmt::dim()));
+                num(ui, RichText::new("subtree total").small().color(fmt::dim()));
+                ui.end_row();
+
+                let l = s.budget();
+                let mut n = 0;
+                while n < t.nodes.len() {
+                    let node = &t.nodes[n];
+                    let parent = node.end as usize > n + 1;
+                    let key = node.path.to_lowercase();
+                    let folded = parent && s.collapsed.contains(&key);
+
+                    match node.ledger {
+                        Some(ix) => {
+                            let uid = l.ledgers.uid[ix.get()];
+                            let pinned = s.pins.contains(&uid);
+                            if ui
+                                .selectable_label(pinned, if pinned { "\u{2605}" } else { "\u{2606}" })
+                                .on_hover_text("Pin to the dashboard and the sidebar")
+                                .clicked()
+                            {
+                                pin = Some(uid);
+                            }
+                        }
+                        None => {
+                            ui.label("");
+                        }
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0 * node.depth as f32);
+                        if parent {
+                            let arrow = if folded { "\u{25b8}" } else { "\u{25be}" };
+                            if ui.small_button(arrow).clicked() {
+                                toggle = Some(key.clone());
+                            }
+                        } else {
+                            ui.add_space(18.0);
+                        }
+                        match node.ledger {
+                            Some(ix) => {
+                                if ui.link(node.name()).on_hover_text(&node.path).clicked() {
+                                    open = Some(l.ledgers.uid[ix.get()]);
+                                }
+                            }
+                            None => {
+                                ui.label(RichText::new(node.name()).strong());
+                            }
+                        }
+                        if parent
+                            && ui
+                                .small_button("move")
+                                .on_hover_text(format!("Rename everything under {}", node.path))
+                                .clicked()
+                        {
+                            move_from = Some(node.path.clone());
+                        }
+                    });
+
+                    match node.ledger {
+                        Some(ix) => {
+                            let i = ix.get();
+                            ui.label(RichText::new(l.ledgers.normality[i].to_string()).color(fmt::dim()));
+                            ui.label(RichText::new(l.ledgers.postings[i].len().to_string()).color(fmt::dim()));
+                            num(ui, fmt::money_text(l.ledgers.balance(ix)));
+                        }
+                        None => {
+                            ui.label("");
+                            ui.label("");
+                            ui.label("");
+                        }
+                    }
+                    if parent {
+                        let (total, kind) = t.total(l, n);
+                        let text = fmt::money_text(total).strong();
+                        let hover = match kind {
+                            Some(k) => format!("{} ledger(s), all {k}-normal", t.subtree(n).len()),
+                            None => format!(
+                                "{} ledger(s) of mixed normality: the net, debit-positive, as a bucket reads it",
+                                t.subtree(n).len()
+                            ),
+                        };
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(text).on_hover_text(hover);
+                            if kind.is_none() {
+                                ui.label(RichText::new("net").small().color(fmt::dim()));
+                            }
+                        });
+                    } else {
+                        ui.label("");
+                    }
+                    ui.end_row();
+
+                    n = if folded { node.end as usize } else { n + 1 };
+                }
+            },
+        );
+    });
+
+    if let Some(key) = toggle {
+        if !s.collapsed.remove(&key) {
+            s.collapsed.insert(key);
+        }
+    }
+    if let Some(uid) = pin {
+        s.toggle_pin(uid);
+    }
+    if let Some(uid) = open {
+        s.selected_ledger = Some(uid);
+        s.goto = Some(Screen::Register);
+    }
+    if let Some(from) = move_from {
+        s.forms.open_move(&from);
+    }
 }
 
 pub fn register(ui: &mut Ui, s: &mut Session) {

@@ -6,7 +6,8 @@
 //! why the same forms can later be reused for an import or an edit dialog.
 
 use crate::fmt;
-use egui::{ComboBox, Ui};
+use crate::picker::{Pick, Picker};
+use egui::Ui;
 use ledgit_core::prelude::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -17,6 +18,7 @@ pub enum FormKind {
     Issuer,
     Cohort,
     View,
+    Move,
 }
 
 impl FormKind {
@@ -26,7 +28,11 @@ impl FormKind {
     /// form wants.
     pub fn width(self) -> f32 {
         match self {
-            FormKind::Ledger | FormKind::Bucket | FormKind::Cohort | FormKind::View => 460.0,
+            FormKind::Ledger
+            | FormKind::Bucket
+            | FormKind::Cohort
+            | FormKind::View
+            | FormKind::Move => 460.0,
             FormKind::Transaction | FormKind::Issuer => 640.0,
         }
     }
@@ -39,6 +45,7 @@ impl FormKind {
             FormKind::Issuer => "New issuer",
             FormKind::Cohort => "New cohort",
             FormKind::View => "New view",
+            FormKind::Move => "Move ledgers",
         }
     }
 }
@@ -61,6 +68,7 @@ pub struct Forms {
     issuer: IssuerForm,
     cohort: CohortForm,
     view: ViewForm,
+    moving: MoveForm,
 }
 
 impl Forms {
@@ -77,6 +85,7 @@ impl Forms {
             FormKind::Bucket => self.bucket = BucketForm::default(),
             FormKind::Cohort => self.cohort = CohortForm::default(),
             FormKind::View => self.view = ViewForm { all_buckets: true, ..Default::default() },
+            FormKind::Move => self.moving = MoveForm::default(),
             FormKind::Issuer => {
                 self.issuer = IssuerForm {
                     start: today,
@@ -92,6 +101,14 @@ impl Forms {
         self.open = Some(kind);
     }
 
+    /// Open the move form with a subtree already chosen, e.g. from its row
+    /// on the Ledgers screen.
+    pub fn open_move(&mut self, from: &str) {
+        self.moving = MoveForm { from: from.to_string(), to: from.to_string() };
+        self.error = None;
+        self.open = Some(FormKind::Move);
+    }
+
     pub fn show(&mut self, ui: &mut Ui, budget: &Budget) -> Outcome {
         let Some(kind) = self.open else {
             return Outcome::Pending;
@@ -103,6 +120,7 @@ impl Forms {
             FormKind::Issuer => self.issuer.show(ui, budget),
             FormKind::Cohort => self.cohort.show(ui),
             FormKind::View => self.view.show(ui, budget),
+            FormKind::Move => self.moving.show(ui, budget),
         };
         match outcome {
             Ok(o) => {
@@ -215,20 +233,13 @@ impl LegEditor {
                     .ledger
                     .map(|u| fmt::ledger_label(budget, u))
                     .unwrap_or_else(|| "choose a ledger".to_string());
-                ComboBox::from_id_salt(format!("{id}_acct_{i}"))
+                if let Some(Pick::Ledger(uid)) = Picker::new(format!("{id}_acct_{i}"), budget)
                     .selected_text(text)
                     .width(220.0)
-                    .show_ui(ui, |ui| {
-                        for ix in budget.ledgers.indices() {
-                            let uid = budget.ledgers.uid[ix.get()];
-                            let label = format!(
-                                "{}  [{}]",
-                                budget.ledgers.name[ix.get()],
-                                budget.ledgers.normality[ix.get()]
-                            );
-                            ui.selectable_value(&mut row.ledger, Some(uid), label);
-                        }
-                    });
+                    .show(ui)
+                {
+                    row.ledger = Some(uid);
+                }
 
                 ui.add(
                     egui::TextEdit::singleline(&mut row.amount)
@@ -342,7 +353,7 @@ impl LedgerForm {
         );
         ui.add_space(6.0);
         egui::Grid::new("ledger_form").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            label_row(ui, "Name", &mut self.name, "Chequing");
+            label_row(ui, "Name", &mut self.name, "Chequing, or Wedding:Tuxedo");
             label_row(ui, "Description", &mut self.description, "optional");
 
             ui.label("Normality");
@@ -526,6 +537,49 @@ impl ViewForm {
             description: self.description.trim().to_string(),
             spec,
         }]))
+    }
+}
+
+// --------------------------------------------------------------------- move
+
+/// Rename a subtree: every ledger at or under one path moves under another,
+/// and buckets that include it follow. Names only; no money moves.
+#[derive(Default)]
+struct MoveForm {
+    from: String,
+    to: String,
+}
+
+impl MoveForm {
+    fn show(&mut self, ui: &mut Ui, budget: &Budget) -> Filled {
+        ui.label(
+            egui::RichText::new(
+                "Renames every ledger at or under a path. Balances, postings and history stay exactly where they are.",
+            )
+            .color(fmt::dim()),
+        );
+        ui.add_space(6.0);
+        egui::Grid::new("move_form").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            label_row(ui, "Move", &mut self.from, "Wedding");
+            label_row(ui, "To", &mut self.to, "Events:Wedding");
+        });
+        let ops = ledgit_core::tree::rename_ops(budget, &self.from, &self.to);
+        let moving = ops.iter().filter(|o| matches!(o, Op::EditLedger { .. })).count();
+        ui.label(egui::RichText::new(format!("{moving} ledger(s) will move.")).color(fmt::dim()));
+        let (save, cancel) = footer(ui, "Stage move");
+        if cancel {
+            return Ok(Outcome::Cancelled);
+        }
+        if !save {
+            return Ok(Outcome::Pending);
+        }
+        if ledgit_core::tree::normalize(&self.to).is_empty() {
+            return Err("Say where to move them".into());
+        }
+        if moving == 0 {
+            return Err(format!("No ledger is at or under \"{}\"", self.from.trim()));
+        }
+        Ok(Outcome::Submit(ops))
     }
 }
 

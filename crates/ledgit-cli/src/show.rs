@@ -228,6 +228,41 @@ pub fn issuers(l: &Budget) {
     }
 }
 
+/// The ledger tree, indented, with a subtotal at every level that has
+/// children. A subtotal over mixed normalities is marked "net".
+pub fn tree(l: &Budget, path: Option<&str>) -> Result<()> {
+    let t = LedgerTree::build(l);
+    let range = match path {
+        Some(p) => {
+            let n = t
+                .find(&ledgit_core::tree::normalize(p))
+                .ok_or_else(|| Error::Invalid(format!("nothing in the tree at \"{p}\"")))?;
+            n..t.nodes[n].end as usize
+        }
+        None => 0..t.nodes.len(),
+    };
+    if range.is_empty() {
+        println!("No ledgers.");
+        return Ok(());
+    }
+    let base = t.nodes[range.start].depth;
+    for n in range {
+        let node = &t.nodes[n];
+        let indent = "  ".repeat((node.depth - base) as usize);
+        let label = format!("{indent}{}", node.name());
+        let own = node.ledger.map(|ix| amt(l.ledgers.balance(ix))).unwrap_or_default();
+        let parent = t.nodes[n].end as usize > n + 1;
+        let subtotal = if parent {
+            let (m, kind) = t.total(l, n);
+            format!("{}{}", amt(m), if kind.is_none() { " net" } else { "" })
+        } else {
+            String::new()
+        };
+        println!("{:<40} {:>14} {:>18}", truncate(&label, 40), own, subtotal);
+    }
+    Ok(())
+}
+
 pub fn buckets(l: &Budget) {
     let live: Vec<_> = l.buckets.live().collect();
     if live.is_empty() {
@@ -254,11 +289,25 @@ pub fn buckets(l: &Budget) {
 pub fn bucket(l: &Budget, uid: BucketUid, roll: RollUp, sort: LedgerSort) -> Result<()> {
     let r = roll_up(l, uid, roll, sort, Order::Asc)
         .ok_or_else(|| Error::Invalid("no such bucket".into()))?;
-    println!("{} ({} ledger(s))\n", r.name, r.lines.len());
-    println!("  {:<28} {:<7} {:>14} {:>14}", "ledger", "normal", "balance", "contributes");
+    let bix = l.buckets.ix(uid).expect("rolled up").get();
+    let subtrees = &l.buckets.subtrees[bix];
+    println!("{} ({} ledger(s))", r.name, r.lines.len());
+    if !subtrees.is_empty() {
+        println!("Includes everything under: {}", subtrees.join(", "));
+    }
+    println!("\n  {:<28} {:<7} {:>14} {:>14}", "ledger", "normal", "balance", "contributes");
     for line in &r.lines {
+        let via = if l.buckets.explicit[bix].contains(&line.ledger) {
+            String::new()
+        } else {
+            subtrees
+                .iter()
+                .find(|p| ledgit_core::tree::is_under(&line.name, p))
+                .map(|p| format!("  (via {p})"))
+                .unwrap_or_default()
+        };
         println!(
-            "  {:<28} {:<7} {:>14} {:>14}",
+            "  {:<28} {:<7} {:>14} {:>14}{via}",
             truncate(&line.name, 28),
             &line.normality,
             amt(line.balance),

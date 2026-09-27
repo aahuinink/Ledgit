@@ -10,6 +10,7 @@
 mod app;
 mod fmt;
 mod forms;
+mod picker;
 #[cfg(test)]
 mod smoke;
 mod views;

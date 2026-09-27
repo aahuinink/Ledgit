@@ -761,6 +761,21 @@ impl<S: Store> Repo<S> {
         Ok(uid)
     }
 
+    /// Stage the renames that move everything under `from` to `to`, and
+    /// re-point any bucket that tracks it. Returns how many ledgers moved.
+    pub fn rename_subtree(&mut self, from: &str, to: &str) -> Result<usize> {
+        if crate::tree::normalize(to).is_empty() {
+            return Err(Error::Invalid("the new path cannot be blank".into()));
+        }
+        let ops = crate::tree::rename_ops(&self.working, from, to);
+        let moved = ops.iter().filter(|o| matches!(o, Op::EditLedger { .. })).count();
+        if moved == 0 {
+            return Err(Error::Invalid(format!("no ledger is at or under \"{from}\"")));
+        }
+        self.stage_all(ops)?;
+        Ok(moved)
+    }
+
     pub fn store(&self) -> &S {
         &self.store
     }
@@ -863,10 +878,18 @@ fn invert(op: &Op, before: &Budget, source: &str) -> Inverse {
                     name: before.buckets.name[i].clone(),
                     description: before.buckets.description[i].clone(),
                 }];
-                ops.extend(before.buckets.members[i].iter().map(|a| Op::AddToBucket {
+                // What was *put* in the bucket, not what it happened to hold:
+                // restoring the subtree brings back its ledgers, and any added
+                // under it since.
+                ops.extend(before.buckets.explicit[i].iter().map(|a| Op::AddToBucket {
                     bucket: *uid,
                     ledger: before.ledgers.uid[a.get()],
                 }));
+                ops.extend(
+                    before.buckets.subtrees[i]
+                        .iter()
+                        .map(|p| Op::AddSubtreeToBucket { bucket: *uid, path: p.clone() }),
+                );
                 Inverse::Many(ops)
             }
             None => Inverse::Nothing(format!("bucket {} was already gone", uid.short())),
@@ -876,6 +899,12 @@ fn invert(op: &Op, before: &Budget, source: &str) -> Inverse {
         }
         Op::RemoveFromBucket { bucket, ledger } => {
             Inverse::Op(Op::AddToBucket { bucket: *bucket, ledger: *ledger })
+        }
+        Op::AddSubtreeToBucket { bucket, path } => {
+            Inverse::Op(Op::RemoveSubtreeFromBucket { bucket: *bucket, path: path.clone() })
+        }
+        Op::RemoveSubtreeFromBucket { bucket, path } => {
+            Inverse::Op(Op::AddSubtreeToBucket { bucket: *bucket, path: path.clone() })
         }
         Op::CreateCohort { uid, .. } => Inverse::Op(Op::DeleteCohort { uid: *uid }),
         Op::EditCohort { uid, name, description } => match before.cohorts.ix(*uid) {
