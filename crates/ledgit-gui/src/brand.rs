@@ -137,6 +137,11 @@ fn crop_to_content(pixmap: &tiny_skia::Pixmap, pad: u32) -> Raster {
     into_raster(&pixmap.clone_rect(rect).expect("crop lies inside the image"))
 }
 
+/// The `.ico` writer from `build.rs`, compiled here so its output is tested.
+#[cfg(test)]
+#[path = "../build/ico.rs"]
+mod ico;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +185,30 @@ mod tests {
             ink(&dark)
         );
         assert!(logo(320, true).rgba.chunks(4).any(|p| p[3] == 255 && p[0] > 230));
+    }
+
+    /// The exe icon: a well-formed `.ico` whose directory points at a PNG of
+    /// the right size for every entry.
+    #[test]
+    fn the_exe_icon_is_a_valid_ico() {
+        let data = ico::ico(ICON);
+        let u16_at = |i: usize| u16::from_le_bytes([data[i], data[i + 1]]) as usize;
+        let u32_at = |i: usize| u32::from_le_bytes(data[i..i + 4].try_into().unwrap()) as usize;
+        assert_eq!((u16_at(0), u16_at(2), u16_at(4)), (0, 1, ico::SIZES.len()));
+        for (k, size) in ico::SIZES.iter().enumerate() {
+            let e = 6 + 16 * k;
+            let dim = if *size == 256 { 0 } else { *size as u8 };
+            assert_eq!((data[e], data[e + 1]), (dim, dim), "entry {k}");
+            assert_eq!(u16_at(e + 6), 32, "32 bits per pixel");
+            let (len, at) = (u32_at(e + 8), u32_at(e + 12));
+            let png = &data[at..at + len];
+            assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+            // IHDR width and height, big-endian, right after the signature.
+            let w = u32::from_be_bytes(png[16..20].try_into().unwrap());
+            let h = u32::from_be_bytes(png[20..24].try_into().unwrap());
+            assert_eq!((w, h), (*size, *size));
+        }
+        let last = 6 + 16 * (ico::SIZES.len() - 1);
+        assert_eq!(u32_at(last + 12) + u32_at(last + 8), data.len(), "no trailing bytes");
     }
 }

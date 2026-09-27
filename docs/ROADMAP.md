@@ -81,6 +81,23 @@ drew without panicking; what no test can check is whether it *looks* right.
    taskbar is painted by Windows. Check the taskbar icon under both Windows
    themes, and that switching the system theme swaps it while running.
    *`brand.rs`; artwork in `assets/`.*
+12. **The exe icon.** `crates/ledgit-gui/build.rs` renders `assets/Icon.svg`
+   into a 7-size `.ico` and embeds it with `winresource`, which needs `rc.exe`
+   from the Windows SDK (it comes with the VS Build Tools that MSVC Rust
+   uses). It has never run on Windows. Check, after `cargo build --release`:
+   - no `ledgit-gui.exe will have no icon` warning in the build output (if
+     there is one, it names why - usually `rc.exe` not found);
+   - `target\release\ledgit-gui.exe` shows the icon in Explorer, at small and
+     large icon sizes (each size is rendered separately, so 16px should be
+     crisp, not a blurred 256px);
+   - after installing: the Start-menu and desktop shortcuts, the entry in
+     Settings > Apps, and a `.ledgit` file in Explorer all show it - all four
+     read the exe's icon;
+   - which copy reads better on your Explorer and taskbar. The exe can carry
+     only one; it is the original (black strokes). If the dark copy suits
+     better, change `ICON` in `build.rs` to `Icon_dark.svg`.
+   Explorer caches icons hard: if an old one sticks, rename the exe or run
+   `ie4uinit.exe -show`.
 
 Run it against a throwaway budget rather than a real one:
 

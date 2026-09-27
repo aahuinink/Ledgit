@@ -20,3 +20,9 @@ egui_plot = { workspace = true }
 resvg = { workspace = true }
 ledgit-plot = { workspace = true }
 serde = { workspace = true }
+
+# Only build.rs uses these. Both compile anywhere, so the icon code is checked
+# on every platform even though it only runs when targeting Windows.
+[build-dependencies]
+resvg = { workspace = true }
+winresource = { version = "0.1", default-features = false }
