@@ -114,6 +114,25 @@ Run it against a throwaway budget rather than a real one:
 cargo run -p ledgit-gui -- /tmp/scratch.ledgit
 ```
 
+# First Things First:
+
+Create test .ledgit files that simulate all the gui things you want me to check. I don't have time to come up with fake budgets to simulate this stuff. Then we'll move on to the fixes/features below that I've found as I've been working through it.
+
+# GUI Fixes/Features
+
+1. Give me a back arrow for screens and an undo button for actions.
+2. In the Create Ledger pop up, give me the option to navigate through the tree to make a sub-ledger.
+3. Give me a calendar date picker for all the date stuff (issuers, transactions, etc.). Make the default date be the current date
+4. The New transaction form dropdown for picking sides displays behind the form. It is not visible except for the part that runs past the popup window.
+
+# Funcitonal Fixes/Features
+1. If dropping a ledger breaks any transactions in the staging area, flag them and don't allow me to commit until I fix them.
+2. Allow me to add optional target balance to a ledger and notification levels. I'd like notifications if an account drops below or goes above a specific balance with a custom message. Then allow me in Views to see how long till i hit an account target when running a simulation. Also add an option to aggregate targets in a bucket. Finally, allow me to toggle "Target Reached" information in the Ledger information tab that will tell me when a target gets reached.
+3. Create a  tab where I can define custom variables like numbers or strings. I'd like to be able to reference them when creating transactions. 
+For example, i should be able to create a variable called "Car_Km_Rate" and then charge myself mileage by saying something like 200*Car_Km_Rate. You can set up the parsing for this however you like.
+4. Give me the ability to edit a staged change. for example changing the ledgers in a transaction without having to fully drop it and re-enter it.
+5. Give me the option to apply interest or ratios to an account with an issuer. I should be able to say "Take 5% of this account balance and move it here", or "Apply 6.45% APR intrest to this loan" as an issuer.
+6. In views allow me to compare ledger performance between commits, for example i want to see how the target on a loan ledger changes as I make lump-sum payments towards it.
 
 ## Done
 
