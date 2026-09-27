@@ -93,6 +93,9 @@ drew without panicking; what no test can check is whether it *looks* right.
    - after installing: the Start-menu and desktop shortcuts, the entry in
      Settings > Apps, and a `.ledgit` file in Explorer all show it - all four
      read the exe's icon;
+   - that the hollow rings still read at 16-32px (taskbar, title bar, list
+     views): at those sizes each ring is about one pixel wide, so the mark is
+     lighter than it was with filled circles;
    - which copy reads better on your Explorer and taskbar. The exe can carry
      only one; it is the original (black strokes). If the dark copy suits
      better, change `ICON` in `build.rs` to `Icon_dark.svg`.
