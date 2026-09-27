@@ -35,6 +35,9 @@ below: editing, charts, keyboard.
 Ranked by how likely I think they are to be wrong. Everything here compiled and
 drew without panicking; what no test can check is whether it *looks* right.
 
+- Lets also make the logo icon in the top left corner a button that I can press as my "File" button where I can make a new budget or open another budget without closing the Ledgit instance i'm in.
+- Do not support multiple instances of Ledgit
+
 1. **Right-aligned number columns.** Every table puts its amounts in a
    right-to-left layout inside a `Grid` cell. That is the construct most likely
    to size itself strangely - look for a balance column that is too wide, or
@@ -43,7 +46,8 @@ drew without panicking; what no test can check is whether it *looks* right.
 
 _Feedback_
 
-    - The right-most columns are way too far over to the right, I almost didn't notice them. For example, "Balance" and subtree total in a ledger screen and "Entries" in the Ledgers Affected section of the commit screen.
+    - The right-most columns are way too far over to the right, I almost didn't notice them. For example, "Balance" and subtree total in a ledger screen and "Entries" in the Ledgers Affected section of the commit screen. They resize weird, table cell formatting does not extend to the far right column cells.
+    - When there are a lot of Ledgers in a bucket, it isn't scrollable and runs off the screen, so I can't see everything.
 
 2. **The transaction and issuer forms.** They carry the leg editor - toggle,
    ledger picker, amount, remove button on one row - and the modal is widened
@@ -53,8 +57,7 @@ _Feedback_
 
 _Feedback_
 
-    - The drop-down menu in the forms display behind the pop-up and are not selectable.
-    - In general, all the "x" buttons appear as simple squares without x's.
+    - No bleeding. looks fine
 
 3. **The "New" menu closing.** It calls `ui.close()`, whose exact semantics in
    egui 0.33 I could not verify without running it. If the menu stays open
@@ -73,6 +76,7 @@ _Feedback_
 _Feedback_
 
     - Functions as explained. I cannot resize the window to be smaller past a certain point unless i zoom out more with ctrl scroll. The detail pane is the only thing that gets cramped.
+    - I also cannot switch to other branches for some reason. The "Switch" buttons are greyed out and unselectable
 
 5. **Split rendering.** Cells naming several ledgers are clipped with the full
    text on hover. Check the hover actually shows, and that clipping at 22-26
@@ -83,7 +87,7 @@ _Feedback_
 _Feedback_
 
     - The detail screen for a specific view has way too much whitespace in the "Buckets" section (looks like its a fixed size and doesn't resize based on the number of buckets), and then when there are a lot of ledgers the ledgers bleed into cells below. 
-        - Make cells resize to fit their content up to a certain point, then make them scrollable if they get too large.
+    - Make cells resize to fit their content up to a certain point, then make them scrollable if they get too large.
 
 6. **The cohort calendar.** Day cells are fixed at 118x72 with three entries
    and a "+N more"; a busy month may want taller cells or a list instead.
@@ -100,7 +104,8 @@ _Feedback_
 
 _Feedback_
 
-    - Looks good
+    - A large legend should be scrollable, otherwise it blocks the plot.
+    - Lots of issues with cell text bleed as expalined elsewhere.
 
 8. **The ledger tree picker.** A searchable tree inside a combo box, used for
    entry sides and bucket members. Check the popup's height (360px) and that
@@ -109,11 +114,16 @@ _Feedback_
 
 _Feedback_
 
-    - Looks good
+    - Not searchable. Clicking the search bar closes the picker.
 
 9. **The Ledgers tree.** Indented rows with fold arrows, a "move" button on
    every level with children, subtotals right-aligned. *`views/ledgers.rs`,
    `tree()`.*
+
+_Feedback_
+
+    - Arrows look good, alignment is fine, but there is the same issue with the far-right column formating and resizing as in #1. 
+
 10. **The top-bar freshness label** ("through ... · issuers ...") may crowd
    the "New" menu on a narrow window. *`app.rs`, `freshness()`.*
 
@@ -158,7 +168,6 @@ _Feedback_
    uninstall, then delete `%LOCALAPPDATA%\IconCache.db` and the
    `iconcache_*.db` files in `%LOCALAPPDATA%\Microsoft\Windows\Explorer`
    and sign out and back in.
-
 
 Run it against a throwaway budget rather than a real one. Three are generated
 for you, dated relative to the day you run the generator, so re-run it rather
