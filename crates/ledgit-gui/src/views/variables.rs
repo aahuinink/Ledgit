@@ -8,6 +8,7 @@
 use super::{empty, heading};
 use crate::app::Session;
 use crate::fmt;
+use crate::table::{text, Height, Table};
 use egui::{RichText, Ui};
 use ledgit_core::model::validate_var_name;
 use ledgit_core::prelude::*;
@@ -51,20 +52,24 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
 
     let mut edit: Option<usize> = None;
     let mut delete: Option<String> = None;
-    egui::Grid::new("variables").num_columns(4).striped(true).spacing([18.0, 6.0]).show(ui, |ui| {
-        for h in ["name", "value", "kind", ""] {
-            ui.label(RichText::new(h).small().color(fmt::dim()));
-        }
-        ui.end_row();
-        let v = &s.budget().variables;
-        for i in 0..v.len() {
-            ui.label(RichText::new(&v.name[i]).monospace().strong());
-            ui.label(RichText::new(v.value[i].as_str()).monospace());
-            ui.label(
-                RichText::new(if v.value[i].is_number() { "number" } else { "text" })
-                    .color(fmt::dim()),
-            );
-            ui.horizontal(|ui| {
+    let v = &s.budget().variables;
+    Table::new("variables", vec![text("name"), text("value").max(420.0), text("kind"), text("")])
+        .height(Height::Fill)
+        .show(ui, v.len(), |row| {
+            let i = row.index();
+            row.col(|ui| {
+                ui.label(RichText::new(&v.name[i]).monospace().strong());
+            });
+            row.col(|ui| {
+                ui.label(RichText::new(v.value[i].as_str()).monospace());
+            });
+            row.col(|ui| {
+                ui.label(
+                    RichText::new(if v.value[i].is_number() { "number" } else { "text" })
+                        .color(fmt::dim()),
+                );
+            });
+            row.col(|ui| {
                 if ui.small_button("edit").clicked() {
                     edit = Some(i);
                 }
@@ -72,9 +77,7 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
                     delete = Some(v.name[i].clone());
                 }
             });
-            ui.end_row();
-        }
-    });
+        });
 
     if let Some(i) = edit {
         let v = &s.budget().variables;

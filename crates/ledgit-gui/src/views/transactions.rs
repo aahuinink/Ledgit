@@ -10,6 +10,7 @@ use crate::app::{Screen, Session};
 use crate::datepick::DateField;
 use crate::fmt;
 use crate::forms::FormKind;
+use crate::table::{figures, text, Height, Table};
 use egui::{ComboBox, RichText, Ui};
 use ledgit_core::prelude::*;
 
@@ -124,51 +125,56 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
     );
     ui.add_space(6.0);
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        egui::Grid::new("transactions").num_columns(5).striped(true).spacing([16.0, 6.0]).show(
-            ui,
-            |ui| {
-                for h in ["date", "name", "debit", "credit"] {
-                    ui.label(RichText::new(h).small().color(fmt::dim()));
-                }
-                num(ui, RichText::new("amount").small().color(fmt::dim()));
-                ui.end_row();
-
-                for ix in &rows {
-                    let l = s.budget();
-                    let i = ix.get();
-                    let issued = l.transactions.parent[i] != Parent::Manual;
-                    let split = l.transactions.is_split(*ix);
-
-                    ui.label(fmt::mono(l.transactions.date[i].to_string()));
-                    let name = RichText::new(&l.transactions.name[i]);
-                    ui.label(if issued { name.italics() } else { name }).on_hover_text(if issued {
-                        "posted by an issuer"
-                    } else {
-                        "entered by hand"
-                    });
-
-                    // One side per column normally; a split names every ledger
-                    // it touches rather than hiding them behind a label, and
-                    // only the first is clickable.
-                    let (dr, cr) = fmt::sides(l, *ix);
-                    let debit_uid = first_ledger(l, *ix, true);
-                    let credit_uid = first_ledger(l, *ix, false);
-                    let amount = l.amount_of(*ix);
-
-                    if ui.link(&dr).on_hover_text(if split { "split entry" } else { "" }).clicked()
-                    {
-                        s.selected_ledger = debit_uid;
-                        s.goto = Some(Screen::Register);
-                    }
-                    if ui.link(&cr).clicked() {
-                        s.selected_ledger = credit_uid;
-                        s.goto = Some(Screen::Register);
-                    }
-                    num(ui, fmt::mono(fmt::amount(amount)));
-                    ui.end_row();
-                }
-            },
-        );
+    let mut open: Option<Option<LedgerUid>> = None;
+    Table::new(
+        "transactions",
+        vec![
+            text("date"),
+            text("name").max(360.0),
+            text("debit").max(300.0),
+            text("credit").max(300.0),
+            figures("amount"),
+        ],
+    )
+    .height(Height::Fill)
+    .show(ui, rows.len(), |row| {
+        let ix = rows[row.index()];
+        let i = ix.get();
+        let issued = l.transactions.parent[i] != Parent::Manual;
+        let split = l.transactions.is_split(ix);
+        row.col(|ui| {
+            ui.label(fmt::mono(l.transactions.date[i].to_string()));
+        });
+        row.col(|ui| {
+            let name = RichText::new(&l.transactions.name[i]);
+            ui.label(if issued { name.italics() } else { name }).on_hover_text(if issued {
+                "posted by an issuer"
+            } else {
+                "entered by hand"
+            });
+        });
+        // One side per column normally; a split names every ledger it
+        // touches rather than hiding them behind a label, and only the
+        // first is clickable.
+        let (dr, cr) = fmt::sides(l, ix);
+        row.col(|ui| {
+            let link = ui.link(&dr);
+            let link = if split { link.on_hover_text("split entry") } else { link };
+            if link.clicked() {
+                open = Some(first_ledger(l, ix, true));
+            }
+        });
+        row.col(|ui| {
+            if ui.link(&cr).clicked() {
+                open = Some(first_ledger(l, ix, false));
+            }
+        });
+        row.col(|ui| {
+            num(ui, fmt::mono(fmt::amount(l.amount_of(ix))));
+        });
     });
+    if let Some(uid) = open {
+        s.selected_ledger = uid;
+        s.goto = Some(Screen::Register);
+    }
 }

@@ -386,7 +386,7 @@ fn the_top_bar_draws_the_mark_in_both_themes() {
         egui::__run_test_ctx(|ctx| {
             ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
             let brand = crate::brand::Brand::load(ctx);
-            crate::app::top_bar(ctx, &mut s, &brand);
+            crate::app::top_bar(ctx, &mut s, &brand, &[]);
         });
     }
 }
@@ -544,7 +544,9 @@ fn every_symbol_in_the_source_has_a_glyph() {
         include_str!("datepick.rs"),
         include_str!("fmt.rs"),
         include_str!("forms.rs"),
+        include_str!("instance.rs"),
         include_str!("picker.rs"),
+        include_str!("table.rs"),
         include_str!("views/buckets.rs"),
         include_str!("views/cohorts.rs"),
         include_str!("views/commit.rs"),
@@ -603,7 +605,7 @@ fn targets_and_alerts_draw_everywhere() {
     draw(&mut s, Screen::Views);
     egui::__run_test_ctx(|ctx| {
         let brand = crate::brand::Brand::load(ctx);
-        crate::app::top_bar(ctx, &mut s, &brand);
+        crate::app::top_bar(ctx, &mut s, &brand, &[]);
     });
 }
 
@@ -654,4 +656,306 @@ fn draws_a_real_file() {
     }
     println!("{path}: every screen drawn in {:?}", t.elapsed());
     assert_eq!(s.repo.staged(), &staged[..], "drawing must not change the stage");
+}
+
+// ----------------------------------------------------------------- layout
+//
+// What a pixel test can check without a display: where the text lands. Each
+// run returns every piece of text egui painted, with its rectangle.
+
+/// Draw `f` for a few passes in a window of `size` and return the text of
+/// the last one. Several passes, because a table measures its columns first.
+fn painted_text(size: egui::Vec2, mut f: impl FnMut(&egui::Context)) -> Vec<(String, egui::Rect)> {
+    let ctx = egui::Context::default();
+    let mut out = Vec::new();
+    for _ in 0..4 {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        let full = ctx.run(input, &mut f);
+        out = full
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => {
+                    Some((t.galley.text().to_string(), t.galley.rect.translate(t.pos.to_vec2())))
+                }
+                _ => None,
+            })
+            .collect();
+    }
+    out
+}
+
+fn find<'a>(texts: &'a [(String, egui::Rect)], text: &str) -> Vec<&'a egui::Rect> {
+    texts.iter().filter(|(t, _)| t == text).map(|(_, r)| r).collect()
+}
+
+/// The first real-run complaint: figures in the last column were pushed
+/// against the far edge of the window, away from their header. They belong
+/// right-aligned under the header, in a column as wide as they are.
+#[test]
+fn figures_sit_under_their_header_not_at_the_window_edge() {
+    let mut s = session();
+    s.ledger_tree = false;
+    let texts = painted_text(egui::vec2(1600.0, 900.0), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| views::ledgers::show(ui, &mut s));
+    });
+    // The sort control says "balance" too; the column header is below it.
+    let header = *find(&texts, "balance").last().expect("a balance header");
+    let cash = s.budget().ledgers.ix(s.selected_ledger.unwrap()).unwrap();
+    let amount = crate::fmt::amount(s.budget().ledgers.balance(cash));
+    let figure = find(&texts, &amount)[0];
+    assert!(
+        (figure.right() - header.right()).abs() < 1.5,
+        "figure {figure:?} is not right-aligned with its header {header:?}"
+    );
+    assert!(header.right() < 900.0, "the balance column ran to the window edge: {header:?}");
+}
+
+/// A headless window to click and type in, reporting what it painted.
+struct Window {
+    ctx: egui::Context,
+    size: egui::Vec2,
+}
+
+impl Window {
+    fn new(w: f32, h: f32) -> Window {
+        Window { ctx: egui::Context::default(), size: egui::vec2(w, h) }
+    }
+
+    fn pass(
+        &self,
+        events: Vec<egui::Event>,
+        f: &mut dyn FnMut(&egui::Context),
+    ) -> Vec<(String, egui::Rect)> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.size)),
+            events,
+            ..Default::default()
+        };
+        let full = self.ctx.run(input, |ctx| f(ctx));
+        full.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => {
+                    Some((t.galley.text().to_string(), t.galley.rect.translate(t.pos.to_vec2())))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Press and release at `at`, then let the result settle.
+    fn click(
+        &self,
+        at: egui::Pos2,
+        f: &mut dyn FnMut(&egui::Context),
+    ) -> Vec<(String, egui::Rect)> {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        self.pass(vec![egui::Event::PointerMoved(at), button(true)], f);
+        self.pass(vec![button(false)], f);
+        self.pass(vec![], f)
+    }
+
+    fn settle(&self, f: &mut dyn FnMut(&egui::Context)) -> Vec<(String, egui::Rect)> {
+        self.pass(vec![], f);
+        self.pass(vec![], f)
+    }
+}
+
+fn centre_of(texts: &[(String, egui::Rect)], text: &str) -> egui::Pos2 {
+    texts
+        .iter()
+        .find(|(t, _)| t == text)
+        .unwrap_or_else(|| panic!("{text:?} is not on screen: {texts:?}"))
+        .1
+        .center()
+}
+
+/// Clicking the picker's search box used to close the picker: a combo box
+/// closes on any click, its own contents included.
+#[test]
+fn the_ledger_picker_stays_open_to_be_searched() {
+    let s = session();
+    let budget = s.repo.working().clone();
+    let picked = std::cell::Cell::new(None);
+    let mut draw = |ctx: &egui::Context| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(p) = crate::picker::Picker::new("probe", &budget).show(ui) {
+                picked.set(Some(p));
+            }
+        });
+    };
+    let w = Window::new(1000.0, 800.0);
+    let texts = w.settle(&mut draw);
+    let texts = w.click(centre_of(&texts, "choose a ledger..."), &mut draw);
+    let hint = "search, e.g. wedding or tux";
+    let texts = w.click(centre_of(&texts, hint), &mut draw);
+    assert!(
+        texts.iter().any(|(t, _)| t == "Chequing  [debit]"),
+        "clicking the search box closed the list"
+    );
+
+    w.pass(vec![egui::Event::Text("tux".into())], &mut draw);
+    let texts = w.settle(&mut draw);
+    assert!(texts.iter().any(|(t, _)| t == "Tuxedo  [debit]"), "the match is listed: {texts:?}");
+    assert!(!texts.iter().any(|(t, _)| t == "Chequing  [debit]"), "the search filters the list");
+
+    let texts = w.click(centre_of(&texts, "Tuxedo  [debit]"), &mut draw);
+    assert!(matches!(picked.take(), Some(crate::picker::Pick::Ledger(_))));
+    assert!(!texts.iter().any(|(t, _)| t == hint), "a pick closes the list");
+}
+
+/// The logo is a File menu. Picking from it is reported to the app, which
+/// swaps the budget after the frame.
+#[test]
+fn the_logo_opens_the_file_menu() {
+    let mut s = session();
+    let recent = vec!["elsewhere/other.ledgit".to_string()];
+    let action = std::cell::RefCell::new(None);
+    let w = Window::new(1400.0, 800.0);
+    let mut draw = |ctx: &egui::Context| {
+        let brand = crate::brand::Brand::load(ctx);
+        if let Some(a) = crate::app::top_bar(ctx, &mut s, &brand, &recent) {
+            *action.borrow_mut() = Some(a);
+        }
+    };
+    w.settle(&mut draw);
+    // The mark is an image, so find it by where it sits: just right of the
+    // back arrow, left of the budget's name.
+    let texts = w.settle(&mut draw);
+    let name = centre_of(&texts, "test");
+    let texts = w.click(egui::pos2(name.x - 30.0, name.y), &mut draw);
+    for item in ["New budget...", "Open budget...", "Open recent", "Close budget"] {
+        assert!(texts.iter().any(|(t, _)| t == item), "{item} is in the File menu: {texts:?}");
+    }
+    w.click(centre_of(&texts, "Close budget"), &mut draw);
+    assert_eq!(action.take(), Some(crate::app::FileAction::Close));
+}
+
+/// Switching branch with changes staged used to be impossible - the button
+/// was greyed out. Now it asks, and shelving keeps the work on the branch
+/// it was entered on.
+#[test]
+fn switching_branch_with_staged_work_asks_and_can_shelve_it() {
+    let s = std::cell::RefCell::new(session());
+    s.borrow_mut().repo.branch("what-if", None).unwrap();
+    let staged = s.borrow().repo.staged().len();
+    assert!(staged > 0);
+    let w = Window::new(1400.0, 800.0);
+    let mut draw = |ctx: &egui::Context| {
+        egui::CentralPanel::default().show(ctx, |ui| views::history::show(ui, &mut s.borrow_mut()));
+    };
+    let texts = w.settle(&mut draw);
+    let texts = w.click(centre_of(&texts, "switch"), &mut draw);
+    let texts = w.click(centre_of(&texts, "Shelve them on main"), &mut draw);
+    assert!(!texts.iter().any(|(t, _)| t == "Switch to what-if?"), "the question is answered");
+    {
+        let s = s.borrow();
+        assert_eq!(s.repo.head().branch_name(), Some("what-if"));
+        assert!(s.repo.staged().is_empty());
+        assert_eq!(s.repo.shelved("main").unwrap(), staged);
+    }
+
+    // Back again: the work comes off the shelf.
+    let texts = w.settle(&mut draw);
+    assert!(texts.iter().any(|(t, _)| t == &format!("{staged} shelved")), "{texts:?}");
+    w.click(centre_of(&texts, "switch"), &mut draw);
+    let s = s.borrow();
+    assert_eq!(s.repo.head().branch_name(), Some("main"));
+    assert_eq!(s.repo.staged().len(), staged);
+}
+
+/// A busy month reads better as a list; the calendar offers one.
+#[test]
+fn the_cohort_calendar_draws_as_a_list() {
+    let mut s = session();
+    s.calendar_month = "2024-01-01".parse().unwrap();
+    s.calendar_list = true;
+    draw(&mut s, Screen::Cohorts);
+    s.selected_cohort = None;
+    draw(&mut s, Screen::Cohorts);
+    s.calendar_month = "1990-06-01".parse().unwrap();
+    draw(&mut s, Screen::Cohorts);
+}
+
+/// A session with a bucket holding `n` ledgers, one with a very long name.
+fn crowded(n: usize) -> Session {
+    let mut s = session();
+    let bucket = s.selected_bucket.unwrap();
+    let open = "2024-01-01".parse().unwrap();
+    for i in 0..n {
+        let name = if i == 0 {
+            "Expenses:Household:An extraordinarily long ledger name that goes on and on, and then on some more after that".into()
+        } else {
+            format!("Expenses:Item {i:03}")
+        };
+        let ledger = s.repo.add_ledger(name, "", Normality::Debit, open).unwrap();
+        s.repo.stage(Op::AddToBucket { bucket, ledger }).unwrap();
+    }
+    s
+}
+
+/// A bucket with more ledgers than fit on screen scrolls, rather than
+/// running off the bottom of the window.
+#[test]
+fn a_long_bucket_scrolls_inside_the_window() {
+    let mut s = crowded(80);
+    let texts = painted_text(egui::vec2(1200.0, 700.0), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| views::buckets::show(ui, &mut s));
+    });
+    let items = texts.iter().filter(|(t, _)| t.starts_with("Expenses:Item")).count();
+    assert!(items > 5, "the members are listed: {texts:?}");
+    assert!(items < 79, "only what fits is drawn; the rest scrolls ({items} drawn)");
+    let lowest = texts.iter().map(|(_, r)| r.bottom()).fold(0.0, f32::max);
+    assert!(lowest <= 700.0, "text drawn below the window: {lowest}");
+    // The Add row sits above the list, so it is always in reach.
+    assert!(centre_of(&texts, "Add").y < centre_of(&texts, "Expenses:Item 001").y);
+}
+
+/// Long text is cut short inside its own column instead of spilling over
+/// the next one.
+#[test]
+fn a_long_name_does_not_bleed_into_the_next_column() {
+    let mut s = crowded(3);
+    s.ledger_tree = false;
+    let texts = painted_text(egui::vec2(1400.0, 800.0), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| views::ledgers::show(ui, &mut s));
+    });
+    let long = texts
+        .iter()
+        .find(|(t, _)| t.starts_with("Expenses:Household:An extra"))
+        .expect("the long name is drawn");
+    // (The galley keeps its whole text even when it is drawn elided, so the
+    // test is on where it ends, not on what it says.)
+    let row_mid = long.1.center().y;
+    let normal = texts
+        .iter()
+        .find(|(t, r)| t == "debit" && (r.center().y - row_mid).abs() < 3.0)
+        .expect("the normality on the same row");
+    assert!(long.1.right() < normal.1.left(), "{:?} runs into {:?}", long.1, normal.1);
+}
+
+/// The Views editor's chip rows fit what they hold, then scroll: a hundred
+/// ledgers must not push everything below them off the page, and a few
+/// buckets must not leave a gap.
+#[test]
+fn the_view_editor_sections_fit_then_scroll() {
+    let mut s = crowded(100);
+    let texts = painted_text(egui::vec2(1400.0, 900.0), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| views::saved::show(ui, &mut s));
+    });
+    let y = |t: &str| centre_of(&texts, t).y;
+    let row = 18.0;
+    assert!(y("Ledgers") - y("Buckets") < 3.0 * row + 12.0, "gap after a short bucket list");
+    let tall = y("Issuers") - y("Ledgers");
+    assert!(tall < 160.0, "the ledger chips run {tall} tall instead of scrolling");
+    assert!(tall > 60.0, "the ledger chips show more than a sliver");
 }

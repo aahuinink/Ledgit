@@ -874,7 +874,7 @@ impl Budget {
     }
 
     /// The date of the newest transaction on record, staged or committed.
-    /// "This budget is up to date through ..." in the GUI's top bar.
+    /// "Fresh through ..." in the GUI's top bar.
     pub fn latest_transaction_date(&self) -> Option<Date> {
         self.transactions.date.iter().copied().max()
     }

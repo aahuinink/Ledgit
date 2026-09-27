@@ -29,6 +29,19 @@ use crate::store::{Store, DEFAULT_BRANCH};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// What a checkout does with staged work.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StagedWork {
+    /// Refuse to switch while anything is staged.
+    Refuse,
+    /// Set it aside on the branch being left; it comes back when you return.
+    Shelve,
+    /// Take it to the other branch. Changes that do not apply there - an
+    /// entry posting to a ledger that branch never opened - are flagged as
+    /// broken, not dropped.
+    Bring,
+}
+
 pub struct Repo<S: Store> {
     store: S,
     author: String,
@@ -466,6 +479,12 @@ impl<S: Store> Repo<S> {
         if self.store.get_ref(name)?.is_none() {
             return Err(Error::NoSuchRef(name.into()));
         }
+        let shelved = self.shelved(name)?;
+        if shelved > 0 {
+            return Err(Error::Invalid(format!(
+                "{name} has {shelved} shelved change(s); switch to it and commit or discard them first"
+            )));
+        }
         self.store.set_ref(name, None)?;
         self.store.flush()
     }
@@ -474,27 +493,82 @@ impl<S: Store> Repo<S> {
     ///
     /// Refuses while anything is staged: the staging area belongs to the
     /// branch it was entered on, and silently carrying it across is how people
-    /// post rent to the wrong budget.
+    /// post rent to the wrong budget. [`Repo::checkout_with`] says what to do
+    /// with it instead.
     pub fn checkout(&mut self, rev: &str) -> Result<()> {
-        if !self.stage.is_empty() {
-            return Err(Error::Invalid(
-                "you have staged changes; commit or discard them before switching".into(),
-            ));
-        }
+        self.checkout_with(rev, StagedWork::Refuse).map(|_| ())
+    }
+
+    /// Switch to a branch, or detach at a commit, deciding what happens to
+    /// anything staged. Arriving on a branch puts back whatever was shelved
+    /// there, after anything brought along. Returns how many changes came back
+    /// off the shelf.
+    pub fn checkout_with(&mut self, rev: &str, staged: StagedWork) -> Result<usize> {
         let head = match self.store.get_ref(rev)? {
             Some(_) => Head::Branch { name: rev.to_string() },
             None => Head::Detached { at: self.resolve(rev)? },
         };
+        if head == self.head {
+            return Ok(0);
+        }
+        let mut carried = Vec::new();
+        if !self.stage.is_empty() {
+            match staged {
+                StagedWork::Refuse => {
+                    return Err(Error::Invalid(
+                        "you have staged changes; commit, discard or shelve them before switching"
+                            .into(),
+                    ))
+                }
+                StagedWork::Shelve => {
+                    let Some(branch) = self.head.branch_name().map(str::to_string) else {
+                        return Err(Error::Invalid(
+                            "staged work can only be shelved on a branch, and HEAD is detached; \
+                             bring it along, commit it or discard it"
+                                .into(),
+                        ));
+                    };
+                    // Shelf first, then the stage: a crash in between leaves the
+                    // work in both places rather than in neither.
+                    let mut shelf = self.store.get_shelf(&branch)?;
+                    shelf.extend(self.stage.iter().cloned());
+                    self.store.set_shelf(&branch, &shelf)?;
+                }
+                StagedWork::Bring => carried = self.stage.clone(),
+            }
+        }
+        let shelf = match head.branch_name() {
+            Some(name) => self.store.get_shelf(name)?,
+            None => Vec::new(),
+        };
+        let restored = shelf.len();
+        carried.extend(shelf);
+        self.stage = carried;
+        self.store.set_stage(&self.stage)?;
+        if let Some(name) = head.branch_name() {
+            if restored > 0 {
+                self.store.set_shelf(name, &[])?;
+            }
+        }
         self.head = head;
         self.store.set_head(&self.head)?;
         self.store.flush()?;
-        self.reload()
+        self.reload()?;
+        Ok(restored)
     }
 
-    /// Create a branch at HEAD and switch to it.
+    /// How many staged changes are shelved on `branch`, waiting for you to
+    /// switch back to it.
+    pub fn shelved(&self, branch: &str) -> Result<usize> {
+        Ok(self.store.get_shelf(branch)?.len())
+    }
+
+    /// Create a branch at HEAD and switch to it. Anything staged comes too:
+    /// the new branch starts where this one is, so it applies unchanged - the
+    /// usual reason to branch is "this work is a what-if".
     pub fn checkout_new(&mut self, name: &str) -> Result<()> {
         self.branch(name, None)?;
-        self.checkout(name)
+        self.checkout_with(name, StagedWork::Bring).map(|_| ())
     }
 
     // ------------------------------------------------------------- reverting

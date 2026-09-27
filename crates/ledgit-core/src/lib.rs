@@ -92,7 +92,7 @@ pub mod prelude {
         IssuerFilter, IssuerQuery, LedgerFilter, LedgerQuery, LedgerSort, Order, RegisterLine,
         RollUp, Sign, Term, TxFilter, TxQuery, TxSort,
     };
-    pub use crate::repo::Repo;
+    pub use crate::repo::{Repo, StagedWork};
     pub use crate::report::{Broken, ChangeReport};
     pub use crate::state::Budget;
     pub use crate::store::{MemStore, Store, DEFAULT_BRANCH};

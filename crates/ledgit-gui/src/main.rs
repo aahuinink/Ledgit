@@ -12,9 +12,11 @@ mod brand;
 mod datepick;
 mod fmt;
 mod forms;
+mod instance;
 mod picker;
 #[cfg(test)]
 mod smoke;
+mod table;
 mod views;
 
 use app::LedgitApp;
@@ -23,11 +25,19 @@ fn main() -> eframe::Result {
     let author = std::env::var("LEDGIT_AUTHOR").unwrap_or_else(|_| whoami());
     let initial = app::initial_path();
 
+    // One Ledgit at a time: if one is running, it opens this budget instead.
+    let user = whoami();
+    let inbox = match instance::claim(instance::port_for(&user), &user, initial.as_deref()) {
+        instance::Claim::Forwarded => return Ok(()),
+        instance::Claim::Primary(inbox) => Some(inbox),
+        instance::Claim::Unguarded => None,
+    };
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Ledgit")
             .with_inner_size([1180.0, 760.0])
-            .with_min_inner_size([900.0, 560.0])
+            .with_min_inner_size([720.0, 480.0])
             // The same artwork as the exe's icon; `ICON` in build.rs picks it.
             .with_icon(brand::window_icon()),
         ..Default::default()
@@ -36,7 +46,13 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Ledgit",
         options,
-        Box::new(move |cc| Ok(Box::new(LedgitApp::new(cc, initial, author)))),
+        Box::new(move |cc| {
+            let app = LedgitApp::new(cc, initial, author);
+            Ok(Box::new(match inbox {
+                Some(inbox) => app.with_inbox(inbox, &cc.egui_ctx),
+                None => app,
+            }))
+        }),
     )
 }
 

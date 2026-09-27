@@ -2,21 +2,27 @@
 
 ## For the next session
 
-**Aaron is running the GUI by hand for the first time.** Everything below the
-checklist is built, tested and committed; the job this session is to fix what
-he reports, not to start new work. Take his findings at face value - no test
-here can tell whether a column is the right width.
+**Aaron has run the GUI once and reported back; everything he reported is
+fixed below.** The job next session is the same as last: take the second run's
+findings at face value and fix them. No test here can tell whether a column is
+the right width.
 
 Context you would otherwise have to rediscover:
 
 - **You cannot run the GUI.** There is no display in this WSL environment.
-  Verify GUI changes with `cargo test -p ledgit-gui`, which runs a real headless
-  egui pass over every screen (`crates/ledgit-gui/src/smoke.rs`), and exercise the
-  same core paths through `cargo run -p ledgit-cli`. Aaron builds and runs natively
-  on Windows.
-- **egui is pinned to 0.33 on purpose.** 0.36 needs rustc 1.95 and the
-  toolchain here is 1.90. Do not bump it. In 0.33 the app implements
-  `App::update(ctx, frame)` and panels take `ctx`, not `&mut Ui`.
+  Verify GUI changes with `cargo test -p ledgit-gui`, which runs real headless
+  egui passes over every screen (`crates/ledgit-gui/src/smoke.rs`). Those tests
+  can also click, type and read back where text was painted (`Window`,
+  `painted_text`) - use that to pin a layout complaint down before fixing it.
+  Exercise the same core paths through `cargo run -p ledgit-cli`. Aaron builds
+  and runs natively on Windows.
+- **egui is pinned to 0.33 on purpose**, and `egui_extras` with it. 0.36 needs
+  rustc 1.95 and the toolchain here is 1.90. Do not bump them. In 0.33 the app
+  implements `App::update(ctx, frame)` and panels take `ctx`, not `&mut Ui`.
+- **Every data table goes through `table.rs`.** Columns fit their content up
+  to a cap, then clip with the full text on hover; figures go in `figures(..)`
+  columns via `num()`. Do not bring back `egui::Grid` for data - it is what put
+  the figures at the window edge. Grid is fine for forms.
 - **`cargo check --target x86_64-pc-windows-gnu` fails**, and that is not a code
   problem: bundled SQLite needs a mingw C compiler that is not installed. The
   native MSVC build on Windows is fine.
@@ -24,150 +30,90 @@ Context you would otherwise have to rediscover:
   `Op` - plain, serialisable data. If a fix tempts you to add a closure, a
   delete operation for a ledger/transaction/issuer, or a derived table in
   SQLite, it is the wrong fix. `docs/ARCHITECTURE.md` says why.
-- **Keep it green.** 169 tests and `cargo clippy --all-targets` clean. A GUI fix
-  that needs a new behaviour usually wants a case added to `smoke.rs`.
+- **Keep it green.** 186 tests and `cargo clippy --all-targets` clean, and
+  `cargo fmt` applied. A GUI fix that needs a new behaviour usually wants a
+  case added to `smoke.rs`.
 
 If he reports nothing and wants to move on, the next work is the GUI gaps
 below: editing, charts, keyboard.
 
-## Checklist: the first real run of the GUI
+## Checklist: the second run of the GUI
 
-Ranked by how likely I think they are to be wrong. Everything here compiled and
-drew without panicking; what no test can check is whether it *looks* right.
+Everything from the first run, fixed, and what to look at to confirm it. The
+first run's feedback is summarised in italics.
 
-- Lets also make the logo icon in the top left corner a button that I can press as my "File" button where I can make a new budget or open another budget without closing the Ledgit instance i'm in.
-- Do not support multiple instances of Ledgit
+1. **Figures at the window edge; stripes stopping short** (*Balance, subtree
+   total and Entries far to the right; cell shading not reaching the last
+   column*). Every data table moved from `egui::Grid` to one helper,
+   `table.rs`. Columns now size to their content, so the last figure column
+   ends where its widest figure does, right-aligned under its header, and the
+   stripes run under every column. Columns can be dragged wider (the thin
+   lines between them are the handles).
+   *Look at:* Ledgers (tree and list), a ledger's register, the Commit
+   screen's "Ledgers affected", Buckets.
+2. **A long bucket ran off the screen.** The member list now scrolls inside
+   the window with its header kept, and "Add" / "Delete bucket" moved *above*
+   it so they cannot be pushed out of reach.
+3. **Switch buttons greyed out on History.** They were disabled because the
+   household fixture has staged changes. Switching now asks what to do with
+   them: **shelve** them on the branch you are leaving (they come back when
+   you switch back, and the branch shows "N shelved" meanwhile), or **bring**
+   them along. "Branch here" brings them. CLI: `ledgit checkout NAME --shelve`
+   or `--bring`. See ARCHITECTURE.md, "Shelves".
+4. **History cramped; the window would not go smaller.** The three panes are
+   now panels: drag the lines between them. Their starting widths follow the
+   window, the commit list truncates to one line per commit (full text on
+   hover), and the detail scrolls. The minimum window size dropped from
+   900x560 to 720x480. Buckets, Cohorts and Views use the same draggable,
+   scrolling list on the left.
+5. **The Views editor** (*too much space under Buckets; ledger chips bleeding
+   into the rows below*). The editor is no longer a Grid: each section is as
+   tall as its chips, up to about five lines, then scrolls. More than 12
+   ledgers adds a filter box above the ledger chips (picked ones always
+   show).
+6. **Busy calendar months.** Cohorts has Month / List beside the month
+   arrows. List is one line per payment, the date shown once per day, with
+   status. A month with a day over three payments says so under the grid,
+   with a button to switch.
+7. **A big legend covered the chart.** The legend is now beside the chart,
+   not on it, and scrolls when longer than the chart is tall. Click a line
+   in it to hide it (and again to bring it back); "show all" resets. The
+   Views tables got the same clipping as everywhere else.
+8. **The picker closed when its search box was clicked.** An egui combo box
+   closes on any click, its own contents included; it now closes only on a
+   click outside or a pick, and the cursor starts in the search box. A test
+   clicks the box, types "tux" and picks the match.
+9. **Ledgers tree far-right column** - same fix as 1.
+10. **"Fresh through ..."** in the top bar, and in `ledgit status`.
 
-1. **Right-aligned number columns.** Every table puts its amounts in a
-   right-to-left layout inside a `Grid` cell. That is the construct most likely
-   to size itself strangely - look for a balance column that is too wide, or
-   numbers that drift away from their header.
-   *`views/mod.rs`, `num()` - every table calls it.*
+New:
 
-_Feedback_
+11. **The logo is the File menu.** Click the mark at the top left: New
+    budget..., Open budget..., Open recent, Close budget (back to the
+    welcome screen). The budget on screen is swapped in place; its staged
+    work is already in its file, so nothing is lost. The window title now
+    names the open budget.
+12. **One Ledgit at a time.** Launching Ledgit while it is running - from
+    the Start menu, or by double-clicking a `.ledgit` file - hands the file
+    to the running window, which opens it and comes to the front (or
+    flashes on the taskbar, if Windows will not let it take focus), and the
+    new launch exits. *Look at:* double-click a second `.ledgit` in Explorer
+    with Ledgit open. How it works, and why a socket: ARCHITECTURE.md,
+    "One Ledgit at a time".
 
-    - The right-most columns are way too far over to the right, I almost didn't notice them. For example, "Balance" and subtree total in a ledger screen and "Entries" in the Ledgers Affected section of the commit screen. They resize weird, table cell formatting does not extend to the far right column cells.
-    - When there are a lot of Ledgers in a bucket, it isn't scrollable and runs off the screen, so I can't see everything.
+Still open from the first run:
 
-2. **The transaction and issuer forms.** They carry the leg editor - toggle,
-   ledger picker, amount, remove button on one row - and the modal is widened
-   to 640px for them. If a row wraps or the remove button falls off the edge,
-   that number is the thing to change.
-   *`forms.rs`, `FormKind::width` and `LegEditor::show`.*
-
-_Feedback_
-
-    - No bleeding. looks fine
-
-3. **The "New" menu closing.** It calls `ui.close()`, whose exact semantics in
-   egui 0.33 I could not verify without running it. If the menu stays open
-   after you pick something, that is the line.
-   *`app.rs`, the `New` menu in `top_bar`.*
-
-_Feedback_
-    
-    - No issues here
-
-4. **The History screen's three columns.** Branches (300px), the commit list
-   (360px), then detail. Below about 1100px wide the detail pane will get
-   cramped before anything else does.
-   *`views/history.rs`.*
-
-_Feedback_
-
-    - Functions as explained. I cannot resize the window to be smaller past a certain point unless i zoom out more with ctrl scroll. The detail pane is the only thing that gets cramped.
-    - I also cannot switch to other branches for some reason. The "Switch" buttons are greyed out and unselectable
-
-5. **Split rendering.** Cells naming several ledgers are clipped with the full
-   text on hover. Check the hover actually shows, and that clipping at 22-26
-   characters is not cutting off something you need to read.
-   *`fmt.rs`, `clip()`; callers in `views/transactions.rs`, `views/ledgers.rs`,
-   `views/search.rs`.*
-
-_Feedback_
-
-    - The detail screen for a specific view has way too much whitespace in the "Buckets" section (looks like its a fixed size and doesn't resize based on the number of buckets), and then when there are a lot of ledgers the ledgers bleed into cells below. 
-    - Make cells resize to fit their content up to a certain point, then make them scrollable if they get too large.
-
-6. **The cohort calendar.** Day cells are fixed at 118x72 with three entries
-   and a "+N more"; a busy month may want taller cells or a list instead.
-   *`views/cohorts.rs`, `calendar()` and `day_cell()`.*
-
-_Feedback_
-    
-    - Yes, give me the option of a list view for busy months.
-
-7. **The Views chart.** egui_plot 0.34, step lines, solid to today and dashed
-   after, month grid lines. Check the dashed tail joins the solid line at the
-   today marker, and that the legend (top left) does not sit on the data.
-   *`views/saved.rs`, `chart()`.*
-
-_Feedback_
-
-    - A large legend should be scrollable, otherwise it blocks the plot.
-    - Lots of issues with cell text bleed as expalined elsewhere.
-
-8. **The ledger tree picker.** A searchable tree inside a combo box, used for
-   entry sides and bucket members. Check the popup's height (360px) and that
-   typing in its search box does not close it.
-   *`picker.rs`.*
-
-_Feedback_
-
-    - Not searchable. Clicking the search bar closes the picker.
-
-9. **The Ledgers tree.** Indented rows with fold arrows, a "move" button on
-   every level with children, subtotals right-aligned. *`views/ledgers.rs`,
-   `tree()`.*
-
-_Feedback_
-
-    - Arrows look good, alignment is fine, but there is the same issue with the far-right column formating and resizing as in #1. 
-
-10. **The top-bar freshness label** ("through ... · issuers ...") may crowd
-   the "New" menu on a narrow window. *`app.rs`, `freshness()`.*
-
-_Feedback_
-
-    - No crowding, but change it to say "Fresh through ... "
-
-11. **The logo and icon.** The welcome screen shows the logo (300px wide), the
-   top bar a 26px mark, each picking the `_dark` copy under the dark theme.
-   The window icon (title bar, taskbar while running) is *not* themed: it is
-   the exe's icon, whichever file `ICON` in `build.rs` names. An earlier
-   version followed the theme egui reports, which is Windows' *app* mode, not
-   the *Windows* mode the taskbar uses - so light apps on a dark taskbar got
-   the light icon. Check the running app's taskbar and title-bar icon is the
-   same dark one as the pinned/Start-menu shortcut.
-   *`brand.rs`; artwork in `assets/`.*
-
-_Feedback_
-
-    - The app, app icon, and window icon use the correct dark mode logo, but the task bar still shows the light mode version, however this is probably a cache thing that I don't care enough to fix. Good enough.
-
-12. **The exe icon.** `crates/ledgit-gui/build.rs` renders `assets/Icon_dark.svg`
-   into a 7-size `.ico` and embeds it with `winresource`, which needs `rc.exe`
-   from the Windows SDK (it comes with the VS Build Tools that MSVC Rust
-   uses). It has never run on Windows. Check, after `cargo build --release`:
-   - no `ledgit-gui.exe will have no icon` warning in the build output (if
-     there is one, it names why - usually `rc.exe` not found);
-   - `target\release\ledgit-gui.exe` shows the icon in Explorer, at small and
-     large icon sizes (each size is rendered separately, so 16px should be
-     crisp, not a blurred 256px);
-   - after installing: the Start-menu and desktop shortcuts, the entry in
-     Settings > Apps, and a `.ledgit` file in Explorer all show it - all four
-     read the exe's icon;
-   - that the hollow rings still read at 16-32px (taskbar, title bar, list
-     views): at those sizes each ring is about one pixel wide, so the mark is
-     lighter than it was with filled circles;
-   - that it reads in Explorer's light views too: Windows uses one icon
-     everywhere, and it is now the dark copy (light strokes). `ICON` in
-     `build.rs` is the one place to switch back; the running app follows.
-   Explorer caches icons per file path, so reinstalling over an old version
-   can keep showing the old icon. If it sticks, run `ie4uinit.exe -show`, or
-   uninstall, then delete `%LOCALAPPDATA%\IconCache.db` and the
-   `iconcache_*.db` files in `%LOCALAPPDATA%\Microsoft\Windows\Explorer`
-   and sign out and back in.
+- **The exe icon** (first-run item 12): not reported on. After
+  `cargo build --release`, check there is no `ledgit-gui.exe will have no
+  icon` warning, that `target\release\ledgit-gui.exe` shows the icon in
+  Explorer at small and large sizes, and after installing, that the
+  Start-menu and desktop shortcuts, Settings > Apps and a `.ledgit` file all
+  show it. Explorer caches icons per path: if an old one sticks, run
+  `ie4uinit.exe -show`, or delete `%LOCALAPPDATA%\IconCache.db` and the
+  `iconcache_*.db` files in `%LOCALAPPDATA%\Microsoft\Windows\Explorer`
+  and sign out and in.
+- **The taskbar showing the light icon while running** - Aaron: probably an
+  icon cache; good enough, not pursued.
 
 Run it against a throwaway budget rather than a real one. Three are generated
 for you, dated relative to the day you run the generator, so re-run it rather
@@ -181,8 +127,8 @@ cargo run -p ledgit-gui -- fixtures\household.ledgit
 | File | What is in it | Checklist items |
 |---|---|---|
 | `empty.ledgit` | Nothing. | Every screen's empty state |
-| `household.ledgit` | 15 months of an ordinary budget: a 5-way split paycheque, mortgage, car loan, credit card, a 4-level ledger tree, 6 buckets (subtree and hand-picked), 12 issuers (one paused, one one-off 60 days out), 4 cohorts, 4 views (incl. a weekly what-if). Branches `what-if-new-car` and `emergency-fund-plan` diverge from `main` and rebase cleanly. A mistaken commit and its revert. Issuers are ~6 weeks behind (Run issuers stages a batch); 4 edits already staged. | 1-11, History, Commit report, issuer runs since last commit |
-| `stress.ledgit` | Things built to break layouts: a $987,654,321.09 balance, a negative one, an 80-character ledger name, an 8-level tree, a non-ASCII name, 120 expense ledgers, a 13-leg split, 17 issuers with 7 due on the 1st and 7 on the 15th plus a daily one, a 10-year daily view, ~110 commits, 10 long branch names, a commit message that wraps. | 1, 4, 5, 6, 7 (at its worst), 8, 9, 10 |
+| `household.ledgit` | 15 months of an ordinary budget: a 5-way split paycheque, mortgage, car loan, credit card, a 4-level ledger tree, 6 buckets (subtree and hand-picked), 12 issuers (one paused, one one-off 60 days out), 4 cohorts, 4 views (incl. a weekly what-if). Branches `what-if-new-car` and `emergency-fund-plan` diverge from `main` and rebase cleanly. A mistaken commit and its revert. Issuers are ~6 weeks behind (Run issuers stages a batch); staged edits waiting (so History's switch asks to shelve). | 1-12, History, Commit report, issuer runs since last commit |
+| `stress.ledgit` | Things built to break layouts: a $987,654,321.09 balance, a negative one, an 80-character ledger name, an 8-level tree, a non-ASCII name, 120 expense ledgers, a 13-leg split, 17 issuers with 7 due on the 1st and 7 on the 15th plus a daily one, a 10-year daily view, ~110 commits, 10 long branch names, a commit message that wraps. | 1, 2, 4, 5, 6, 7 (at their worst), 8, 9 |
 
 Pins are an app preference, not part of the file, so pin a few ledgers
 yourself on the Dashboard.
@@ -310,7 +256,7 @@ broken staged entry.
   up ledgers created there later), and subtree renames that carry buckets
   along. CLI `ledger tree`, `ledger move`, `bucket include-tree`; GUI tree
   view and a searchable tree picker.
-- **Tests**: 169, covering the money and date edge cases, budget invariants,
+- **Tests**: 186, covering the money and date edge cases, budget invariants,
   recurrence arithmetic, rate conversion, the view simulation, GUI zoom,
   bucket combination, chart rendering, and the version-control behaviours end
   to end.

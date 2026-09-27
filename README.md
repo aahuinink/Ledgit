@@ -112,7 +112,8 @@ ledgit log                          # history, newest first
 ledgit show HEAD~2                  # one commit, op by op
 ledgit revert <commit>              # stages the reversing entries
 ledgit branch what-if-payoff        # branch the budget
-ledgit checkout -b what-if-payoff
+ledgit checkout -b what-if-payoff    # staged work comes along
+ledgit checkout main --shelve       # leave staged work on this branch for later
 ledgit rebase what-if-payoff --onto main
 ledgit verify                       # re-hash every commit in the file
 ```

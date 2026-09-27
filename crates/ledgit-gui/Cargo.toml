@@ -15,6 +15,7 @@ ledgit-core = { workspace = true }
 ledgit-sqlite = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
+egui_extras = { workspace = true }
 rfd = { workspace = true }
 egui_plot = { workspace = true }
 resvg = { workspace = true }

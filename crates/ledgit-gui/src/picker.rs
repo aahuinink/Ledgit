@@ -79,21 +79,35 @@ impl<'a> Picker<'a> {
             .selected_text(self.selected_text.clone())
             .width(self.width)
             .height(360.0)
+            // A combo box closes on any click by default - including the
+            // click that puts the cursor in its own search box. Close on a
+            // click outside, or on a pick, instead.
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show_ui(ui, |ui| {
                 list_layer = Some(ui.layer_id());
                 let mut needle: String = ui.data_mut(|d| d.get_temp(search_id)).unwrap_or_default();
-                ui.add(
+                let search = ui.add(
                     egui::TextEdit::singleline(&mut needle)
                         .hint_text("search, e.g. wedding or tux")
                         .desired_width(self.width - 16.0),
                 );
+                // Ready to type the moment the list opens.
+                let opened_id = search_id.with("opened");
+                if !ui.data(|d| d.get_temp::<bool>(opened_id).unwrap_or(false)) {
+                    search.request_focus();
+                    ui.data_mut(|d| d.insert_temp(opened_id, true));
+                }
                 ui.separator();
                 picked = self.list(ui, &needle);
                 if picked.is_some() {
                     needle.clear();
+                    ui.close();
                 }
                 ui.data_mut(|d| d.insert_temp(search_id, needle));
             });
+        if !egui::ComboBox::is_open(ui.ctx(), ui.make_persistent_id(self.id)) {
+            ui.data_mut(|d| d.remove::<bool>(search_id.with("opened")));
+        }
         if let Some(layer) = list_layer {
             keep_above(ui, layer);
         }

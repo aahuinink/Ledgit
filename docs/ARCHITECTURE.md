@@ -26,7 +26,8 @@ Everything in the feature list falls out of that:
 | Rebase | replay a branch's ops onto a different parent |
 | "Nothing saved until I press commit" | the staging area is a `Vec<Op>` |
 | Pre-commit report | fold the staged ops, diff the balance columns |
-| Swap the database | persist four kinds of blob, not a schema |
+| Swap the database | persist five kinds of blob, not a schema |
+| Switch branch with work staged | shelve the stage on the branch it belongs to, beside history |
 | Ledgers/transactions/issuers are never deleted | there is no delete op for them |
 | Split entries (a paycheque) | one op with N legs summing to zero |
 | Cohorts, saved views | ops, like buckets; read by pure functions, results never stored |
@@ -233,6 +234,25 @@ it clears the flag.
 The same fold handles a stage that stops applying after a checkout, which
 used to drop those ops with an error.
 
+### Shelves
+
+The stage belongs to the branch it was entered on, so a plain `checkout`
+still refuses while anything is staged. `checkout_with` says what to do
+instead (`StagedWork`):
+
+* **Shelve** - the stage is set aside *on the branch being left*
+  (`Store::set_shelf(branch, ops)`), and comes back when you switch to that
+  branch again. The shelf is written before the stage is cleared, so a crash
+  between the two leaves the work in both places, never in neither.
+* **Bring** - the stage is kept and refolded on the new base. Ops that do not
+  apply there are flagged broken like any other, not dropped.
+
+Arriving on a branch always puts its shelf back, after anything brought
+along. `checkout_new` brings the stage: a branch made here starts from the
+same base, so the work applies unchanged, and "this is a what-if" is the
+usual reason to branch. A branch holding shelved work cannot be deleted.
+Shelves are keyed by branch name; a detached HEAD has nowhere to shelve.
+
 The GUI's undo is built on this. Every change to the stage - an entry, a
 drop, an edit, an issuer run, "discard everything" - is a new `Vec<Op>`, so
 undo puts the previous one back with `Repo::set_stage`, which never refuses:
@@ -293,9 +313,9 @@ Comparing a view with an earlier commit (`view::compare`) evaluates the same
 spec against `Repo::budget_at(commit)` over the same window and the same
 today, and pairs the lines by uid rather than by row.
 
-## "Up to date through"
+## "Fresh through"
 
-The top bar reads `through 2026-09-24 · issuers 2026-09-25`:
+The top bar reads `Fresh through 2026-09-24 · issuers 2026-09-25`:
 
 * the first date is `Budget::latest_transaction_date()` - the newest entry on
   this branch, staged ones included;
@@ -377,14 +397,18 @@ versioned store, and here it does not compile.
 
 ## Storage
 
-Four tables, because the core only needs four kinds of blob:
+Five tables, because the core only needs five kinds of blob:
 
 ```sql
 meta(key, value)          -- schema version, HEAD
 commits(id, body)         -- id = SHA-256 of body's canonical payload
 refs(name, target)        -- branches
 stage(seq, op)            -- work in progress; deliberately not history
+shelves(branch, seq, op)  -- work set aside on a branch you switched away from
 ```
+
+`shelves` arrived without a schema bump: it is created if missing on open,
+and an older build simply never looks at it.
 
 There is no `ledgers` table and no `balances` table. Derived state in the
 database is derived state that can go stale, and a budget whose stored balance
@@ -421,7 +445,19 @@ rather than rediscovered:
 - **The staging area is persisted, but it is not history.** It lives in its own
   table, never in the commit DAG. "Nothing is written until I commit" means
   nothing becomes permanent, shared, reportable state - not that an afternoon
-  of data entry dies with the process.
+  of data entry dies with the process. Shelves are the same, per branch.
+- **One Ledgit at a time.** Two copies on one file would each hold their own
+  stage and undo history, and the last to write would win. The first copy
+  listens on a loopback port picked from the user's name; a second launch
+  hands its budget path to the first (which opens it and comes to the front)
+  and exits. A socket rather than a lock file because it carries the path
+  across and frees itself however the first copy ends. Something else on the
+  port means Ledgit runs unguarded rather than not at all. `instance.rs`.
+- **Tables fit their content, up to a cap, then cut it short.** Every data
+  table goes through `table.rs` (egui_extras' `TableBuilder`): columns size
+  to what they hold, clip past a per-column cap with the whole text on hover,
+  and can be dragged wider; figures are right-aligned inside their own column;
+  long tables scroll with the header kept. `egui::Grid` is for forms only.
 
 ## Invariants
 

@@ -2,12 +2,12 @@
 //!
 //! Note how small it is. Because the budget is *derived* by folding the commit
 //! DAG, the only things that must survive a power cut are commits, refs, HEAD,
-//! and the staging area. There are no ledger rows, no balance columns, no
+//! the staging area, and staged work shelved on a branch you switched away from. There are no ledger rows, no balance columns, no
 //! indexes to keep in sync - and therefore no way for the database to disagree
 //! with the budget.
 //!
 //! That is the whole reason to swap SQLite out later: the replacement has to
-//! store four kinds of blob, not a schema.
+//! store five kinds of blob, not a schema.
 
 use crate::commit::{Commit, CommitId, Head};
 use crate::error::Result;
@@ -38,6 +38,12 @@ pub trait Store {
     fn get_stage(&self) -> Result<Vec<Op>>;
     fn set_stage(&mut self, ops: &[Op]) -> Result<()>;
 
+    /// Staged work set aside on a branch: shelved when you switch away from
+    /// it, put back when you return. Like the stage, never history. An empty
+    /// list means nothing is shelved there.
+    fn get_shelf(&self, branch: &str) -> Result<Vec<Op>>;
+    fn set_shelf(&mut self, branch: &str, ops: &[Op]) -> Result<()>;
+
     /// Make everything written so far durable.
     fn flush(&mut self) -> Result<()>;
 }
@@ -50,6 +56,7 @@ pub struct MemStore {
     refs: HashMap<String, CommitId>,
     head: Option<Head>,
     stage: Vec<Op>,
+    shelves: HashMap<String, Vec<Op>>,
 }
 
 impl MemStore {
@@ -105,6 +112,19 @@ impl Store for MemStore {
 
     fn set_stage(&mut self, ops: &[Op]) -> Result<()> {
         self.stage = ops.to_vec();
+        Ok(())
+    }
+
+    fn get_shelf(&self, branch: &str) -> Result<Vec<Op>> {
+        Ok(self.shelves.get(branch).cloned().unwrap_or_default())
+    }
+
+    fn set_shelf(&mut self, branch: &str, ops: &[Op]) -> Result<()> {
+        if ops.is_empty() {
+            self.shelves.remove(branch);
+        } else {
+            self.shelves.insert(branch.to_string(), ops.to_vec());
+        }
         Ok(())
     }
 

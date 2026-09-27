@@ -248,13 +248,27 @@ fn message_or_level(a: &Alert) -> String {
 /// The alert list: every alert past its level, with its message.
 pub fn fired_list(ui: &mut Ui, s: &mut Session, fired: &[FiredAlert]) {
     let mut open = None;
-    egui::Grid::new("fired_alerts").num_columns(3).spacing([14.0, 4.0]).show(ui, |ui| {
-        for f in fired {
-            let l = s.budget();
+    let l = s.budget();
+    crate::table::Table::new(
+        "fired_alerts",
+        vec![
+            crate::table::text("alert").max(320.0),
+            crate::table::text("ledger").max(300.0),
+            crate::table::figures("balance"),
+        ],
+    )
+    .height(crate::table::Height::Max(220.0))
+    .show(ui, fired.len(), |row| {
+        let f = &fired[row.index()];
+        row.col(|ui| {
             ui.colored_label(fmt::bad(), format!("\u{26A0} {}", message_or_level(&f.alert)));
+        });
+        row.col(|ui| {
             if ui.link(&l.ledgers.name[f.ledger.get()]).clicked() {
                 open = Some(l.ledgers.uid[f.ledger.get()]);
             }
+        });
+        row.col(|ui| {
             num(
                 ui,
                 RichText::new(format!(
@@ -266,8 +280,7 @@ pub fn fired_list(ui: &mut Ui, s: &mut Session, fired: &[FiredAlert]) {
                 .monospace()
                 .color(fmt::dim()),
             );
-            ui.end_row();
-        }
+        });
     });
     if let Some(uid) = open {
         s.selected_ledger = Some(uid);

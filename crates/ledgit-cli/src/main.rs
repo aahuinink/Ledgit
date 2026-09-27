@@ -66,12 +66,19 @@ enum Command {
         #[arg(long)]
         delete: bool,
     },
-    /// Switch to a branch or commit.
+    /// Switch to a branch or commit. Anything shelved on the branch you
+    /// switch to comes back into the staging area.
     Checkout {
         rev: String,
-        /// Create the branch first.
+        /// Create the branch first (staged work comes along).
         #[arg(short = 'b', long)]
         create: bool,
+        /// Shelve staged work on the branch you are leaving, until you return.
+        #[arg(long, conflicts_with = "bring")]
+        shelve: bool,
+        /// Take staged work to the other branch.
+        #[arg(long)]
+        bring: bool,
     },
     /// Stage the reversal of a commit.
     Revert { rev: String },
@@ -551,13 +558,32 @@ fn run(cli: Cli) -> Result<()> {
             (None, _) => show::branches(&repo)?,
         },
 
-        Command::Checkout { rev, create } => {
-            if create {
+        Command::Checkout { rev, create, shelve, bring } => {
+            let staged = repo.staged().len();
+            let leaving = repo.head().to_string();
+            let restored = if create {
                 repo.checkout_new(&rev)?;
+                0
             } else {
-                repo.checkout(&rev)?;
-            }
+                let work = match (shelve, bring) {
+                    (true, _) => StagedWork::Shelve,
+                    (_, true) => StagedWork::Bring,
+                    _ => StagedWork::Refuse,
+                };
+                repo.checkout_with(&rev, work).map_err(|e| match e {
+                    Error::Invalid(m) if m.contains("staged changes") => Error::Invalid(format!(
+                        "{m} (--shelve keeps them on {leaving}, --bring takes them along)"
+                    )),
+                    e => e,
+                })?
+            };
             println!("Now on {}.", repo.head());
+            if shelve && staged > 0 {
+                println!("Shelved {staged} staged change(s) on {leaving}.");
+            }
+            if restored > 0 {
+                println!("Put back {restored} change(s) shelved here. See `ledgit status`.");
+            }
         }
 
         Command::Revert { rev } => {

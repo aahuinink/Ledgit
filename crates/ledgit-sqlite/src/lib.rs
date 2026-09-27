@@ -72,6 +72,16 @@ CREATE TABLE IF NOT EXISTS stage (
     seq INTEGER PRIMARY KEY,
     op  TEXT NOT NULL
 ) STRICT;
+
+-- Staged work shelved on a branch you switched away from, put back when you
+-- return. Added without a schema bump: an older build ignores the table, and
+-- a file without it gains it on open.
+CREATE TABLE IF NOT EXISTS shelves (
+    branch TEXT NOT NULL,
+    seq    INTEGER NOT NULL,
+    op     TEXT NOT NULL,
+    PRIMARY KEY (branch, seq)
+) STRICT;
 "#;
 
 #[derive(Debug)]
@@ -297,6 +307,30 @@ impl Store for SqliteStore {
         tx.commit().map_err(store_err)
     }
 
+    fn get_shelf(&self, branch: &str) -> Result<Vec<Op>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT op FROM shelves WHERE branch = ?1 ORDER BY seq")
+            .map_err(store_err)?;
+        let rows = stmt.query_map([branch], |r| r.get::<_, String>(0)).map_err(store_err)?;
+        rows.map(|r| Ok(serde_json::from_str(&r.map_err(store_err)?)?)).collect()
+    }
+
+    fn set_shelf(&mut self, branch: &str, ops: &[Op]) -> Result<()> {
+        let tx = self.conn.transaction().map_err(store_err)?;
+        tx.execute("DELETE FROM shelves WHERE branch = ?1", [branch]).map_err(store_err)?;
+        {
+            let mut stmt = tx
+                .prepare("INSERT INTO shelves (branch, seq, op) VALUES (?1, ?2, ?3)")
+                .map_err(store_err)?;
+            for (i, op) in ops.iter().enumerate() {
+                stmt.execute(params![branch, i as i64, serde_json::to_string(op)?])
+                    .map_err(store_err)?;
+            }
+        }
+        tx.commit().map_err(store_err)
+    }
+
     fn flush(&mut self) -> Result<()> {
         // Every write above already went through a durable transaction; this
         // exists so a future buffering store has somewhere to honour it.
@@ -396,6 +430,35 @@ mod tests {
         assert_eq!(repo.working().ledgers.len(), 1);
 
         drop(repo); // see `a_budget_survives_being_closed_and_reopened`
+        cleanup(&path);
+    }
+
+    #[test]
+    fn shelves_are_kept_per_branch_and_survive_reopening() {
+        let dir = std::env::temp_dir().join(format!("ledgit-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shelf.ledgit");
+        let _ = std::fs::remove_file(&path);
+        let opened = "2024-01-01".parse::<Date>().unwrap();
+
+        {
+            let mut repo = Repo::open(SqliteStore::open(&path).unwrap(), "tester").unwrap();
+            repo.add_ledger("Cash", "", Normality::Debit, opened).unwrap();
+            repo.commit("open").unwrap();
+            repo.branch("side", None).unwrap();
+            repo.add_ledger("Savings", "", Normality::Debit, opened).unwrap();
+            repo.checkout_with("side", ledgit_core::prelude::StagedWork::Shelve).unwrap();
+        }
+
+        let mut repo = Repo::open(SqliteStore::open(&path).unwrap(), "tester").unwrap();
+        assert_eq!(repo.shelved("main").unwrap(), 1);
+        assert_eq!(repo.shelved("side").unwrap(), 0);
+        assert!(repo.staged().is_empty());
+        repo.checkout("main").unwrap();
+        assert_eq!(repo.working().ledgers.len(), 2, "the shelved ledger is back");
+        assert_eq!(repo.shelved("main").unwrap(), 0);
+
+        drop(repo);
         cleanup(&path);
     }
 

@@ -4,7 +4,9 @@
 use super::{empty, heading, num};
 use crate::app::{Screen, Session};
 use crate::fmt;
+use crate::table::{figures, text, Height, Table};
 use egui::{RichText, Ui};
+use ledgit_core::prelude::LedgerUid;
 
 pub fn show(ui: &mut Ui, s: &mut Session) {
     let needle = s.search.clone();
@@ -27,39 +29,67 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         if !hits.ledgers.is_empty() {
             ui.label(RichText::new("LEDGERS").small().color(fmt::dim()));
-            egui::Grid::new("search_ledgers").num_columns(3).striped(true).show(ui, |ui| {
-                for ix in &hits.ledgers {
-                    let uid = s.budget().ledgers.uid[ix.get()];
-                    if ui.link(&s.budget().ledgers.name[ix.get()]).clicked() {
-                        s.selected_ledger = Some(uid);
-                        s.goto = Some(Screen::Register);
-                        s.search.clear();
+            let mut open: Option<LedgerUid> = None;
+            let l = s.budget();
+            Table::new(
+                "search_ledgers",
+                vec![text("ledger").max(420.0), text("normal"), figures("balance")],
+            )
+            .height(Height::Max(300.0))
+            .fit_to(&needle)
+            .show(ui, hits.ledgers.len(), |row| {
+                let ix = hits.ledgers[row.index()];
+                row.col(|ui| {
+                    if ui.link(&l.ledgers.name[ix.get()]).clicked() {
+                        open = Some(l.ledgers.uid[ix.get()]);
                     }
+                });
+                row.col(|ui| {
                     ui.label(
-                        RichText::new(s.budget().ledgers.normality[ix.get()].to_string())
-                            .color(fmt::dim()),
+                        RichText::new(l.ledgers.normality[ix.get()].to_string()).color(fmt::dim()),
                     );
-                    num(ui, fmt::money_text(s.budget().ledgers.balance(*ix)));
-                    ui.end_row();
-                }
+                });
+                row.col(|ui| {
+                    num(ui, fmt::money_text(l.ledgers.balance(ix)));
+                });
             });
+            if let Some(uid) = open {
+                s.selected_ledger = Some(uid);
+                s.goto = Some(Screen::Register);
+                s.search.clear();
+            }
             ui.add_space(12.0);
         }
 
         if !hits.transactions.is_empty() {
             ui.label(RichText::new("TRANSACTIONS").small().color(fmt::dim()));
-            egui::Grid::new("search_tx").num_columns(4).striped(true).show(ui, |ui| {
-                for ix in &hits.transactions {
-                    let l = s.budget();
-                    let i = ix.get();
+            let l = s.budget();
+            Table::new(
+                "search_tx",
+                vec![
+                    text("date"),
+                    text("name").max(320.0),
+                    text("flow").max(360.0),
+                    figures("amount"),
+                ],
+            )
+            .height(Height::Max(360.0))
+            .fit_to(&needle)
+            .show(ui, hits.transactions.len(), |row| {
+                let ix = hits.transactions[row.index()];
+                let i = ix.get();
+                row.col(|ui| {
                     ui.label(fmt::mono(l.transactions.date[i].to_string()));
+                });
+                row.col(|ui| {
                     ui.label(&l.transactions.name[i]);
-                    let flow = fmt::flow(l, *ix);
-                    ui.label(RichText::new(fmt::clip(&flow, 44)).color(fmt::dim()).small())
-                        .on_hover_text(flow);
-                    num(ui, fmt::money_text(l.amount_of(*ix)));
-                    ui.end_row();
-                }
+                });
+                row.col(|ui| {
+                    ui.label(RichText::new(fmt::flow(l, ix)).color(fmt::dim()).small());
+                });
+                row.col(|ui| {
+                    num(ui, fmt::money_text(l.amount_of(ix)));
+                });
             });
             ui.add_space(12.0);
         }

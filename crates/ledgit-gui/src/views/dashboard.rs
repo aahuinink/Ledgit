@@ -5,6 +5,7 @@ use super::{empty, heading, num};
 use crate::app::{Screen, Session};
 use crate::fmt;
 use crate::forms::FormKind;
+use crate::table::{figures, text, Table};
 use egui::{RichText, Ui};
 use ledgit_core::issuer;
 use ledgit_core::prelude::*;
@@ -54,10 +55,7 @@ fn pending_banner(ui: &mut Ui, s: &mut Session) {
     }
     egui::Frame::group(ui.style()).fill(ui.visuals().faint_bg_color).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("{staged} change(s) not committed"))
-                    .color(egui::Color32::from_rgb(220, 170, 60)),
-            );
+            ui.label(RichText::new(format!("{staged} change(s) not committed")).color(fmt::warn()));
             ui.label(
                 RichText::new("Nothing below is permanent until you commit.")
                     .color(fmt::dim())
@@ -136,20 +134,29 @@ fn pinned(ui: &mut Ui, s: &mut Session) {
         );
         return;
     }
-    let pins = s.pins.clone();
-    egui::Grid::new("dash_pins").num_columns(2).striped(true).min_col_width(120.0).show(ui, |ui| {
-        for uid in pins {
-            let Some(ix) = s.budget().ledgers.ix(uid) else { continue };
-            let name = s.budget().ledgers.name[ix.get()].clone();
-            let balance = s.budget().ledgers.balance(ix);
-            if ui.link(name).clicked() {
-                s.selected_ledger = Some(uid);
-                s.goto = Some(Screen::Register);
-            }
-            num(ui, fmt::money_text(balance));
-            ui.end_row();
-        }
-    });
+    let mut open: Option<LedgerUid> = None;
+    let l = s.budget();
+    let pins: Vec<(LedgerUid, ledgit_core::id::LedgerIx)> =
+        s.pins.iter().filter_map(|uid| l.ledgers.ix(*uid).map(|ix| (*uid, ix))).collect();
+    Table::new("dash_pins", vec![text("ledger").max(300.0), figures("balance")]).show(
+        ui,
+        pins.len(),
+        |row| {
+            let (uid, ix) = pins[row.index()];
+            row.col(|ui| {
+                if ui.link(&l.ledgers.name[ix.get()]).clicked() {
+                    open = Some(uid);
+                }
+            });
+            row.col(|ui| {
+                num(ui, fmt::money_text(l.ledgers.balance(ix)));
+            });
+        },
+    );
+    if let Some(uid) = open {
+        s.selected_ledger = Some(uid);
+        s.goto = Some(Screen::Register);
+    }
 }
 
 fn upcoming(ui: &mut Ui, s: &mut Session) {
@@ -174,16 +181,24 @@ fn upcoming(ui: &mut Ui, s: &mut Session) {
     }
 
     let today = Date::today_utc();
-    egui::Grid::new("dash_due").num_columns(3).striped(true).show(ui, |ui| {
-        for (date, name, amount) in due.iter().take(8) {
-            let overdue = *date <= today;
-            let date_text = RichText::new(date.to_string()).monospace();
-            ui.label(if overdue { date_text.color(fmt::bad()) } else { date_text });
-            ui.label(name);
-            num(ui, fmt::mono(fmt::amount(*amount)));
-            ui.end_row();
-        }
-    });
+    let shown = &due[..due.len().min(8)];
+    Table::new("dash_due", vec![text("due"), text("issuer").max(260.0), figures("about")]).show(
+        ui,
+        shown.len(),
+        |row| {
+            let (date, name, amount) = &shown[row.index()];
+            row.col(|ui| {
+                let date_text = RichText::new(date.to_string()).monospace();
+                ui.label(if *date <= today { date_text.color(fmt::bad()) } else { date_text });
+            });
+            row.col(|ui| {
+                ui.label(name);
+            });
+            row.col(|ui| {
+                num(ui, fmt::mono(fmt::amount(*amount)));
+            });
+        },
+    );
 
     let overdue = due.iter().filter(|(d, _, _)| *d <= today).count();
     if overdue > 0 {

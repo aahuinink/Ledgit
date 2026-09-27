@@ -10,8 +10,9 @@ use super::{empty, heading, num};
 use crate::app::Session;
 use crate::fmt;
 use crate::forms::FormKind;
+use crate::table::{figures, text, Height, Table};
 use egui::{Color32, ComboBox, RichText, Ui};
-use egui_plot::{Corner, GridInput, GridMark, HLine, Legend, Line, LineStyle, Plot, VLine};
+use egui_plot::{GridInput, GridMark, HLine, Line, LineStyle, Plot, VLine};
 use ledgit_core::prelude::*;
 use ledgit_core::view;
 use ledgit_plot::{date_ticks, money_short, MAX_SERIES, SERIES_DARK, SERIES_LIGHT};
@@ -46,9 +47,12 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
         s.view_draft = Some((selected, spec));
     }
 
-    ui.horizontal_top(|ui| {
-        ui.vertical(|ui| {
-            ui.set_width(200.0);
+    super::split(
+        ui,
+        "views",
+        200.0,
+        s,
+        |ui, s| {
             for uid in &live {
                 let Some(ix) = s.budget().views.ix(*uid) else { continue };
                 let name = s.budget().views.name[ix.get()].clone();
@@ -56,12 +60,11 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
                     s.selected_view = Some(*uid);
                 }
             }
-        });
-        ui.separator();
-        ui.vertical(|ui| {
+        },
+        |ui, s| {
             egui::ScrollArea::vertical().id_salt("view_detail").show(ui, |ui| detail(ui, s));
-        });
-    });
+        },
+    );
 }
 
 enum Action {
@@ -207,110 +210,195 @@ fn detail(ui: &mut Ui, s: &mut Session) {
 
 // ------------------------------------------------------------------ editor
 
+/// Chips that wrap: as tall as they need, up to this, then they scroll.
+const CHIPS_MAX_HEIGHT: f32 = 110.0;
+
+/// One labelled line of the editor: the label on the left, the control
+/// beside it, taking only the height it needs.
+fn field(ui: &mut Ui, label: &str, hover: &str, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal_top(|ui| {
+        let r = ui
+            .allocate_ui_with_layout(
+                egui::vec2(130.0, ui.spacing().interact_size.y),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(130.0);
+                    ui.label(label)
+                },
+            )
+            .inner;
+        if !hover.is_empty() {
+            r.on_hover_text(hover);
+        }
+        ui.vertical(add);
+    });
+    ui.add_space(4.0);
+}
+
+/// A wrapping run of chips that grows to fit them, then scrolls.
+fn chips(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
+    egui::ScrollArea::vertical()
+        .id_salt(("view_chips", id))
+        .max_height(CHIPS_MAX_HEIGHT)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(add);
+        });
+}
+
 fn editor(ui: &mut Ui, l: &Budget, spec: &mut ViewSpec) {
-    egui::Grid::new("view_editor").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
-        ui.label("Buckets").on_hover_text("Click to cycle: not included, added (+), subtracted (-).");
-        ui.horizontal_wrapped(|ui| {
-            let live: Vec<_> = l.buckets.live().collect();
-            if live.is_empty() {
-                ui.label(RichText::new("none yet").color(fmt::dim()));
-            }
+    field(ui, "Buckets", "Click to cycle: not included, added (+), subtracted (-).", |ui| {
+        let live: Vec<_> = l.buckets.live().collect();
+        if live.is_empty() {
+            ui.label(RichText::new("none yet").color(fmt::dim()));
+            return;
+        }
+        chips(ui, "buckets", |ui| {
             for b in live {
                 let uid = l.buckets.uid[b.get()];
                 bucket_chip(ui, spec, uid, &l.buckets.name[b.get()]);
             }
         });
-        ui.end_row();
+    });
 
-        ui.label("Ledgers").on_hover_text(
-            "Each gets its own line. With no buckets, the ledgers together are the view's total.",
-        );
-        ui.horizontal_wrapped(|ui| {
-            // In tree order, so a subtree's ledgers sit together.
-            for a in LedgerTree::build(l).order {
-                toggle_chip(ui, &mut spec.ledgers, l.ledgers.uid[a.get()], &l.ledgers.name[a.get()]);
+    field(
+        ui,
+        "Ledgers",
+        "Each gets its own line. With no buckets, the ledgers together are the view's total.",
+        |ui| {
+            // A long ledger list gets a filter; picked ones always show.
+            let filter_id = ui.id().with("ledger_filter");
+            let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+            let order = LedgerTree::build(l).order;
+            if order.len() > 12 {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut filter)
+                            .hint_text("filter ledgers...")
+                            .desired_width(200.0),
+                    );
+                    ui.label(
+                        RichText::new(format!("{} of {} picked", spec.ledgers.len(), order.len()))
+                            .small()
+                            .color(fmt::dim()),
+                    );
+                });
+                ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
             }
-        });
-        ui.end_row();
-
-        ui.label("Issuers").on_hover_text("Their flow is broken down per period.");
-        ui.horizontal_wrapped(|ui| {
-            if l.issuers.is_empty() {
-                ui.label(RichText::new("none yet").color(fmt::dim()));
-            }
-            for i in l.issuers.indices() {
-                toggle_chip(ui, &mut spec.issuers, l.issuers.uid[i.get()], &l.issuers.name[i.get()]);
-            }
-        });
-        ui.end_row();
-
-        ui.label("Cohorts");
-        ui.horizontal_wrapped(|ui| {
-            let live: Vec<_> = l.cohorts.live().collect();
-            if live.is_empty() {
-                ui.label(RichText::new("none yet").color(fmt::dim()));
-            }
-            for c in live {
-                toggle_chip(ui, &mut spec.cohorts, l.cohorts.uid[c.get()], &l.cohorts.name[c.get()]);
-            }
-        });
-        ui.end_row();
-
-        ui.label("Past transactions").on_hover_text(
-            "Which posted transactions the timeline counts. Blank means everything that moves this view's money.",
-        );
-        let mut text = spec
-            .transactions
-            .iter()
-            .find_map(|f| match f {
-                TxFilter::Text(t) => Some(t.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        if ui
-            .add(egui::TextEdit::singleline(&mut text).hint_text("name contains...").desired_width(220.0))
-            .changed()
-        {
-            spec.transactions.retain(|f| !matches!(f, TxFilter::Text(_)));
-            if !text.trim().is_empty() {
-                spec.transactions.push(TxFilter::Text(text));
-            }
-        }
-        ui.end_row();
-
-        ui.label("Balances");
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut spec.roll, RollUp::ByNormality, "net (assets \u{2212} liabilities)");
-            ui.radio_value(&mut spec.roll, RollUp::Sum, "as shown");
-        });
-        ui.end_row();
-
-        ui.label("Flows per");
-        ComboBox::from_id_salt("view_period")
-            .selected_text(spec.period.noun())
-            .show_ui(ui, |ui| {
-                for p in Period::ALL {
-                    ui.selectable_value(&mut spec.period, p, p.noun());
+            let needle = filter.trim().to_lowercase();
+            chips(ui, "ledgers", |ui| {
+                // In tree order, so a subtree's ledgers sit together.
+                for a in order {
+                    let uid = l.ledgers.uid[a.get()];
+                    let name = &l.ledgers.name[a.get()];
+                    if needle.is_empty()
+                        || spec.ledgers.contains(&uid)
+                        || name.to_lowercase().contains(&needle)
+                    {
+                        toggle_chip(ui, &mut spec.ledgers, uid, name);
+                    }
                 }
             });
-        ui.end_row();
+        },
+    );
 
-        ui.label("Look back");
-        span_editor(ui, "lookback", &mut spec.lookback);
-        ui.end_row();
+    field(ui, "Issuers", "Their flow is broken down per period.", |ui| {
+        if l.issuers.is_empty() {
+            ui.label(RichText::new("none yet").color(fmt::dim()));
+            return;
+        }
+        chips(ui, "issuers", |ui| {
+            for i in l.issuers.indices() {
+                toggle_chip(
+                    ui,
+                    &mut spec.issuers,
+                    l.issuers.uid[i.get()],
+                    &l.issuers.name[i.get()],
+                );
+            }
+        });
+    });
 
-        ui.label("Simulate ahead");
-        span_editor(ui, "horizon", &mut spec.horizon);
-        ui.end_row();
+    field(ui, "Cohorts", "", |ui| {
+        let live: Vec<_> = l.cohorts.live().collect();
+        if live.is_empty() {
+            ui.label(RichText::new("none yet").color(fmt::dim()));
+            return;
+        }
+        chips(ui, "cohorts", |ui| {
+            for c in live {
+                toggle_chip(
+                    ui,
+                    &mut spec.cohorts,
+                    l.cohorts.uid[c.get()],
+                    &l.cohorts.name[c.get()],
+                );
+            }
+        });
+    });
 
-        ui.label("Simulate");
-        ui.horizontal(|ui| {
+    field(
+        ui,
+        "Past transactions",
+        "Which posted transactions the timeline counts. Blank means everything that moves this view's money.",
+        |ui| {
+            let mut text = spec
+                .transactions
+                .iter()
+                .find_map(|f| match f {
+                    TxFilter::Text(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut text)
+                        .hint_text("name contains...")
+                        .desired_width(220.0),
+                )
+                .changed()
+            {
+                spec.transactions.retain(|f| !matches!(f, TxFilter::Text(_)));
+                if !text.trim().is_empty() {
+                    spec.transactions.push(TxFilter::Text(text));
+                }
+            }
+        },
+    );
+
+    field(ui, "Balances", "", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.radio_value(
+                &mut spec.roll,
+                RollUp::ByNormality,
+                "net (assets \u{2212} liabilities)",
+            );
+            ui.radio_value(&mut spec.roll, RollUp::Sum, "as shown");
+        });
+    });
+
+    field(ui, "Flows per", "", |ui| {
+        ComboBox::from_id_salt("view_period").selected_text(spec.period.noun()).show_ui(ui, |ui| {
+            for p in Period::ALL {
+                ui.selectable_value(&mut spec.period, p, p.noun());
+            }
+        });
+    });
+
+    field(ui, "Look back", "", |ui| span_editor(ui, "lookback", &mut spec.lookback));
+    field(ui, "Simulate ahead", "", |ui| span_editor(ui, "horizon", &mut spec.horizon));
+
+    field(ui, "Simulate", "", |ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.radio_value(&mut spec.only_selected_issuers, false, "every running issuer")
                 .on_hover_text("What will actually happen.");
-            ui.radio_value(&mut spec.only_selected_issuers, true, "only this view's issuers and cohorts")
-                .on_hover_text("What if these were all that happened?");
+            ui.radio_value(
+                &mut spec.only_selected_issuers,
+                true,
+                "only this view's issuers and cohorts",
+            )
+            .on_hover_text("What if these were all that happened?");
         });
-        ui.end_row();
     });
 }
 
@@ -426,9 +514,9 @@ fn compare_picker(ui: &mut Ui, s: &mut Session) {
             ui,
             |ui| {
                 // Read only while the list is open: every commit read is
-            // re-hashed, and this would otherwise run on every frame.
-            let log = s.repo.log(Some(60)).unwrap_or_default();
-            ui.selectable_value(&mut s.view_compare, None, "nothing");
+                // re-hashed, and this would otherwise run on every frame.
+                let log = s.repo.log(Some(60)).unwrap_or_default();
+                ui.selectable_value(&mut s.view_compare, None, "nothing");
                 if s.repo.has_staged_changes() {
                     ui.selectable_value(
                         &mut s.view_compare,
@@ -463,65 +551,73 @@ fn comparison(
     label: &str,
 ) {
     ui.label(RichText::new(format!("Compared with {label}")).strong());
-    egui::Grid::new("view_compare_table").num_columns(5).striped(true).spacing([18.0, 4.0]).show(
-        ui,
-        |ui| {
-            ui.label("");
-            for h in ["today", "at end", "change at end", "target"] {
-                num(ui, RichText::new(h).small().color(fmt::dim()));
+    Table::new(
+        "view_compare_table",
+        vec![
+            text("").max(300.0),
+            figures("today"),
+            figures("at end"),
+            figures("change at end"),
+            figures("target").max(320.0),
+        ],
+    )
+    .fit_to(label)
+    .show(ui, now.series.len(), |row| {
+        let i = row.index();
+        let s = &now.series[i];
+        row.col(|ui| {
+            ui.label(&s.label);
+        });
+        let Some(t) = pairs[i].map(|j| &then.series[j]) else {
+            row.col(|ui| {
+                ui.label(RichText::new("not in that commit").small().color(fmt::dim()));
+            });
+            for _ in 0..3 {
+                row.col(|_| {});
             }
-            ui.end_row();
-            for (s, pair) in now.series.iter().zip(pairs) {
-                ui.label(&s.label);
-                let Some(t) = pair.map(|j| &then.series[j]) else {
-                    ui.label(RichText::new("not in that commit").small().color(fmt::dim()));
-                    ui.end_row();
-                    continue;
-                };
-                num(
-                    ui,
-                    fmt::mono(format!("{} \u{27A1} {}", fmt::amount(t.now), fmt::amount(s.now)))
-                        .small(),
-                );
-                num(
-                    ui,
-                    fmt::mono(format!(
-                        "{} \u{27A1} {}",
-                        fmt::amount(t.at_end),
-                        fmt::amount(s.at_end)
-                    ))
+            return;
+        };
+        row.col(|ui| {
+            num(
+                ui,
+                fmt::mono(format!("{} \u{27A1} {}", fmt::amount(t.now), fmt::amount(s.now)))
                     .small(),
-                );
-                num(ui, fmt::delta_text(s.at_end - t.at_end));
-                let target = match (t.target_reached, s.target_reached) {
-                    _ if s.target.is_none() && t.target.is_none() => RichText::new(""),
-                    (Some(a), Some(b)) if a == b => {
-                        RichText::new(format!("{b}, unchanged")).small()
-                    }
-                    (Some(a), Some(b)) => {
-                        let days = a.0 - b.0;
-                        let (text, colour) = if days > 0 {
-                            (format!("{b}, {} sooner", span_words(days)), fmt::good())
-                        } else {
-                            (format!("{b}, {} later", span_words(-days)), fmt::bad())
-                        };
-                        RichText::new(text).small().color(colour).strong()
-                    }
-                    (None, Some(b)) => {
-                        RichText::new(format!("{b}, was not reached")).small().color(fmt::good())
-                    }
-                    (Some(a), None) => {
-                        RichText::new(format!("not reached, was {a}")).small().color(fmt::bad())
-                    }
-                    (None, None) => {
-                        RichText::new("not reached either way").small().color(fmt::dim())
-                    }
+            );
+        });
+        row.col(|ui| {
+            num(
+                ui,
+                fmt::mono(format!("{} \u{27A1} {}", fmt::amount(t.at_end), fmt::amount(s.at_end)))
+                    .small(),
+            );
+        });
+        row.col(|ui| {
+            num(ui, fmt::delta_text(s.at_end - t.at_end));
+        });
+        let target = match (t.target_reached, s.target_reached) {
+            _ if s.target.is_none() && t.target.is_none() => RichText::new(""),
+            (Some(a), Some(b)) if a == b => RichText::new(format!("{b}, unchanged")).small(),
+            (Some(a), Some(b)) => {
+                let days = a.0 - b.0;
+                let (text, colour) = if days > 0 {
+                    (format!("{b}, {} sooner", span_words(days)), fmt::good())
+                } else {
+                    (format!("{b}, {} later", span_words(-days)), fmt::bad())
                 };
-                num(ui, target);
-                ui.end_row();
+                RichText::new(text).small().color(colour).strong()
             }
-        },
-    );
+            (None, Some(b)) => {
+                RichText::new(format!("{b}, was not reached")).small().color(fmt::good())
+            }
+            (Some(a), None) => {
+                RichText::new(format!("not reached, was {a}")).small().color(fmt::bad())
+            }
+            (None, None) => RichText::new("not reached either way").small().color(fmt::dim()),
+        };
+        row.col(|ui| {
+            num(ui, target);
+        });
+    });
 }
 
 /// "3 months", "12 days", "1 year 2 months".
@@ -537,6 +633,9 @@ fn span_words(days: i32) -> String {
     }
 }
 
+/// How tall the chart is, and so how far its legend runs before scrolling.
+const CHART_HEIGHT: f32 = 320.0;
+
 fn chart(ui: &mut Ui, r: &ViewReport, then: Option<(&ViewReport, &[Option<usize>])>) {
     if r.series.is_empty() {
         ui.label(
@@ -549,52 +648,74 @@ fn chart(ui: &mut Ui, r: &ViewReport, then: Option<(&ViewReport, &[Option<usize>
     }
     let dark = ui.visuals().dark_mode;
     let today = r.today;
-    Plot::new("view_chart")
-        .height(320.0)
-        .legend(Legend::default().position(Corner::LeftTop))
-        .allow_scroll(false)
-        .x_grid_spacer(month_marks)
-        .x_axis_formatter(|mark, _| date_label(Date(mark.value.round() as i32)))
-        .y_axis_formatter(|mark, _| money_short(mark.value))
-        .label_formatter(|name, p| {
-            let when = Date(p.x.round() as i32);
-            let tag = if when > today { "  (projected)" } else { "" };
-            format!("{name}\n{when}{tag}\n{}", fmt::amount(Money((p.y * 100.0).round() as i64)))
-        })
-        .show(ui, |plot| {
-            for (i, s) in r.series.iter().take(MAX_SERIES).enumerate() {
-                let colour = series_colour(i, dark);
-                let (past, ahead) = steps(&s.points, today);
-                plot.line(Line::new(s.label.clone(), past).color(colour).width(2.0_f32));
-                plot.line(
-                    Line::new(s.label.clone(), ahead)
-                        .color(colour)
-                        .width(2.0_f32)
-                        .style(LineStyle::Dashed { length: 8.0 }),
-                );
-                if let Some(j) = then.and_then(|(_, pairs)| pairs[i]) {
-                    let earlier = &then.expect("paired").0.series[j];
-                    let (past, ahead) = steps(&earlier.points, today);
-                    let mut line = past;
-                    line.extend(ahead);
+    // Lines switched off in the legend, by label. Kept per chart while the
+    // app runs; a preference about reading, not a fact about money.
+    let hidden_id = ui.id().with("view_chart_hidden");
+    let mut hidden: std::collections::BTreeSet<String> =
+        ui.data(|d| d.get_temp(hidden_id)).unwrap_or_default();
+
+    ui.horizontal_top(|ui| {
+        // The legend sits beside the chart, never on it: with a dozen lines
+        // an overlaid legend covers the data it is naming.
+        let legend_width = 210.0;
+        let plot_width = (ui.available_width() - legend_width - 12.0).max(240.0);
+        Plot::new("view_chart")
+            .height(CHART_HEIGHT)
+            .width(plot_width)
+            .allow_scroll(false)
+            .x_grid_spacer(month_marks)
+            .x_axis_formatter(|mark, _| date_label(Date(mark.value.round() as i32)))
+            .y_axis_formatter(|mark, _| money_short(mark.value))
+            .label_formatter(|name, p| {
+                let when = Date(p.x.round() as i32);
+                let tag = if when > today { "  (projected)" } else { "" };
+                format!("{name}\n{when}{tag}\n{}", fmt::amount(Money((p.y * 100.0).round() as i64)))
+            })
+            .show(ui, |plot| {
+                for (i, s) in r.series.iter().take(MAX_SERIES).enumerate() {
+                    if hidden.contains(&s.label) {
+                        continue;
+                    }
+                    let colour = series_colour(i, dark);
+                    let (past, ahead) = steps(&s.points, today);
+                    plot.line(Line::new(s.label.clone(), past).color(colour).width(2.0_f32));
                     plot.line(
-                        Line::new(format!("{} (then)", s.label), line)
-                            .color(colour.gamma_multiply(0.45))
-                            .width(1.5_f32)
-                            .style(LineStyle::Dotted { spacing: 4.0 }),
+                        Line::new(s.label.clone(), ahead)
+                            .color(colour)
+                            .width(2.0_f32)
+                            .style(LineStyle::Dashed { length: 8.0 }),
                     );
+                    if let Some(j) = then.and_then(|(_, pairs)| pairs[i]) {
+                        let earlier = &then.expect("paired").0.series[j];
+                        let (past, ahead) = steps(&earlier.points, today);
+                        let mut line = past;
+                        line.extend(ahead);
+                        plot.line(
+                            Line::new(format!("{} (then)", s.label), line)
+                                .color(colour.gamma_multiply(0.45))
+                                .width(1.5_f32)
+                                .style(LineStyle::Dotted { spacing: 4.0 }),
+                        );
+                    }
+                    if let Some(t) = s.target {
+                        plot.hline(
+                            HLine::new(format!("{} target", s.label), t.cents() as f64 / 100.0)
+                                .color(colour.gamma_multiply(0.7))
+                                .width(1.0_f32)
+                                .style(LineStyle::Dotted { spacing: 6.0 }),
+                        );
+                    }
                 }
-                if let Some(t) = s.target {
-                    plot.hline(
-                        HLine::new(format!("{} target", s.label), t.cents() as f64 / 100.0)
-                            .color(colour.gamma_multiply(0.7))
-                            .width(1.0_f32)
-                            .style(LineStyle::Dotted { spacing: 6.0 }),
-                    );
-                }
-            }
-            plot.vline(VLine::new("today", today.0 as f64).color(fmt::dim()).width(1.0_f32));
+                plot.vline(VLine::new("today", today.0 as f64).color(fmt::dim()).width(1.0_f32));
+            });
+
+        ui.vertical(|ui| {
+            ui.set_width(legend_width);
+            legend(ui, r, then.is_some(), dark, &mut hidden);
         });
+    });
+    ui.data_mut(|d| d.insert_temp(hidden_id, hidden));
+
     if r.series.len() > MAX_SERIES {
         ui.label(
             RichText::new(format!(
@@ -604,6 +725,64 @@ fn chart(ui: &mut Ui, r: &ViewReport, then: Option<(&ViewReport, &[Option<usize>
             .color(fmt::dim()),
         );
     }
+}
+
+/// The chart's key, beside it: a line per series, scrolling once it is
+/// longer than the chart is tall. Click a line to hide it or bring it back.
+fn legend(
+    ui: &mut Ui,
+    r: &ViewReport,
+    comparing: bool,
+    dark: bool,
+    hidden: &mut std::collections::BTreeSet<String>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("LINES").small().color(fmt::dim()));
+        if !hidden.is_empty() && ui.small_button("show all").clicked() {
+            hidden.clear();
+        }
+    });
+    let drawn = r.series.len().min(MAX_SERIES);
+    egui::ScrollArea::vertical()
+        .id_salt("view_legend")
+        .max_height(CHART_HEIGHT - 44.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for (i, s) in r.series.iter().take(drawn).enumerate() {
+                let off = hidden.contains(&s.label);
+                let colour = if off { fmt::dim() } else { series_colour(i, dark) };
+                let clicked = ui
+                    .horizontal(|ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(16.0, 10.0), egui::Sense::hover());
+                        ui.painter().hline(
+                            rect.x_range(),
+                            rect.center().y,
+                            egui::Stroke::new(3.0_f32, colour),
+                        );
+                        let text = RichText::new(&s.label);
+                        let text = if off { text.color(fmt::dim()).strikethrough() } else { text };
+                        ui.add(egui::Label::new(text).truncate().sense(egui::Sense::click()))
+                            .on_hover_text(format!(
+                                "{}\nClick to {} this line.",
+                                s.label,
+                                if off { "show" } else { "hide" }
+                            ))
+                            .clicked()
+                    })
+                    .inner;
+                if clicked && !hidden.remove(&s.label) {
+                    hidden.insert(s.label.clone());
+                }
+            }
+        });
+    ui.add_space(4.0);
+    let key = if comparing {
+        "solid: to today \u{b7} dashed: simulated \u{b7} faint dotted: then"
+    } else {
+        "solid: to today \u{b7} dashed: simulated \u{b7} dotted: target"
+    };
+    ui.label(RichText::new(key).small().color(fmt::dim()));
 }
 
 /// Grid lines on the first of each month (or thinner, zoomed out; weekly,
@@ -637,60 +816,71 @@ fn balances(ui: &mut Ui, r: &ViewReport) {
     }
     let dark = ui.visuals().dark_mode;
     ui.label(RichText::new("Balances").strong());
-    egui::Grid::new("view_balances").num_columns(6).striped(true).spacing([18.0, 4.0]).show(
-        ui,
-        |ui| {
-            ui.label("");
-            for h in ["today", "at end", "change", "lowest ahead", "target"] {
-                num(ui, RichText::new(h).small().color(fmt::dim()));
-            }
-            ui.end_row();
-            for (i, s) in r.series.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    // A line key beside the name: identity is never colour on
-                    // the text itself.
-                    let colour = if i < MAX_SERIES { series_colour(i, dark) } else { fmt::dim() };
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(14.0, 10.0), egui::Sense::hover());
-                    ui.painter().hline(
-                        rect.x_range(),
-                        rect.center().y,
-                        egui::Stroke::new(3.0_f32, colour),
-                    );
-                    ui.label(&s.label);
-                });
-                num(ui, fmt::money_text(s.now));
-                num(ui, fmt::money_text(s.at_end));
-                num(ui, fmt::delta_text(s.at_end - s.now));
-                let (d, low) = s.lowest_ahead;
-                num(ui, fmt::mono(format!("{} on {d}", fmt::amount(low))).small());
-                match (s.target, s.target_reached) {
-                    (None, _) => num(ui, RichText::new("")),
-                    (Some(t), Some(d)) if d == r.today => num(
+    Table::new(
+        "view_balances",
+        vec![
+            text("").max(300.0),
+            figures("today"),
+            figures("at end"),
+            figures("change"),
+            figures("lowest ahead"),
+            figures("target").max(300.0),
+        ],
+    )
+    .fit_to((r.start, r.end))
+    .show(ui, r.series.len(), |row| {
+        let i = row.index();
+        let s = &r.series[i];
+        row.col(|ui| {
+            // A line key beside the name: identity is never colour on the
+            // text itself.
+            let colour = if i < MAX_SERIES { series_colour(i, dark) } else { fmt::dim() };
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 10.0), egui::Sense::hover());
+            ui.painter().hline(rect.x_range(), rect.center().y, egui::Stroke::new(3.0_f32, colour));
+            ui.label(&s.label);
+        });
+        row.col(|ui| {
+            num(ui, fmt::money_text(s.now));
+        });
+        row.col(|ui| {
+            num(ui, fmt::money_text(s.at_end));
+        });
+        row.col(|ui| {
+            num(ui, fmt::delta_text(s.at_end - s.now));
+        });
+        row.col(|ui| {
+            let (d, low) = s.lowest_ahead;
+            num(ui, fmt::mono(format!("{} on {d}", fmt::amount(low))).small());
+        });
+        row.col(|ui| {
+            match (s.target, s.target_reached) {
+                (None, _) => {}
+                (Some(t), Some(d)) if d == r.today => {
+                    num(
                         ui,
                         RichText::new(format!("{} reached", fmt::amount(t)))
                             .small()
                             .color(fmt::good()),
-                    ),
-                    (Some(t), Some(d)) => num(
-                        ui,
-                        RichText::new(format!("{} on {d}", fmt::amount(t))).small().strong(),
-                    )
-                    .on_hover_text(format!(
-                        "Reaches its target in {} day(s), going by the simulation.",
-                        d.0 - r.today.0
-                    )),
-                    (Some(t), None) => num(
+                    );
+                }
+                (Some(t), Some(d)) => {
+                    num(ui, RichText::new(format!("{} on {d}", fmt::amount(t))).small().strong())
+                        .on_hover_text(format!(
+                            "Reaches its target in {} day(s), going by the simulation.",
+                            d.0 - r.today.0
+                        ));
+                }
+                (Some(t), None) => {
+                    num(
                         ui,
                         RichText::new(format!("{} not by {}", fmt::amount(t), r.end))
                             .small()
                             .color(fmt::dim()),
-                    ),
-                };
-                ui.end_row();
-            }
-        },
-    );
+                    );
+                }
+            };
+        });
+    });
     let ahead: Vec<_> =
         r.series.iter().flat_map(|s| s.alerts_ahead.iter().map(move |a| (s, a))).collect();
     if !ahead.is_empty() {
@@ -714,46 +904,55 @@ fn flows(ui: &mut Ui, r: &ViewReport) {
     }
     let p = r.period;
     ui.label(RichText::new(format!("Flows per {p}")).strong());
-    egui::Grid::new("view_flows").num_columns(5).striped(true).spacing([18.0, 4.0]).show(
-        ui,
-        |ui| {
-            for h in ["issuer", "schedule"] {
-                ui.label(RichText::new(h).small().color(fmt::dim()));
+    Table::new(
+        "view_flows",
+        vec![
+            text("issuer").max(280.0),
+            text("schedule").max(240.0),
+            figures("each"),
+            figures(format!("per {p}")),
+            text("notes").max(360.0),
+        ],
+    )
+    .fit_to(p.noun())
+    .show(ui, r.flows.len(), |row| {
+        let f = &r.flows[row.index()];
+        row.col(|ui| {
+            let name = RichText::new(&f.name);
+            ui.label(if f.paused { name.color(fmt::dim()).strikethrough() } else { name });
+        });
+        row.col(|ui| {
+            ui.label(RichText::new(f.schedule.describe()).color(fmt::dim()));
+        });
+        row.col(|ui| {
+            match f.effect {
+                Some(e) => num(ui, fmt::money_text(e)),
+                None => num(ui, fmt::mono(fmt::amount(f.amount))),
+            };
+        });
+        row.col(|ui| {
+            match (f.rate(p), f.effect.is_some()) {
+                (Some(m), true) => num(ui, fmt::money_text(m)),
+                (Some(m), false) => num(ui, fmt::mono(fmt::amount(m))),
+                (None, _) => num(ui, RichText::new("one-off").color(fmt::dim())),
+            };
+        });
+        row.col(|ui| {
+            let mut notes = Vec::new();
+            if f.paused {
+                notes.push("paused".to_string());
+            } else if !f.simulated {
+                notes.push("not simulated".to_string());
             }
-            num(ui, RichText::new("each").small().color(fmt::dim()));
-            num(ui, RichText::new(format!("per {p}")).small().color(fmt::dim()));
-            ui.label(RichText::new("notes").small().color(fmt::dim()));
-            ui.end_row();
-            for f in &r.flows {
-                let name = RichText::new(&f.name);
-                ui.label(if f.paused { name.color(fmt::dim()).strikethrough() } else { name });
-                ui.label(RichText::new(f.schedule.describe()).color(fmt::dim()));
-                match f.effect {
-                    Some(e) => num(ui, fmt::money_text(e)),
-                    None => num(ui, fmt::mono(fmt::amount(f.amount))),
-                };
-                match (f.rate(p), f.effect.is_some()) {
-                    (Some(m), true) => num(ui, fmt::money_text(m)),
-                    (Some(m), false) => num(ui, fmt::mono(fmt::amount(m))),
-                    (None, _) => num(ui, RichText::new("one-off").color(fmt::dim())),
-                };
-                let mut notes = Vec::new();
-                if f.paused {
-                    notes.push("paused".to_string());
-                } else if !f.simulated {
-                    notes.push("not simulated".to_string());
-                }
-                if f.effect.is_some_and(|e| e.is_zero()) {
-                    notes.push("does not move this view's money".to_string());
-                }
-                if !f.via.is_empty() {
-                    notes.push(format!("via {}", f.via.join(", ")));
-                }
-                ui.label(RichText::new(notes.join("; ")).small().color(fmt::dim()));
-                ui.end_row();
+            if f.effect.is_some_and(|e| e.is_zero()) {
+                notes.push("does not move this view's money".to_string());
             }
-        },
-    );
+            if !f.via.is_empty() {
+                notes.push(format!("via {}", f.via.join(", ")));
+            }
+            ui.label(RichText::new(notes.join("; ")).small().color(fmt::dim()));
+        });
+    });
     let t = r.flow_totals(p);
     ui.add_space(4.0);
     if r.directed {
@@ -776,38 +975,41 @@ fn timeline(ui: &mut Ui, r: &ViewReport) {
     } else {
         &["volume", "projected volume"]
     };
-    egui::Grid::new("view_timeline")
-        .num_columns(cols.len() + 1)
-        .striped(true)
-        .spacing([18.0, 3.0])
-        .show(ui, |ui| {
-            ui.label("");
-            for h in cols {
-                num(ui, RichText::new(*h).small().color(fmt::dim()));
-            }
-            ui.end_row();
-            let cell = |ui: &mut Ui, m: Money| {
-                if m.is_zero() {
-                    num(ui, RichText::new("-").color(fmt::dim()))
-                } else {
-                    num(ui, fmt::mono(fmt::amount(m)))
-                }
+    let mut columns = vec![text("")];
+    columns.extend(cols.iter().map(|h| figures(*h)));
+    // Its own scroll: a daily view over ten years is thousands of rows.
+    Table::new("view_timeline", columns)
+        .height(Height::Max(420.0))
+        .fit_to((r.period.noun(), r.directed))
+        .show(ui, r.timeline.len(), |row| {
+            let line = &r.timeline[row.index()];
+            let cell = |row: &mut egui_extras::TableRow<'_, '_>, m: Money| {
+                row.col(|ui| {
+                    if m.is_zero() {
+                        num(ui, RichText::new("-").color(fmt::dim()));
+                    } else {
+                        num(ui, fmt::mono(fmt::amount(m)));
+                    }
+                });
             };
-            for row in &r.timeline {
-                ui.label(fmt::mono(period_label(r.period, row.start)));
-                let (a, f) = (&row.actual, &row.projected);
-                if r.directed {
-                    cell(ui, a.received);
-                    cell(ui, a.spent);
+            row.col(|ui| {
+                ui.label(fmt::mono(period_label(r.period, line.start)));
+            });
+            let (a, f) = (&line.actual, &line.projected);
+            if r.directed {
+                cell(row, a.received);
+                cell(row, a.spent);
+                row.col(|ui| {
                     num(ui, fmt::delta_text(a.net()));
-                    cell(ui, f.received);
-                    cell(ui, f.spent);
+                });
+                cell(row, f.received);
+                cell(row, f.spent);
+                row.col(|ui| {
                     num(ui, fmt::delta_text(f.net()));
-                } else {
-                    cell(ui, a.volume);
-                    cell(ui, f.volume);
-                }
-                ui.end_row();
+                });
+            } else {
+                cell(row, a.volume);
+                cell(row, f.volume);
             }
         });
 }

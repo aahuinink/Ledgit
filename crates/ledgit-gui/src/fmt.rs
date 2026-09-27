@@ -37,6 +37,11 @@ pub fn bad() -> Color32 {
     Color32::from_rgb(220, 80, 70)
 }
 
+/// Amber: work that is not yet permanent - staged, or shelved.
+pub fn warn() -> Color32 {
+    Color32::from_rgb(220, 170, 60)
+}
+
 pub fn dim() -> Color32 {
     Color32::from_gray(140)
 }
@@ -45,11 +50,15 @@ pub fn dim() -> Color32 {
 /// and never colour alone: the sign is always there too, for the ~8% of men
 /// who would otherwise see two identical columns.
 pub fn money_text(m: Money) -> RichText {
-    let t = RichText::new(amount(m)).monospace();
+    RichText::new(amount(m)).monospace().color(money_colour(m))
+}
+
+/// The colour `money_text` gives an amount.
+pub fn money_colour(m: Money) -> Color32 {
     match m.cents() {
-        c if c < 0 => t.color(bad()),
-        c if c > 0 => t.color(good()),
-        _ => t.color(dim()),
+        c if c < 0 => bad(),
+        c if c > 0 => good(),
+        _ => dim(),
     }
 }
 

@@ -25,6 +25,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 clap = { version = "4", features = ["derive", "env"] }
 eframe = { version = "0.33", features = ["persistence"] }
 egui = "0.33"
+# Tables: columns sized to their content, clipped past a cap, resizable, with
+# a scrolling body. Same release train as egui, so pinned alongside it.
+egui_extras = { version = "0.33", default-features = false }
 rfd = "0.15"
 egui_plot = "0.34"
 # Rasterises exported charts. Text only: the font comes from egui's own

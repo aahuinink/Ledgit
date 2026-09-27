@@ -4,6 +4,7 @@ use super::{empty, heading, num};
 use crate::app::Session;
 use crate::fmt;
 use crate::forms::FormKind;
+use crate::table::{figures, text, Table};
 use egui::{RichText, Ui};
 use ledgit_core::cohort::{self, CalendarEntry, DueStatus};
 use ledgit_core::id::IssuerIx;
@@ -47,9 +48,12 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
         s.selected_cohort = None;
     }
 
-    ui.horizontal_top(|ui| {
-        ui.vertical(|ui| {
-            ui.set_width(200.0);
+    super::split(
+        ui,
+        "cohorts",
+        200.0,
+        s,
+        |ui, s| {
             // "Every issuer" is not a cohort, but it is the calendar you most
             // often want, so it sits at the top of the list.
             if ui.selectable_label(s.selected_cohort.is_none(), "Every issuer").clicked() {
@@ -66,12 +70,11 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
             if live.is_empty() {
                 ui.label(RichText::new("No cohorts yet.").color(fmt::dim()));
             }
-        });
-        ui.separator();
-        ui.vertical(|ui| {
+        },
+        |ui, s| {
             egui::ScrollArea::vertical().id_salt("cohort_detail").show(ui, |ui| detail(ui, s));
-        });
-    });
+        },
+    );
 }
 
 fn detail(ui: &mut Ui, s: &mut Session) {
@@ -108,67 +111,67 @@ fn detail(ui: &mut Ui, s: &mut Session) {
     if breakdown.lines.is_empty() {
         ui.label(RichText::new("No issuers in this cohort yet.").color(fmt::dim()));
     } else {
-        egui::Grid::new("cohort_rates").num_columns(8).striped(true).spacing([16.0, 4.0]).show(
-            ui,
-            |ui| {
-                for h in ["issuer", "schedule"] {
-                    ui.label(RichText::new(h).small().color(fmt::dim()));
-                }
-                num(ui, RichText::new("each").small().color(fmt::dim()));
+        let mut cols =
+            vec![text("issuer").max(280.0), text("schedule").max(240.0), figures("each")];
+        cols.extend(Period::ALL.iter().map(|p| figures(format!("per {p}"))));
+        cols.push(text(""));
+        let n = breakdown.lines.len();
+        Table::new(("cohort_rates", uid), cols).show(ui, n + 1, |row| {
+            let Some(line) = breakdown.lines.get(row.index()) else {
+                // The total, as the last row.
+                row.col(|ui| {
+                    ui.label(RichText::new("total").strong());
+                });
+                row.col(|ui| {
+                    ui.label(RichText::new("running issuers").small().color(fmt::dim()));
+                });
+                row.col(|_| {});
                 for p in Period::ALL {
-                    num(ui, RichText::new(format!("per {p}")).small().color(fmt::dim()));
-                }
-                ui.label("");
-                ui.end_row();
-
-                for line in &breakdown.lines {
-                    let name = RichText::new(&line.name);
-                    ui.label(if line.paused {
-                        name.color(fmt::dim()).strikethrough()
-                    } else {
-                        name
-                    })
-                    .on_hover_text(if line.paused {
-                        "paused: not in the total"
-                    } else {
-                        ""
+                    row.col(|ui| {
+                        num(ui, fmt::mono(fmt::amount(breakdown.total(p))).strong());
                     });
-                    ui.label(RichText::new(line.schedule.describe()).color(fmt::dim()));
-                    num(ui, fmt::mono(fmt::amount(line.amount)));
-                    for p in Period::ALL {
-                        let text = match line.rate(p) {
-                            Some(m) => fmt::mono(fmt::amount(m)),
-                            None => RichText::new("one-off").color(fmt::dim()),
-                        };
-                        num(ui, text);
-                    }
-                    match uid {
-                        Some(cohort) => {
-                            if ui.small_button("Remove").clicked() {
-                                let issuer = l.issuers.uid[line.issuer.get()];
-                                ops.push((
-                                    Op::RemoveFromCohort { cohort, issuer },
-                                    "removing an issuer from a cohort",
-                                ));
-                            }
-                        }
-                        None => {
-                            ui.label("");
-                        }
-                    }
-                    ui.end_row();
                 }
-
-                ui.label(RichText::new("total").strong());
-                ui.label(RichText::new("running issuers").small().color(fmt::dim()));
-                ui.label("");
-                for p in Period::ALL {
-                    num(ui, fmt::mono(fmt::amount(breakdown.total(p))).strong());
+                row.col(|_| {});
+                return;
+            };
+            row.col(|ui| {
+                let name = RichText::new(&line.name);
+                let r = ui.label(if line.paused {
+                    name.color(fmt::dim()).strikethrough()
+                } else {
+                    name
+                });
+                if line.paused {
+                    r.on_hover_text("paused: not in the total");
                 }
-                ui.label("");
-                ui.end_row();
-            },
-        );
+            });
+            row.col(|ui| {
+                ui.label(RichText::new(line.schedule.describe()).color(fmt::dim()));
+            });
+            row.col(|ui| {
+                num(ui, fmt::mono(fmt::amount(line.amount)));
+            });
+            for p in Period::ALL {
+                row.col(|ui| {
+                    let text = match line.rate(p) {
+                        Some(m) => fmt::mono(fmt::amount(m)),
+                        None => RichText::new("one-off").color(fmt::dim()),
+                    };
+                    num(ui, text);
+                });
+            }
+            row.col(|ui| {
+                if let Some(cohort) = uid {
+                    if ui.small_button("Remove").clicked() {
+                        let issuer = l.issuers.uid[line.issuer.get()];
+                        ops.push((
+                            Op::RemoveFromCohort { cohort, issuer },
+                            "removing an issuer from a cohort",
+                        ));
+                    }
+                }
+            });
+        });
         let paused = breakdown.paused_total(Period::Month);
         if !paused.is_zero() {
             ui.label(
@@ -233,6 +236,11 @@ fn calendar(ui: &mut Ui, s: &mut Session, members: &[IssuerIx]) {
         if ui.small_button("This month").clicked() {
             s.calendar_month = Period::Month.start_of(today);
         }
+        ui.separator();
+        ui.selectable_value(&mut s.calendar_list, false, "Month")
+            .on_hover_text("A grid of the month, a few payments per day");
+        ui.selectable_value(&mut s.calendar_list, true, "List")
+            .on_hover_text("Every payment in the month, one per line");
     });
 
     let l = s.budget();
@@ -240,25 +248,46 @@ fn calendar(ui: &mut Ui, s: &mut Session, members: &[IssuerIx]) {
     let entries = cohort::calendar(l, members, month, last, today);
 
     ui.add_space(4.0);
-    let cell = egui::vec2(118.0, 72.0);
-    egui::Grid::new("cohort_calendar").num_columns(7).spacing([4.0, 4.0]).show(ui, |ui| {
-        for w in WEEKDAYS {
-            ui.label(RichText::new(w).small().color(fmt::dim()));
-        }
-        ui.end_row();
-        for _ in 0..month.weekday() {
-            ui.allocate_space(cell);
-        }
-        let mut day = month;
-        while day <= last {
-            let todays: Vec<&CalendarEntry> = entries.iter().filter(|e| e.date == day).collect();
-            day_cell(ui, l, day, day == today, &todays, cell);
-            if day.weekday() == 6 {
-                ui.end_row();
+    if s.calendar_list {
+        payment_list(ui, l, &entries, today);
+    } else {
+        let busiest = (0..=last.0 - month.0)
+            .map(|d| entries.iter().filter(|e| e.date.0 == month.0 + d).count())
+            .max()
+            .unwrap_or(0);
+        let cell = egui::vec2(118.0, 72.0);
+        egui::Grid::new("cohort_calendar").num_columns(7).spacing([4.0, 4.0]).show(ui, |ui| {
+            for w in WEEKDAYS {
+                ui.label(RichText::new(w).small().color(fmt::dim()));
             }
-            day = day.add_days(1);
+            ui.end_row();
+            for _ in 0..month.weekday() {
+                ui.allocate_space(cell);
+            }
+            let mut day = month;
+            while day <= last {
+                let todays: Vec<&CalendarEntry> =
+                    entries.iter().filter(|e| e.date == day).collect();
+                day_cell(ui, l, day, day == today, &todays, cell);
+                if day.weekday() == 6 {
+                    ui.end_row();
+                }
+                day = day.add_days(1);
+            }
+        });
+        if busiest > DAY_SHOWN {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("Some days hold up to {busiest} payments."))
+                        .small()
+                        .color(fmt::dim()),
+                );
+                if ui.small_button("See the month as a list").clicked() {
+                    s.calendar_list = true;
+                }
+            });
         }
-    });
+    }
 
     // The month's totals, by what state each payment is in.
     let sum = |st: DueStatus| -> (usize, Money) {
@@ -289,6 +318,56 @@ fn calendar(ui: &mut Ui, s: &mut Session, members: &[IssuerIx]) {
     });
 }
 
+/// The month as a list: one line per payment, days grouped, so a busy
+/// month reads top to bottom instead of through "+3 more".
+fn payment_list(ui: &mut Ui, l: &Budget, entries: &[CalendarEntry], today: Date) {
+    if entries.is_empty() {
+        ui.label(RichText::new("Nothing falls due this month.").color(fmt::dim()));
+        return;
+    }
+    Table::new(
+        "cohort_payments",
+        vec![text("date"), text("day"), text("issuer").max(320.0), figures("amount"), text("")],
+    )
+    .height(crate::table::Height::Max(460.0))
+    .fit_to(entries.first().map(|e| e.date))
+    .show(ui, entries.len(), |row| {
+        let i = row.index();
+        let e = &entries[i];
+        // The date once per day, so the eye finds the day breaks.
+        let first_of_day = i == 0 || entries[i - 1].date != e.date;
+        row.col(|ui| {
+            if first_of_day {
+                let t = fmt::mono(e.date.to_string());
+                ui.label(if e.date == today { t.strong() } else { t });
+            }
+        });
+        row.col(|ui| {
+            if first_of_day {
+                ui.label(RichText::new(WEEKDAYS[e.date.weekday() as usize]).color(fmt::dim()));
+            }
+        });
+        row.col(|ui| {
+            ui.label(entry_text(l, e, usize::MAX).size(14.0));
+        });
+        row.col(|ui| {
+            num(ui, fmt::mono(fmt::amount(e.amount)));
+        });
+        row.col(|ui| {
+            let status = match e.status {
+                DueStatus::Posted => RichText::new("posted").color(fmt::dim()),
+                DueStatus::Overdue => RichText::new("overdue").color(fmt::bad()).strong(),
+                DueStatus::Paused => RichText::new("paused").color(fmt::dim()),
+                DueStatus::Upcoming => RichText::new("upcoming"),
+            };
+            ui.label(status.small());
+        });
+    });
+}
+
+/// Payments a day cell shows before "+N more".
+const DAY_SHOWN: usize = 3;
+
 fn day_cell(
     ui: &mut Ui,
     l: &Budget,
@@ -297,7 +376,7 @@ fn day_cell(
     entries: &[&CalendarEntry],
     size: egui::Vec2,
 ) {
-    const SHOWN: usize = 3;
+    const SHOWN: usize = DAY_SHOWN;
     let stroke = if is_today {
         egui::Stroke::new(1.5_f32, ui.visuals().selection.stroke.color)
     } else {

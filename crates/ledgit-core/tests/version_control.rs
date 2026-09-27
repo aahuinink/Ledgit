@@ -180,6 +180,74 @@ fn checkout_refuses_to_carry_staged_work_across_branches() {
 }
 
 #[test]
+fn switching_can_shelve_staged_work_until_you_come_back() {
+    let mut f = fixture();
+    f.repo.branch("side", None).unwrap();
+    f.repo.post("rent", "", d("2024-01-09"), Money::from_major(900), f.cash, f.salary).unwrap();
+    let staged = f.repo.staged().to_vec();
+
+    assert_eq!(f.repo.checkout_with("side", StagedWork::Shelve).unwrap(), 0);
+    assert!(!f.repo.has_staged_changes(), "the work stays behind on main");
+    assert_eq!(f.repo.working().transactions.len(), 0);
+    assert_eq!(f.repo.shelved("main").unwrap(), 1);
+    // A branch holding shelved work is not thrown away with it.
+    assert!(f.repo.delete_branch("main").is_err());
+
+    // Work on the other branch meanwhile, then go back.
+    f.repo.post("side entry", "", d("2024-01-10"), Money::from_major(5), f.cash, f.loan).unwrap();
+    f.repo.commit("on the side").unwrap();
+    assert_eq!(f.repo.checkout_with("main", StagedWork::Refuse).unwrap(), 1);
+    assert_eq!(f.repo.staged(), &staged[..], "the shelf comes back as it was");
+    assert_eq!(f.repo.shelved("main").unwrap(), 0);
+    assert_eq!(f.repo.working().transactions.len(), 1);
+}
+
+#[test]
+fn switching_can_bring_staged_work_along() {
+    let mut f = fixture();
+    f.repo.branch("side", None).unwrap();
+    f.repo.post("rent", "", d("2024-01-09"), Money::from_major(900), f.cash, f.salary).unwrap();
+
+    assert_eq!(f.repo.checkout_with("side", StagedWork::Bring).unwrap(), 0);
+    assert_eq!(f.repo.head().branch_name(), Some("side"));
+    assert_eq!(f.repo.staged().len(), 1);
+    assert_eq!(f.repo.working().transactions.len(), 1);
+    assert_eq!(f.repo.shelved("main").unwrap(), 0);
+
+    // Brought work that does not apply on the new branch is flagged, not lost:
+    // an entry posting to a ledger only main has.
+    f.repo.checkout_with("main", StagedWork::Shelve).unwrap();
+    let only_main =
+        f.repo.add_ledger("Only on main", "", Normality::Debit, d("2024-01-01")).unwrap();
+    f.repo.commit("main-only ledger").unwrap();
+    f.repo.post("uses it", "", d("2024-01-11"), Money::from_major(1), only_main, f.cash).unwrap();
+    f.repo.checkout_with("side", StagedWork::Bring).unwrap();
+    assert_eq!(f.repo.staged().len(), 2, "brought along, plus side's own shelf");
+    assert_eq!(f.repo.broken().len(), 1);
+}
+
+#[test]
+fn branching_here_takes_the_staged_work_to_the_new_branch() {
+    let mut f = fixture();
+    f.repo.post("what if", "", d("2024-01-09"), Money::from_major(50), f.cash, f.salary).unwrap();
+    f.repo.checkout_new("what-if").unwrap();
+    assert_eq!(f.repo.head().branch_name(), Some("what-if"));
+    assert_eq!(f.repo.staged().len(), 1);
+    assert!(f.repo.broken().is_empty());
+}
+
+#[test]
+fn shelving_needs_a_branch_to_shelve_on() {
+    let mut f = fixture();
+    let first = f.repo.head_commit().unwrap().unwrap().to_string();
+    f.repo.checkout(&first).unwrap();
+    f.repo.post("detached", "", d("2024-01-09"), Money::from_major(1), f.cash, f.salary).unwrap();
+    let err = f.repo.checkout_with("main", StagedWork::Shelve).unwrap_err();
+    assert!(err.to_string().contains("detached"), "{err}");
+    assert_eq!(f.repo.staged().len(), 1, "a refused switch changes nothing");
+}
+
+#[test]
 fn rebase_replays_a_branch_onto_a_moved_trunk() {
     let mut f = fixture();
     f.repo.branch("side", None).unwrap();

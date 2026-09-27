@@ -4,6 +4,7 @@
 use super::{empty, heading, num};
 use crate::app::Session;
 use crate::fmt;
+use crate::table::{figures, text, Height, Table};
 use egui::{RichText, Ui};
 use ledgit_core::prelude::*;
 
@@ -119,10 +120,24 @@ fn staged_list(ui: &mut Ui, s: &mut Session) {
     ui.add_space(4.0);
     let mut drop: Option<usize> = None;
     let mut edit: Option<usize> = None;
-    egui::Grid::new("staged").num_columns(4).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
-        for (i, op) in s.repo.staged().iter().enumerate() {
-            ui.label(RichText::new(format!("{}.", i + 1)).color(fmt::dim()).monospace());
-            match broken.iter().find(|b| b.index == i) {
+    let row = crate::table::row_height_for(ui);
+    let heights: Vec<f32> = (0..s.repo.staged().len())
+        .map(|i| if broken.iter().any(|b| b.index == i) { row * 2.0 } else { row })
+        .collect();
+    let staged = s.repo.staged();
+    // Its own scroll past a screenful, so a long issuer run does not bury
+    // the report and the commit box under it.
+    Table::new("staged", vec![text(""), text("change").max(640.0), text(""), text("")])
+        .height(Height::Max(360.0))
+        .row_heights(heights)
+        .fit_to(broken.len())
+        .show(ui, 0, |row| {
+            let i = row.index();
+            let op = &staged[i];
+            row.col(|ui| {
+                ui.label(RichText::new(format!("{}.", i + 1)).color(fmt::dim()).monospace());
+            });
+            row.col(|ui| match broken.iter().find(|b| b.index == i) {
                 Some(b) => {
                     ui.vertical(|ui| {
                         ui.label(
@@ -134,18 +149,18 @@ fn staged_list(ui: &mut Ui, s: &mut Session) {
                 None => {
                     ui.label(op.summary());
                 }
-            }
-            ui.horizontal(|ui| {
+            });
+            row.col(|ui| {
                 if editable(op) && ui.small_button("edit").clicked() {
                     edit = Some(i);
                 }
             });
-            if ui.small_button("drop").clicked() {
-                drop = Some(i);
-            }
-            ui.end_row();
-        }
-    });
+            row.col(|ui| {
+                if ui.small_button("drop").clicked() {
+                    drop = Some(i);
+                }
+            });
+        });
     if let Some(i) = edit {
         let op = s.repo.staged()[i].clone();
         s.forms.edit_staged(i, &op);
@@ -187,30 +202,38 @@ fn ledgers_table(ui: &mut Ui, r: &ChangeReport) {
     }
     ui.label(RichText::new("LEDGERS AFFECTED").small().color(fmt::dim()));
     ui.add_space(4.0);
-    egui::Grid::new("report_ledgers").num_columns(5).striped(true).spacing([16.0, 4.0]).show(
-        ui,
-        |ui| {
-            ui.label(RichText::new("ledger").small().color(fmt::dim()));
-            for h in ["before", "after", "change", "entries"] {
-                num(ui, RichText::new(h).small().color(fmt::dim()));
+    Table::new(
+        "report_ledgers",
+        vec![
+            text("ledger").max(420.0),
+            figures("before"),
+            figures("after"),
+            figures("change"),
+            figures("entries"),
+        ],
+    )
+    .show(ui, r.ledger_deltas.len(), |row| {
+        let d = &r.ledger_deltas[row.index()];
+        row.col(|ui| {
+            let name = RichText::new(&d.name);
+            let label = ui.label(if d.is_new { name.italics() } else { name });
+            if d.is_new {
+                label.on_hover_text("new ledger");
             }
-            ui.end_row();
-
-            for d in &r.ledger_deltas {
-                let name = RichText::new(&d.name);
-                ui.label(if d.is_new { name.italics() } else { name }).on_hover_text(if d.is_new {
-                    "new ledger"
-                } else {
-                    ""
-                });
-                num(ui, fmt::mono(fmt::amount(d.before)));
-                num(ui, fmt::mono(fmt::amount(d.after)));
-                num(ui, fmt::delta_text(d.change()));
-                num(ui, RichText::new(d.postings.to_string()).color(fmt::dim()));
-                ui.end_row();
-            }
-        },
-    );
+        });
+        row.col(|ui| {
+            num(ui, fmt::mono(fmt::amount(d.before)));
+        });
+        row.col(|ui| {
+            num(ui, fmt::mono(fmt::amount(d.after)));
+        });
+        row.col(|ui| {
+            num(ui, fmt::delta_text(d.change()));
+        });
+        row.col(|ui| {
+            num(ui, RichText::new(d.postings.to_string()).color(fmt::dim()));
+        });
+    });
 }
 
 fn buckets_table(ui: &mut Ui, r: &ChangeReport) {
@@ -227,30 +250,36 @@ fn buckets_table(ui: &mut Ui, r: &ChangeReport) {
         .color(fmt::dim()),
     );
     ui.add_space(4.0);
-    egui::Grid::new("report_buckets").num_columns(5).striped(true).spacing([16.0, 4.0]).show(
-        ui,
-        |ui| {
-            ui.label(RichText::new("bucket").small().color(fmt::dim()));
-            for h in ["before", "after", "change"] {
-                num(ui, RichText::new(h).small().color(fmt::dim()));
+    Table::new(
+        "report_buckets",
+        vec![
+            text("bucket").max(360.0),
+            figures("before"),
+            figures("after"),
+            figures("change"),
+            text(""),
+        ],
+    )
+    .show(ui, r.bucket_effects.len(), |row| {
+        let b = &r.bucket_effects[row.index()];
+        row.col(|ui| {
+            ui.label(&b.name);
+        });
+        row.col(|ui| {
+            num(ui, fmt::mono(fmt::amount(b.before)));
+        });
+        row.col(|ui| {
+            num(ui, fmt::mono(fmt::amount(b.after)));
+        });
+        row.col(|ui| {
+            num(ui, fmt::delta_text(b.change()));
+        });
+        row.col(|ui| {
+            if b.membership_changed {
+                ui.label(RichText::new("membership changed").small().color(fmt::dim()));
             }
-            ui.label("");
-            ui.end_row();
-
-            for b in &r.bucket_effects {
-                ui.label(&b.name);
-                num(ui, fmt::mono(fmt::amount(b.before)));
-                num(ui, fmt::mono(fmt::amount(b.after)));
-                num(ui, fmt::delta_text(b.change()));
-                ui.label(if b.membership_changed {
-                    RichText::new("membership changed").small().color(fmt::dim())
-                } else {
-                    RichText::new("")
-                });
-                ui.end_row();
-            }
-        },
-    );
+        });
+    });
 }
 
 fn commit_box(ui: &mut Ui, s: &mut Session, r: &ChangeReport) {

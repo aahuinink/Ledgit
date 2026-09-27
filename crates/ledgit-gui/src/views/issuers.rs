@@ -4,6 +4,7 @@ use super::{empty, heading, num};
 use crate::app::Session;
 use crate::fmt;
 use crate::forms::FormKind;
+use crate::table::{figures, text, Height, Table};
 use egui::{RichText, Ui};
 use ledgit_core::issuer;
 use ledgit_core::prelude::*;
@@ -36,65 +37,73 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
     let today = Date::today_utc();
     let mut toggles: Vec<(IssuerUid, bool)> = Vec::new();
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        egui::Grid::new("issuers").num_columns(6).striped(true).spacing([16.0, 6.0]).show(
-            ui,
-            |ui| {
-                for h in ["issuer", "schedule", "moves", "next due", ""] {
-                    ui.label(RichText::new(h).small().color(fmt::dim()));
+    let l = s.budget();
+    let all: Vec<ledgit_core::id::IssuerIx> = l.issuers.indices().collect();
+    Table::new(
+        "issuers",
+        vec![
+            text("issuer").max(300.0),
+            text("schedule").max(260.0),
+            text("moves").max(380.0),
+            text("next due"),
+            text(""),
+            figures("amount"),
+        ],
+    )
+    .height(Height::Fill)
+    .show(ui, all.len(), |row| {
+        let ix = all[row.index()];
+        let i = ix.get();
+        let paused = l.issuers.paused[i];
+        let uid = l.issuers.uid[i];
+        row.col(|ui| {
+            let name = RichText::new(&l.issuers.name[i]);
+            ui.label(if paused { name.color(fmt::dim()).strikethrough() } else { name });
+        });
+        row.col(|ui| {
+            ui.label(RichText::new(l.issuers.schedule[i].describe()).color(fmt::dim()));
+        });
+        row.col(|ui| {
+            let flow = match fmt::issuer_rule(l, ix) {
+                Some(rule) => format!("{}  ({rule})", fmt::issuer_flow(l, ix)),
+                None => fmt::issuer_flow(l, ix),
+            };
+            let r = ui.label(RichText::new(flow).small().color(fmt::dim()));
+            if l.issuers.legs[i].len() > 2 {
+                r.on_hover_text(format!(
+                    "posts a split entry of {} sides",
+                    l.issuers.legs[i].len()
+                ));
+            }
+        });
+        row.col(|ui| {
+            match (paused, issuer::next_due(l, ix)) {
+                (true, _) => ui.label(RichText::new("paused").color(fmt::dim())),
+                (false, None) => ui.label(RichText::new("finished").color(fmt::dim())),
+                (false, Some(d)) => {
+                    let t = fmt::mono(d.to_string());
+                    ui.label(if d <= today { t.color(fmt::bad()) } else { t })
                 }
-                num(ui, RichText::new("amount").small().color(fmt::dim()));
-                ui.end_row();
-
-                let l = s.budget();
-                for ix in l.issuers.indices() {
-                    let i = ix.get();
-                    let paused = l.issuers.paused[i];
-                    let uid = l.issuers.uid[i];
-
-                    let name = RichText::new(&l.issuers.name[i]);
-                    ui.label(if paused { name.color(fmt::dim()).strikethrough() } else { name });
-                    ui.label(RichText::new(l.issuers.schedule[i].describe()).color(fmt::dim()));
-                    let flow = match fmt::issuer_rule(l, ix) {
-                        Some(rule) => format!("{}  ({rule})", fmt::issuer_flow(l, ix)),
-                        None => fmt::issuer_flow(l, ix),
-                    };
-                    ui.label(RichText::new(flow).small().color(fmt::dim())).on_hover_text(
-                        if l.issuers.legs[i].len() > 2 {
-                            format!("posts a split entry of {} sides", l.issuers.legs[i].len())
-                        } else {
-                            String::new()
-                        },
-                    );
-
-                    match (paused, issuer::next_due(l, ix)) {
-                        (true, _) => ui.label(RichText::new("paused").color(fmt::dim())),
-                        (false, None) => ui.label(RichText::new("finished").color(fmt::dim())),
-                        (false, Some(d)) => {
-                            let t = fmt::mono(d.to_string());
-                            ui.label(if d <= today { t.color(fmt::bad()) } else { t })
-                        }
-                    };
-
-                    if ui.button(if paused { "Resume" } else { "Pause" }).clicked() {
-                        toggles.push((uid, !paused));
-                    }
-                    match fmt::issuer_rule(l, ix) {
-                        Some(rule) => num(
-                            ui,
-                            RichText::new(format!("~{}", fmt::amount(issuer::estimate(l, ix))))
-                                .monospace(),
-                        )
-                        .on_hover_text(format!(
-                            "{rule}. Worked out each time it fires; this is what the next one \
-                             comes to on today's balance."
-                        )),
-                        None => num(ui, fmt::mono(fmt::amount(l.issuers.amount(ix)))),
-                    };
-                    ui.end_row();
-                }
-            },
-        );
+            };
+        });
+        row.col(|ui| {
+            if ui.small_button(if paused { "Resume" } else { "Pause" }).clicked() {
+                toggles.push((uid, !paused));
+            }
+        });
+        row.col(|ui| {
+            match fmt::issuer_rule(l, ix) {
+                Some(rule) => num(
+                    ui,
+                    RichText::new(format!("~{}", fmt::amount(issuer::estimate(l, ix)))).monospace(),
+                )
+                .on_hover_text(format!(
+                    "{rule}. Worked out each time it fires; this is what the next one \
+                     comes to on today's balance."
+                )),
+                None => num(ui, fmt::mono(fmt::amount(l.issuers.amount(ix)))),
+            };
+        });
     });
 
     for (uid, paused) in toggles {

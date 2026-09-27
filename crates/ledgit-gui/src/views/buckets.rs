@@ -5,6 +5,7 @@ use crate::app::{Screen, Session};
 use crate::fmt;
 use crate::forms::FormKind;
 use crate::picker::{Pick, Picker};
+use crate::table::{figures, text, Height, Table};
 use egui::{RichText, Ui};
 use ledgit_core::id::LedgerIx;
 use ledgit_core::prelude::*;
@@ -51,9 +52,12 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
     }
 
     let combining = !s.bucket_combo.is_empty();
-    ui.horizontal_top(|ui| {
-        ui.vertical(|ui| {
-            ui.set_width(200.0);
+    super::split(
+        ui,
+        "buckets",
+        200.0,
+        s,
+        |ui, s| {
             for uid in &live {
                 let Some(ix) = s.budget().buckets.ix(*uid) else { continue };
                 let name = s.budget().buckets.name[ix.get()].clone();
@@ -63,10 +67,9 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
                     s.selected_bucket = Some(*uid);
                 }
             }
-        });
-        ui.separator();
-        ui.vertical(|ui| if combining { combined(ui, s) } else { detail(ui, s) });
-    });
+        },
+        |ui, s| if combining { combined(ui, s) } else { detail(ui, s) },
+    );
 }
 
 /// One bucket's row while combining: click to cycle out -> plus -> minus.
@@ -131,44 +134,54 @@ fn combined(ui: &mut Ui, s: &mut Session) {
         empty(ui, "No ledgers in the chosen buckets.");
     }
 
-    egui::Grid::new("combo_lines").num_columns(4).striped(true).spacing([16.0, 6.0]).show(
-        ui,
-        |ui| {
-            for h in ["ledger", "normal"] {
-                ui.label(RichText::new(h).small().color(fmt::dim()));
+    let mut open: Option<LedgerUid> = None;
+    let l = s.budget();
+    // Kept to half the screen, so the cancelled lines below stay in reach.
+    let half = (ui.available_height() * 0.6).max(160.0);
+    Table::new(
+        "combo_lines",
+        vec![text("ledger").max(420.0), text("normal"), figures("balance"), figures("contributes")],
+    )
+    .height(Height::Max(half))
+    .fit_to(s.bucket_combo.iter().map(|t| (t.bucket, t.sign == Sign::Plus)).collect::<Vec<_>>())
+    .show(ui, c.lines.len(), |row| {
+        let line = &c.lines[row.index()];
+        row.col(|ui| {
+            if ui.link(&line.name).clicked() {
+                open = Some(l.ledgers.uid[line.ledger.get()]);
             }
-            num(ui, RichText::new("balance").small().color(fmt::dim()));
-            num(ui, RichText::new("contributes").small().color(fmt::dim()));
-            ui.end_row();
-
-            for line in &c.lines {
-                let ledger_uid = s.budget().ledgers.uid[line.ledger.get()];
-                if ui.link(&line.name).clicked() {
-                    s.selected_ledger = Some(ledger_uid);
-                    s.goto = Some(Screen::Register);
-                }
-                ui.label(RichText::new(line.normality.to_string()).color(fmt::dim()));
-                num(ui, fmt::money_text(line.balance));
-                num(ui, fmt::delta_text(line.contribution));
-                ui.end_row();
-            }
-        },
-    );
+        });
+        row.col(|ui| {
+            ui.label(RichText::new(line.normality.to_string()).color(fmt::dim()));
+        });
+        row.col(|ui| {
+            num(ui, fmt::money_text(line.balance));
+        });
+        row.col(|ui| {
+            num(ui, fmt::delta_text(line.contribution));
+        });
+    });
+    if let Some(uid) = open {
+        s.selected_ledger = Some(uid);
+        s.goto = Some(Screen::Register);
+    }
 
     // Shown rather than dropped: a ledger that quietly disappears from a total
     // looks like an arithmetic bug.
     if !c.cancelled.is_empty() {
         ui.add_space(12.0);
         ui.label(RichText::new("ON BOTH SIDES, CONTRIBUTING NOTHING").small().color(fmt::dim()));
-        ui.separator();
-        for line in &c.cancelled {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&line.name).color(fmt::dim()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(fmt::money_text(line.balance).color(fmt::dim()));
+        Table::new("combo_cancelled", vec![text("ledger").max(420.0), figures("balance")])
+            .height(Height::Max(160.0))
+            .show(ui, c.cancelled.len(), |row| {
+                let line = &c.cancelled[row.index()];
+                row.col(|ui| {
+                    ui.label(RichText::new(&line.name).color(fmt::dim()));
+                });
+                row.col(|ui| {
+                    num(ui, fmt::money_text(line.balance).color(fmt::dim()));
                 });
             });
-        }
     }
 
     for uid in &c.missing {
@@ -235,19 +248,25 @@ fn targets(ui: &mut Ui, s: &mut Session, uid: BucketUid) {
                 .color(fmt::dim()),
             );
         }
-        egui::Grid::new("bucket_targets").num_columns(4).spacing([16.0, 4.0]).show(ui, |ui| {
-            ui.label("");
-            for h in ["balance", "target", "to go"] {
-                num(ui, RichText::new(h).small().color(fmt::dim()));
-            }
-            ui.end_row();
-            for line in &t.lines {
+        Table::new(
+            ("bucket_targets", uid),
+            vec![text("").max(300.0), figures("balance"), figures("target"), figures("to go")],
+        )
+        .height(Height::Max(180.0))
+        .show(ui, t.lines.len(), |row| {
+            let line = &t.lines[row.index()];
+            row.col(|ui| {
                 ui.label(&line.name);
+            });
+            row.col(|ui| {
                 num(ui, fmt::mono(fmt::amount(line.balance)));
+            });
+            row.col(|ui| {
                 num(ui, fmt::mono(fmt::amount(line.target)));
+            });
+            row.col(|ui| {
                 num(ui, fmt::mono(fmt::amount(Money((line.target.0 - line.balance.0).abs()))));
-                ui.end_row();
-            }
+            });
         });
     });
 }
@@ -329,47 +348,8 @@ fn detail(ui: &mut Ui, s: &mut Session) {
         ui.add_space(6.0);
     }
 
-    let mut remove: Option<LedgerUid> = None;
-    egui::Grid::new("bucket_lines").num_columns(5).striped(true).spacing([16.0, 6.0]).show(
-        ui,
-        |ui| {
-            for h in ["ledger", "normal"] {
-                ui.label(RichText::new(h).small().color(fmt::dim()));
-            }
-            num(ui, RichText::new("balance").small().color(fmt::dim()));
-            num(ui, RichText::new("contributes").small().color(fmt::dim()));
-            ui.label("");
-            ui.end_row();
-
-            for line in &roll.lines {
-                let ledger_uid = s.budget().ledgers.uid[line.ledger.get()];
-                if ui.link(&line.name).clicked() {
-                    s.selected_ledger = Some(ledger_uid);
-                    s.goto = Some(Screen::Register);
-                }
-                ui.label(RichText::new(line.normality.to_string()).color(fmt::dim()));
-                num(ui, fmt::money_text(line.balance));
-                num(ui, fmt::delta_text(line.contribution));
-                if explicit.contains(&line.ledger) {
-                    if ui.small_button("remove").clicked() {
-                        remove = Some(ledger_uid);
-                    }
-                } else {
-                    // In only through a subtree: removing it alone would be
-                    // undone by the subtree, so say where it comes from.
-                    let via = subtrees
-                        .iter()
-                        .find(|p| ledgit_core::tree::is_under(&line.name, p))
-                        .cloned()
-                        .unwrap_or_default();
-                    ui.label(RichText::new(format!("via {via}")).small().color(fmt::dim()));
-                }
-                ui.end_row();
-            }
-        },
-    );
-
-    ui.add_space(12.0);
+    // Adding and deleting sit above the members, so a long bucket cannot
+    // push them off the bottom of the screen.
     ui.horizontal(|ui| {
         ui.label("Add");
         let members: Vec<LedgerUid> =
@@ -391,20 +371,73 @@ fn detail(ui: &mut Ui, s: &mut Session) {
             }
             None => {}
         }
+        ui.separator();
+        if ui
+            .button("Delete bucket")
+            .on_hover_text("Buckets are views; no balances change.")
+            .clicked()
+        {
+            let ops = vec![Op::DeleteBucket { uid }];
+            if s.stage(ops, "deleting the bucket") {
+                s.selected_bucket = None;
+            }
+        }
+    });
+    ui.add_space(8.0);
 
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .button("Delete bucket")
-                .on_hover_text("Buckets are views; no balances change.")
-                .clicked()
-            {
-                let ops = vec![Op::DeleteBucket { uid }];
-                if s.stage(ops, "deleting the bucket") {
-                    s.selected_bucket = None;
+    let mut remove: Option<LedgerUid> = None;
+    let mut open: Option<LedgerUid> = None;
+    let l = s.budget();
+    Table::new(
+        ("bucket_lines", uid),
+        vec![
+            text("ledger").max(420.0),
+            text("normal"),
+            figures("balance"),
+            figures("contributes"),
+            text(""),
+        ],
+    )
+    .height(Height::Fill)
+    .fit_to((s.bucket_roll == RollUp::Sum, s.ledger_sort as u8))
+    .show(ui, roll.lines.len(), |row| {
+        let line = &roll.lines[row.index()];
+        let ledger_uid = l.ledgers.uid[line.ledger.get()];
+        row.col(|ui| {
+            if ui.link(&line.name).clicked() {
+                open = Some(ledger_uid);
+            }
+        });
+        row.col(|ui| {
+            ui.label(RichText::new(line.normality.to_string()).color(fmt::dim()));
+        });
+        row.col(|ui| {
+            num(ui, fmt::money_text(line.balance));
+        });
+        row.col(|ui| {
+            num(ui, fmt::delta_text(line.contribution));
+        });
+        row.col(|ui| {
+            if explicit.contains(&line.ledger) {
+                if ui.small_button("remove").clicked() {
+                    remove = Some(ledger_uid);
                 }
+            } else {
+                // In only through a subtree: removing it alone would be
+                // undone by the subtree, so say where it comes from.
+                let via = subtrees
+                    .iter()
+                    .find(|p| ledgit_core::tree::is_under(&line.name, p))
+                    .cloned()
+                    .unwrap_or_default();
+                ui.label(RichText::new(format!("via {via}")).small().color(fmt::dim()));
             }
         });
     });
+    if let Some(uid) = open {
+        s.selected_ledger = Some(uid);
+        s.goto = Some(Screen::Register);
+    }
 
     if let Some(ledger) = remove {
         let ops = vec![Op::RemoveFromBucket { bucket: uid, ledger }];

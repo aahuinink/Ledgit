@@ -4,6 +4,7 @@ use super::{empty, heading, num};
 use crate::app::{Screen, Session};
 use crate::fmt;
 use crate::forms::FormKind;
+use crate::table::{figures, text, Height, Table};
 use egui::{RichText, Ui};
 use ledgit_core::prelude::*;
 
@@ -54,48 +55,60 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
     }
 
     let rows = LedgerQuery::new().sort_by(s.ledger_sort, Order::Asc).run(s.budget());
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        egui::Grid::new("ledgers").num_columns(6).striped(true).spacing([16.0, 6.0]).show(
-            ui,
-            |ui| {
-                for h in ["", "ledger", "normal", "opened", "postings"] {
-                    ui.label(RichText::new(h).small().color(fmt::dim()));
-                }
-                num(ui, RichText::new("balance").small().color(fmt::dim()));
-                ui.end_row();
-
-                for ix in rows {
-                    let uid = s.budget().ledgers.uid[ix.get()];
-                    let pinned = s.is_pinned(uid);
-                    if ui
-                        .selectable_label(pinned, if pinned { "\u{2605}" } else { "\u{2606}" })
-                        .on_hover_text("Pin to the dashboard and the sidebar")
-                        .clicked()
-                    {
-                        s.toggle_pin(uid);
-                    }
-
-                    let l = s.budget();
-                    let i = ix.get();
-                    let name = l.ledgers.name[i].clone();
-                    let normality = l.ledgers.normality[i];
-                    let opened = l.ledgers.opened[i];
-                    let postings = l.ledgers.postings[i].len();
-                    let balance = l.ledgers.balance(ix);
-
-                    if ui.link(&name).clicked() {
-                        s.selected_ledger = Some(uid);
-                        s.goto = Some(Screen::Register);
-                    }
-                    ui.label(RichText::new(normality.to_string()).color(fmt::dim()));
-                    ui.label(fmt::mono(opened.to_string()));
-                    ui.label(RichText::new(postings.to_string()).color(fmt::dim()));
-                    num(ui, fmt::money_text(balance));
-                    ui.end_row();
-                }
-            },
-        );
+    let mut pin: Option<LedgerUid> = None;
+    let mut open: Option<LedgerUid> = None;
+    let l = s.budget();
+    Table::new(
+        "ledgers",
+        vec![
+            text(""),
+            text("ledger").max(420.0),
+            text("normal"),
+            text("opened"),
+            figures("postings"),
+            figures("balance"),
+        ],
+    )
+    .height(Height::Fill)
+    .show(ui, rows.len(), |row| {
+        let ix = rows[row.index()];
+        let i = ix.get();
+        let uid = l.ledgers.uid[i];
+        row.col(|ui| {
+            let pinned = s.is_pinned(uid);
+            if ui
+                .selectable_label(pinned, if pinned { "\u{2605}" } else { "\u{2606}" })
+                .on_hover_text("Pin to the dashboard and the sidebar")
+                .clicked()
+            {
+                pin = Some(uid);
+            }
+        });
+        row.col(|ui| {
+            if ui.link(&l.ledgers.name[i]).clicked() {
+                open = Some(uid);
+            }
+        });
+        row.col(|ui| {
+            ui.label(RichText::new(l.ledgers.normality[i].to_string()).color(fmt::dim()));
+        });
+        row.col(|ui| {
+            ui.label(fmt::mono(l.ledgers.opened[i].to_string()));
+        });
+        row.col(|ui| {
+            num(ui, RichText::new(l.ledgers.postings[i].len().to_string()).color(fmt::dim()));
+        });
+        row.col(|ui| {
+            num(ui, fmt::money_text(l.ledgers.balance(ix)));
+        });
     });
+    if let Some(uid) = pin {
+        s.toggle_pin(uid);
+    }
+    if let Some(uid) = open {
+        s.selected_ledger = Some(uid);
+        s.goto = Some(Screen::Register);
+    }
 }
 
 /// The ledgers as their path tree: a subtotal on every level with children,
@@ -108,117 +121,129 @@ fn tree(ui: &mut Ui, s: &mut Session) {
     let mut move_from: Option<String> = None;
     let mut add_under: Option<String> = None;
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        egui::Grid::new("ledger_tree").num_columns(6).striped(true).spacing([16.0, 5.0]).show(
-            ui,
-            |ui| {
-                for h in ["", "ledger", "normal", "postings"] {
-                    ui.label(RichText::new(h).small().color(fmt::dim()));
+    // The rows on show: every node, except those inside a folded level.
+    let mut shown = Vec::with_capacity(t.nodes.len());
+    let mut n = 0;
+    while n < t.nodes.len() {
+        shown.push(n);
+        let node = &t.nodes[n];
+        let folded = node.end as usize > n + 1 && s.collapsed.contains(&node.path.to_lowercase());
+        n = if folded { node.end as usize } else { n + 1 };
+    }
+
+    let l = s.budget();
+    Table::new(
+        "ledger_tree",
+        vec![
+            text(""),
+            text("ledger").max(560.0),
+            text("normal"),
+            figures("postings"),
+            figures("balance"),
+            figures("subtree total"),
+        ],
+    )
+    .height(Height::Fill)
+    .fit_to(s.collapsed.len())
+    .show(ui, shown.len(), |row| {
+        let n = shown[row.index()];
+        let node = &t.nodes[n];
+        let parent = node.end as usize > n + 1;
+        let key = node.path.to_lowercase();
+        let folded = parent && s.collapsed.contains(&key);
+
+        row.col(|ui| {
+            if let Some(ix) = node.ledger {
+                let uid = l.ledgers.uid[ix.get()];
+                let pinned = s.pins.contains(&uid);
+                if ui
+                    .selectable_label(pinned, if pinned { "\u{2605}" } else { "\u{2606}" })
+                    .on_hover_text("Pin to the dashboard and the sidebar")
+                    .clicked()
+                {
+                    pin = Some(uid);
                 }
-                num(ui, RichText::new("balance").small().color(fmt::dim()));
-                num(ui, RichText::new("subtree total").small().color(fmt::dim()));
-                ui.end_row();
+            }
+        });
 
-                let l = s.budget();
-                let mut n = 0;
-                while n < t.nodes.len() {
-                    let node = &t.nodes[n];
-                    let parent = node.end as usize > n + 1;
-                    let key = node.path.to_lowercase();
-                    let folded = parent && s.collapsed.contains(&key);
-
-                    match node.ledger {
-                        Some(ix) => {
-                            let uid = l.ledgers.uid[ix.get()];
-                            let pinned = s.pins.contains(&uid);
-                            if ui
-                                .selectable_label(pinned, if pinned { "\u{2605}" } else { "\u{2606}" })
-                                .on_hover_text("Pin to the dashboard and the sidebar")
-                                .clicked()
-                            {
-                                pin = Some(uid);
-                            }
-                        }
-                        None => {
-                            ui.label("");
-                        }
-                    }
-
-                    ui.horizontal(|ui| {
-                        ui.add_space(16.0 * node.depth as f32);
-                        if parent {
-                            let arrow = if folded { "\u{23F5}" } else { "\u{23F7}" };
-                            if ui.small_button(arrow).clicked() {
-                                toggle = Some(key.clone());
-                            }
-                        } else {
-                            ui.add_space(18.0);
-                        }
-                        match node.ledger {
-                            Some(ix) => {
-                                if ui.link(node.name()).on_hover_text(&node.path).clicked() {
-                                    open = Some(l.ledgers.uid[ix.get()]);
-                                }
-                            }
-                            None => {
-                                ui.label(RichText::new(node.name()).strong());
-                            }
-                        }
-                        if ui
-                            .small_button("+")
-                            .on_hover_text(format!("New ledger under {}", node.path))
-                            .clicked()
-                        {
-                            add_under = Some(node.path.clone());
-                        }
-                        if parent
-                            && ui
-                                .small_button("move")
-                                .on_hover_text(format!("Rename everything under {}", node.path))
-                                .clicked()
-                        {
-                            move_from = Some(node.path.clone());
-                        }
-                    });
-
-                    match node.ledger {
-                        Some(ix) => {
-                            let i = ix.get();
-                            ui.label(RichText::new(l.ledgers.normality[i].to_string()).color(fmt::dim()));
-                            ui.label(RichText::new(l.ledgers.postings[i].len().to_string()).color(fmt::dim()));
-                            num(ui, fmt::money_text(l.ledgers.balance(ix)));
-                        }
-                        None => {
-                            ui.label("");
-                            ui.label("");
-                            ui.label("");
-                        }
-                    }
-                    if parent {
-                        let (total, kind) = t.total(l, n);
-                        let text = fmt::money_text(total).strong();
-                        let hover = match kind {
-                            Some(k) => format!("{} ledger(s), all {k}-normal", t.subtree(n).len()),
-                            None => format!(
-                                "{} ledger(s) of mixed normality: the net, debit-positive, as a bucket reads it",
-                                t.subtree(n).len()
-                            ),
-                        };
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(text).on_hover_text(hover);
-                            if kind.is_none() {
-                                ui.label(RichText::new("net").small().color(fmt::dim()));
-                            }
-                        });
-                    } else {
-                        ui.label("");
-                    }
-                    ui.end_row();
-
-                    n = if folded { node.end as usize } else { n + 1 };
+        row.col(|ui| {
+            ui.add_space(16.0 * node.depth as f32);
+            if parent {
+                let arrow = if folded { "\u{23F5}" } else { "\u{23F7}" };
+                if ui.small_button(arrow).clicked() {
+                    toggle = Some(key.clone());
                 }
-            },
-        );
+            } else {
+                ui.add_space(18.0);
+            }
+            match node.ledger {
+                Some(ix) => {
+                    if ui.link(node.name()).on_hover_text(&node.path).clicked() {
+                        open = Some(l.ledgers.uid[ix.get()]);
+                    }
+                }
+                None => {
+                    ui.label(RichText::new(node.name()).strong());
+                }
+            }
+            if ui
+                .small_button("+")
+                .on_hover_text(format!("New ledger under {}", node.path))
+                .clicked()
+            {
+                add_under = Some(node.path.clone());
+            }
+            if parent
+                && ui
+                    .small_button("move")
+                    .on_hover_text(format!("Rename everything under {}", node.path))
+                    .clicked()
+            {
+                move_from = Some(node.path.clone());
+            }
+        });
+
+        match node.ledger {
+            Some(ix) => {
+                let i = ix.get();
+                row.col(|ui| {
+                    ui.label(RichText::new(l.ledgers.normality[i].to_string()).color(fmt::dim()));
+                });
+                row.col(|ui| {
+                    num(ui, RichText::new(l.ledgers.postings[i].len().to_string()).color(fmt::dim()));
+                });
+                row.col(|ui| {
+                    num(ui, fmt::money_text(l.ledgers.balance(ix)));
+                });
+            }
+            None => {
+                for _ in 0..3 {
+                    row.col(|_| {});
+                }
+            }
+        }
+        row.col(|ui| {
+            if !parent {
+                return;
+            }
+            let (total, kind) = t.total(l, n);
+            let hover = match kind {
+                Some(k) => format!("{} ledger(s), all {k}-normal", t.subtree(n).len()),
+                None => format!(
+                    "{} ledger(s) of mixed normality: the net, debit-positive, as a bucket reads it",
+                    t.subtree(n).len()
+                ),
+            };
+            let text = fmt::money_text(total).strong();
+            let text = match kind {
+                Some(_) => text,
+                None => RichText::new(format!("net {}", fmt::amount(total)))
+                    .monospace()
+                    .strong()
+                    .color(fmt::money_colour(total)),
+            };
+            num(ui, text).on_hover_text(hover);
+        });
     });
 
     if let Some(key) = toggle {
@@ -285,54 +310,61 @@ pub fn register(ui: &mut Ui, s: &mut Session) {
         return;
     }
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        egui::Grid::new("register").num_columns(5).striped(true).spacing([16.0, 6.0]).show(
-            ui,
-            |ui| {
-                for h in ["date", "description", "other side"] {
-                    ui.label(RichText::new(h).small().color(fmt::dim()));
-                }
-                num(ui, RichText::new("change").small().color(fmt::dim()));
-                num(ui, RichText::new("balance").small().color(fmt::dim()));
-                ui.end_row();
-
-                // Newest first: the last thing that happened is the thing you are
-                // usually looking for.
-                for line in rows.iter().rev() {
-                    let l = s.budget();
-                    let t = line.transaction.get();
-                    // This ledger's share of the entry, which for a split is not
-                    // the size of the entry.
-                    let shown = normality.present(line.change);
-                    let others: Vec<String> = l
-                        .counterparties(line.transaction, ix)
-                        .iter()
-                        .map(|a| l.ledgers.name[a.get()].clone())
-                        .collect();
-                    let source = match l.transactions.parent[t] {
-                        Parent::Manual => String::new(),
-                        Parent::Issuer(u) => l
-                            .issuers
-                            .ix(u)
-                            .map(|j| format!("  (issuer: {})", l.issuers.name[j.get()]))
-                            .unwrap_or_default(),
-                    };
-
-                    ui.label(fmt::mono(l.transactions.date[t].to_string()));
-                    ui.label(format!("{}{source}", l.transactions.name[t]));
-                    let split = l.transactions.is_split(line.transaction);
-                    let others_text = RichText::new(others.join(", ")).color(fmt::dim());
-                    ui.label(if split { others_text.italics() } else { others_text })
-                        .on_hover_text(if split {
-                            format!("split entry of {}", fmt::amount(l.amount_of(line.transaction)))
-                        } else {
-                            String::new()
-                        });
-                    num(ui, fmt::delta_text(shown));
-                    num(ui, fmt::mono(fmt::amount(line.balance)));
-                    ui.end_row();
-                }
-            },
-        );
+    let l = s.budget();
+    Table::new(
+        ("register", uid),
+        vec![
+            text("date"),
+            text("description").max(380.0),
+            text("other side").max(320.0),
+            figures("change"),
+            figures("balance"),
+        ],
+    )
+    .height(Height::Fill)
+    .show(ui, rows.len(), |row| {
+        // Newest first: the last thing that happened is the thing you are
+        // usually looking for.
+        let line = &rows[rows.len() - 1 - row.index()];
+        let t = line.transaction.get();
+        // This ledger's share of the entry, which for a split is not the
+        // size of the entry.
+        let shown = normality.present(line.change);
+        let others: Vec<String> = l
+            .counterparties(line.transaction, ix)
+            .iter()
+            .map(|a| l.ledgers.name[a.get()].clone())
+            .collect();
+        let source = match l.transactions.parent[t] {
+            Parent::Manual => String::new(),
+            Parent::Issuer(u) => l
+                .issuers
+                .ix(u)
+                .map(|j| format!("  (issuer: {})", l.issuers.name[j.get()]))
+                .unwrap_or_default(),
+        };
+        row.col(|ui| {
+            ui.label(fmt::mono(l.transactions.date[t].to_string()));
+        });
+        row.col(|ui| {
+            ui.label(format!("{}{source}", l.transactions.name[t]));
+        });
+        row.col(|ui| {
+            let split = l.transactions.is_split(line.transaction);
+            let others_text = RichText::new(others.join(", ")).color(fmt::dim());
+            let r = ui.label(if split { others_text.italics() } else { others_text });
+            if split {
+                r.on_hover_text(format!(
+                    "split entry of {}",
+                    fmt::amount(l.amount_of(line.transaction))
+                ));
+            }
+        });
+        row.col(|ui| {
+            num(ui, fmt::delta_text(shown));
+        });
+        row.col(|ui| {
+            num(ui, fmt::mono(fmt::amount(line.balance)));
+        });
     });
 }

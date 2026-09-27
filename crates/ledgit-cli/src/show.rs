@@ -136,11 +136,11 @@ pub fn status(repo: &Repo<SqliteStore>) -> Result<()> {
     Ok(())
 }
 
-/// "Up to date through 2026-09-24 · issuers through 2026-09-15": the last
+/// "Fresh through 2026-09-24 · issuers through 2026-09-15": the last
 /// recorded transaction, and how far the recurring payments have been run.
 pub fn freshness(l: &Budget, today: Date) -> String {
     let mut s = match l.latest_transaction_date() {
-        Some(d) => format!("Up to date through {d}"),
+        Some(d) => format!("Fresh through {d}"),
         None => "No transactions yet".to_string(),
     };
     if let Some(d) = ledgit_core::cohort::caught_up_through(l) {

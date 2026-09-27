@@ -10,7 +10,7 @@ use crate::brand::Brand;
 use crate::fmt;
 use crate::forms::{FormKind, Forms, Outcome};
 use crate::views;
-use egui::{Color32, RichText};
+use egui::RichText;
 use ledgit_core::prelude::*;
 use ledgit_sqlite::SqliteStore;
 use std::collections::HashMap;
@@ -72,6 +72,9 @@ pub struct Session {
     pub issuer_through: String,
     pub new_branch: String,
     pub rebase_onto: String,
+    /// A branch picked on the History screen while changes are staged: the
+    /// screen asks whether to shelve them or bring them along.
+    pub pending_switch: Option<String>,
     pub status: Option<Status>,
     pub forms: Forms,
     pub pins: Vec<LedgerUid>,
@@ -98,6 +101,9 @@ pub struct Session {
     pub tx_source: crate::views::transactions::SourceFilter,
     /// First day of the month the cohort calendar is showing.
     pub calendar_month: Date,
+    /// Show the cohort calendar as a list of payments rather than a month
+    /// grid - the better read for a busy month.
+    pub calendar_list: bool,
     /// The selected view's spec as it is being edited. The chart draws from
     /// this, so every pick redraws at once; nothing is staged until "Stage
     /// changes", which keeps an afternoon of fiddling out of the op log.
@@ -162,6 +168,7 @@ impl Session {
             issuer_through: Date::today_utc().to_string(),
             new_branch: String::new(),
             rebase_onto: String::new(),
+            pending_switch: None,
             status: None,
             forms: Forms::default(),
             pins: Vec::new(),
@@ -177,6 +184,7 @@ impl Session {
             tx_ledger: None,
             tx_source: crate::views::transactions::SourceFilter::default(),
             calendar_month: Period::Month.start_of(Date::today_utc()),
+            calendar_list: false,
             view_draft: None,
             view_until: String::new(),
             view_compare: None,
@@ -342,6 +350,21 @@ pub struct LedgitApp {
     zoom: f32,
     startup_error: Option<String>,
     brand: Brand,
+    /// Launches of Ledgit made while this one runs, handing over a budget.
+    inbox: Option<crate::instance::Inbox>,
+    /// The window title last sent, so it is only sent when it changes.
+    title: String,
+}
+
+/// What the File menu - the logo in the top bar - asked for. The app carries
+/// it out after the frame, since it owns the session being replaced.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum FileAction {
+    New,
+    Open,
+    Recent(PathBuf),
+    /// Close the budget and go back to the welcome screen.
+    Close,
 }
 
 impl LedgitApp {
@@ -373,6 +396,8 @@ impl LedgitApp {
             zoom,
             startup_error: None,
             brand,
+            inbox: None,
+            title: String::new(),
         };
         if let Some(p) = initial {
             app.open_path(p);
@@ -380,7 +405,23 @@ impl LedgitApp {
         app
     }
 
+    /// Take requests from later launches of Ledgit (see `instance`).
+    pub fn with_inbox(mut self, inbox: crate::instance::Inbox, ctx: &egui::Context) -> LedgitApp {
+        inbox.attach(ctx);
+        self.inbox = Some(inbox);
+        self
+    }
+
+    /// Open a budget in place of the one on screen, if any. Its staged work
+    /// is already on disk, so nothing is lost by switching.
     fn open_path(&mut self, path: PathBuf) {
+        if let Some(s) = &mut self.session {
+            if same_file(&s.path, &path) {
+                s.note(format!("{} is already open.", path.display()));
+                return;
+            }
+        }
+        self.remember_pins();
         match Session::open(path.clone(), &self.author) {
             Ok(mut s) => {
                 let key = path.to_string_lossy().to_string();
@@ -405,7 +446,64 @@ impl LedgitApp {
                 self.session = Some(s);
                 self.startup_error = None;
             }
-            Err(e) => self.startup_error = Some(format!("{}: {e}", path.display())),
+            Err(e) => {
+                let msg = format!("Could not open {}: {e}", path.display());
+                match &mut self.session {
+                    // Keep the budget that is open, and say what went wrong.
+                    Some(s) => s.fail(msg),
+                    None => self.startup_error = Some(msg),
+                }
+            }
+        }
+    }
+
+    fn file_action(&mut self, action: FileAction) {
+        let path = match action {
+            FileAction::New => new_budget_dialog(),
+            FileAction::Open => open_budget_dialog(),
+            FileAction::Recent(p) => Some(p),
+            FileAction::Close => {
+                self.remember_pins();
+                self.session = None;
+                None
+            }
+        };
+        if let Some(p) = path {
+            self.open_path(p);
+        }
+    }
+
+    /// Act on what later launches of Ledgit handed over: open their budget
+    /// and come to the front.
+    fn take_requests(&mut self, ctx: &egui::Context) {
+        let Some(inbox) = &self.inbox else { return };
+        let requests = inbox.take();
+        if requests.is_empty() {
+            return;
+        }
+        for r in requests {
+            if let Some(p) = r.path {
+                self.open_path(p);
+            }
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        // Windows may refuse to hand focus to a background app; flash the
+        // taskbar button instead so the open budget is not missed.
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+            egui::UserAttentionType::Informational,
+        ));
+    }
+
+    /// "household - Ledgit" in the title bar and on the taskbar.
+    fn sync_title(&mut self, ctx: &egui::Context) {
+        let title = match &self.session {
+            Some(s) => format!("{} - Ledgit", budget_name(&s.path)),
+            None => "Ledgit".to_string(),
+        };
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
         }
     }
 
@@ -424,10 +522,12 @@ impl eframe::App for LedgitApp {
         // Read it back rather than tracking it ourselves: this also picks up
         // Ctrl+Plus/Minus/0, which egui handles on its own.
         self.zoom = ctx.zoom_factor();
+        self.take_requests(ctx);
         match &mut self.session {
             None => self.welcome(ctx),
             Some(_) => self.workspace(ctx),
         }
+        self.sync_title(ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -456,18 +556,12 @@ impl LedgitApp {
                 ui.add_space(24.0);
 
                 if ui.button("Open a budget...").clicked() {
-                    if let Some(p) =
-                        rfd::FileDialog::new().add_filter("Ledgit budget", &["ledgit"]).pick_file()
-                    {
+                    if let Some(p) = open_budget_dialog() {
                         self.open_path(p);
                     }
                 }
                 if ui.button("Create a new budget...").clicked() {
-                    if let Some(p) = rfd::FileDialog::new()
-                        .add_filter("Ledgit budget", &["ledgit"])
-                        .set_file_name("budget.ledgit")
-                        .save_file()
-                    {
+                    if let Some(p) = new_budget_dialog() {
                         self.open_path(p);
                     }
                 }
@@ -498,7 +592,7 @@ impl LedgitApp {
         let screen_before = session.view;
         shortcuts(ctx, &mut session);
 
-        top_bar(ctx, &mut session, &self.brand);
+        let file = top_bar(ctx, &mut session, &self.brand, &self.recent);
         nav_panel(ctx, &mut session);
         status_bar(ctx, &mut session);
 
@@ -532,6 +626,32 @@ impl LedgitApp {
         session.track(screen_before);
         self.session = Some(session);
         self.remember_pins();
+        if let Some(action) = file {
+            self.file_action(action);
+        }
+    }
+}
+
+fn open_budget_dialog() -> Option<PathBuf> {
+    rfd::FileDialog::new().add_filter("Ledgit budget", &["ledgit"]).pick_file()
+}
+
+fn new_budget_dialog() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("Ledgit budget", &["ledgit"])
+        .set_file_name("budget.ledgit")
+        .save_file()
+}
+
+fn budget_name(path: &Path) -> String {
+    path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "budget".into())
+}
+
+/// Whether two paths name one file, however they were spelled.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
 
@@ -606,7 +726,13 @@ fn shortcuts(ctx: &egui::Context, s: &mut Session) {
     }
 }
 
-pub(crate) fn top_bar(ctx: &egui::Context, s: &mut Session, brand: &Brand) {
+pub(crate) fn top_bar(
+    ctx: &egui::Context,
+    s: &mut Session,
+    brand: &Brand,
+    recent: &[String],
+) -> Option<FileAction> {
+    let mut file = None;
     egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -619,13 +745,8 @@ pub(crate) fn top_bar(ctx: &egui::Context, s: &mut Session, brand: &Brand) {
             {
                 s.go_back();
             }
-            let name = s
-                .path
-                .file_stem()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "budget".into());
-            ui.add(egui::Image::new(brand.mark(ui)).fit_to_exact_size(egui::vec2(26.0, 26.0)));
-            ui.heading(name);
+            file = file_menu(ui, s, brand, recent);
+            ui.heading(budget_name(&s.path));
             ui.label(RichText::new(format!("on {}", s.repo.head())).color(fmt::dim()));
             freshness(ui, s.budget());
 
@@ -679,7 +800,7 @@ pub(crate) fn top_bar(ctx: &egui::Context, s: &mut Session, brand: &Brand) {
                 let text = if staged == 0 {
                     RichText::new("nothing staged").color(fmt::dim())
                 } else {
-                    RichText::new(format!("{staged} staged")).color(Color32::from_rgb(220, 170, 60))
+                    RichText::new(format!("{staged} staged")).color(fmt::warn())
                 };
                 if ui.button(text).clicked() {
                     s.goto = Some(Screen::Commit);
@@ -694,9 +815,62 @@ pub(crate) fn top_bar(ctx: &egui::Context, s: &mut Session, brand: &Brand) {
         });
         ui.add_space(4.0);
     });
+    file
 }
 
-/// "through 2026-09-24 · issuers 2026-09-15": how current this branch is.
+/// The logo is the File menu: another budget, a new one, or back to the
+/// welcome screen - all without closing the app.
+fn file_menu(
+    ui: &mut egui::Ui,
+    s: &Session,
+    brand: &Brand,
+    recent: &[String],
+) -> Option<FileAction> {
+    let mut action = None;
+    let mark = egui::Image::new(brand.mark(ui)).fit_to_exact_size(egui::vec2(26.0, 26.0));
+    let (response, _) = egui::containers::menu::MenuButton::from_button(
+        egui::Button::image(mark).frame(false),
+    )
+    .ui(ui, |ui| {
+        ui.set_min_width(240.0);
+        ui.label(RichText::new(s.path.to_string_lossy()).small().color(fmt::dim()));
+        ui.separator();
+        if ui.button("New budget...").clicked() {
+            action = Some(FileAction::New);
+            ui.close();
+        }
+        if ui.button("Open budget...").clicked() {
+            action = Some(FileAction::Open);
+            ui.close();
+        }
+        let others: Vec<&String> =
+            recent.iter().filter(|r| !same_file(Path::new(r.as_str()), &s.path)).collect();
+        ui.add_enabled_ui(!others.is_empty(), |ui| {
+            ui.menu_button("Open recent", |ui| {
+                for r in others {
+                    let name = budget_name(Path::new(r.as_str()));
+                    if ui.button(name).on_hover_text(r.as_str()).clicked() {
+                        action = Some(FileAction::Recent(PathBuf::from(r.as_str())));
+                        ui.close();
+                    }
+                }
+            });
+        });
+        ui.separator();
+        if ui
+            .button("Close budget")
+            .on_hover_text("Back to the welcome screen. Staged changes are kept in the file.")
+            .clicked()
+        {
+            action = Some(FileAction::Close);
+            ui.close();
+        }
+    });
+    response.on_hover_text("File: open another budget, or start a new one");
+    action
+}
+
+/// "Fresh through 2026-09-24 · issuers 2026-09-15": how current this branch is.
 ///
 /// The first date is the newest transaction on record, staged or not. The
 /// second is how far the issuers have been run - every recurring payment up
@@ -708,7 +882,7 @@ fn freshness(ui: &mut egui::Ui, l: &Budget) {
     let issuers = ledgit_core::cohort::caught_up_through(l);
     let overdue = ledgit_core::cohort::overdue_issuers(l, today);
     let mut text = match latest {
-        Some(d) => format!("through {d}"),
+        Some(d) => format!("Fresh through {d}"),
         None => "no transactions yet".into(),
     };
     if let Some(d) = issuers {
@@ -716,7 +890,7 @@ fn freshness(ui: &mut egui::Ui, l: &Budget) {
     }
     let colour = if overdue > 0 { fmt::bad() } else { fmt::dim() };
     let mut hover = String::from(
-        "Up to date through: the date of the newest transaction on this branch, staged ones included.",
+        "Fresh through: the date of the newest transaction on this branch, staged ones included.",
     );
     if issuers.is_some() {
         hover.push_str(
