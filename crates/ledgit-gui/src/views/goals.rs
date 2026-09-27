@@ -201,11 +201,10 @@ fn editor(ui: &mut Ui, s: &mut Session, uid: LedgerUid) {
             ui.add(
                 egui::TextEdit::singleline(&mut a.level).hint_text("500.00").desired_width(110.0),
             );
-            ui.add(
-                egui::TextEdit::singleline(&mut a.message)
-                    .hint_text("message, e.g. Top up from savings")
-                    .desired_width(260.0),
-            );
+            crate::textbox::LongText::new(("alert_message", uid, i), &mut a.message)
+                .hint("message, e.g. Top up from savings before the mortgage comes out")
+                .title("Alert message")
+                .show(ui);
             if ui.small_button("\u{1F5D9}").on_hover_text("Remove this alert").clicked() {
                 remove = Some(i);
             }

@@ -7,6 +7,7 @@ pub mod cohorts;
 pub mod commit;
 pub mod dashboard;
 pub mod goals;
+pub mod graph;
 pub mod history;
 pub mod issuers;
 pub mod ledgers;

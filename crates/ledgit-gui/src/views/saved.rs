@@ -239,12 +239,12 @@ fn description(
         return;
     }
     let Some((_, text)) = draft.as_mut() else { return };
-    let edit = ui.add(
-        egui::TextEdit::multiline(text)
-            .desired_rows(3)
-            .desired_width(ui.available_width().min(640.0))
-            .hint_text("What this view looks at, e.g. net worth with the car loan paid off early"),
-    );
+    let edit = crate::textbox::LongText::new(("view_description", uid), text)
+        .hint("What this view looks at, e.g. net worth with the car loan paid off early")
+        .title("View description")
+        .width(640.0)
+        .rows(3)
+        .show(ui);
     // Ready to type the moment it opens - once, so clicking away still works.
     let focus_id = egui::Id::new(("view_description_focus", uid));
     if ui.data_mut(|d| d.remove_temp::<bool>(focus_id)).unwrap_or(false) {

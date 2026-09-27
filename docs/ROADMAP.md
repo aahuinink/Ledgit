@@ -30,7 +30,7 @@ Context you would otherwise have to rediscover:
   `Op` - plain, serialisable data. If a fix tempts you to add a closure, a
   delete operation for a ledger/transaction/issuer, or a derived table in
   SQLite, it is the wrong fix. `docs/ARCHITECTURE.md` says why.
-- **Keep it green.** 189 tests and `cargo clippy --all-targets` clean, and
+- **Keep it green.** 195 tests and `cargo clippy --all-targets` clean, and
   `cargo fmt` applied. A GUI fix that needs a new behaviour usually wants a
   case added to `smoke.rs`.
 
@@ -94,6 +94,22 @@ first run's feedback is summarised in italics.
 14. **View descriptions.** Under a view's name: "add a description" / "edit
     description" writes it in place and stages it. The list of views shows
     it on hover.
+15. **Alert messages** get a box twice as wide and two lines tall, with a
+    "↗" button beside it that pops the message out into a full-size
+    editor on the same text (Done or Escape closes it). The view description
+    box has the same pop-out. `textbox.rs`.
+16. **Branch from an earlier commit.** Select any commit on History; under
+    its detail, "Branch from here": name it, then "Create branch" or "Create
+    and switch" (which asks about staged work, as switching does). The new
+    branch is the budget as it stood at that commit, so a ledger opened later
+    is not on it - the way to be rid of one without rewriting history. CLI:
+    `ledgit branch NAME --at REV`.
+17. **The commit graph.** The middle pane of History is now every branch at
+    once, drawn in lanes like `git log --graph`, each branch in its own
+    colour; the dots beside the branch names are the key. Shared history is
+    in main's colour; a branch's own commits in its colour. Tips are tagged
+    with the branch name. Click any row - on any branch - to open it.
+    *Look at:* household.ledgit, whose two what-if branches fork from main.
 
 New:
 
@@ -265,7 +281,7 @@ broken staged entry.
   up ledgers created there later), and subtree renames that carry buckets
   along. CLI `ledger tree`, `ledger move`, `bucket include-tree`; GUI tree
   view and a searchable tree picker.
-- **Tests**: 189, covering the money and date edge cases, budget invariants,
+- **Tests**: 195, covering the money and date edge cases, budget invariants,
   recurrence arithmetic, rate conversion, the view simulation, GUI zoom,
   bucket combination, chart rendering, and the version-control behaviours end
   to end.

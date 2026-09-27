@@ -71,6 +71,11 @@ pub struct Session {
     pub commit_message: String,
     pub issuer_through: String,
     pub new_branch: String,
+    /// Name for a branch started at the commit selected on History.
+    pub branch_at: String,
+    /// The History screen's commit graph, and what it was built from. Rebuilt
+    /// only when a branch or HEAD moves: reading a commit re-hashes it.
+    pub graph: Option<(String, std::rc::Rc<crate::views::graph::Graph>)>,
     pub rebase_onto: String,
     /// A branch picked on the History screen while changes are staged: the
     /// screen asks whether to shelve them or bring them along.
@@ -169,6 +174,8 @@ impl Session {
             commit_message: String::new(),
             issuer_through: Date::today_utc().to_string(),
             new_branch: String::new(),
+            branch_at: String::new(),
+            graph: None,
             rebase_onto: String::new(),
             pending_switch: None,
             status: None,

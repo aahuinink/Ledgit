@@ -547,6 +547,8 @@ fn every_symbol_in_the_source_has_a_glyph() {
         include_str!("instance.rs"),
         include_str!("picker.rs"),
         include_str!("table.rs"),
+        include_str!("textbox.rs"),
+        include_str!("views/graph.rs"),
         include_str!("views/buckets.rs"),
         include_str!("views/cohorts.rs"),
         include_str!("views/commit.rs"),
@@ -1060,4 +1062,101 @@ fn table_columns_never_go_below_sixteen_characters() {
     for pair in heads.windows(2) {
         assert!(pair[1] - pair[0] >= floor, "a column {} wide", pair[1] - pair[0]);
     }
+}
+
+/// History draws every branch as one graph, and a commit on a branch you
+/// are not on can be opened.
+#[test]
+fn history_draws_every_branch_and_opens_any_commit() {
+    let s = std::cell::RefCell::new(session());
+    {
+        let mut s = s.borrow_mut();
+        s.repo.clear_stage().unwrap();
+        s.repo.checkout_new("what-if").unwrap();
+        let cash = s.repo.working().ledgers.uid[0];
+        let loan = s.repo.working().ledgers.uid[1];
+        let when = "2024-03-01".parse().unwrap();
+        s.repo.post("what if", "", when, Money::from_major(5), cash, loan).unwrap();
+        s.repo.commit("Pay the car off early").unwrap();
+        s.repo.checkout("main").unwrap();
+    }
+    let w = Window::new(1400.0, 800.0);
+    let mut draw = |ctx: &egui::Context| {
+        egui::CentralPanel::default().show(ctx, |ui| views::history::show(ui, &mut s.borrow_mut()));
+    };
+    let texts = w.settle(&mut draw);
+    let side = texts
+        .iter()
+        .find(|(t, _)| t.ends_with("Pay the car off early"))
+        .map(|(_, r)| r.center())
+        .expect("the other branch's commit is in the graph");
+    assert!(texts.iter().filter(|(t, _)| t == "what-if").count() >= 2, "tagged, and listed");
+    let texts = w.click(side, &mut draw);
+    assert!(
+        texts.iter().any(|(t, r)| t == "Pay the car off early" && r.left() > side.x),
+        "its detail opens: {texts:?}"
+    );
+    let g = s.borrow().graph.as_ref().map(|(_, g)| g.clone()).expect("cached");
+    assert_eq!(g.commits.len(), 4);
+    w.settle(&mut draw);
+    let again = s.borrow().graph.as_ref().map(|(_, g)| g.clone()).unwrap();
+    assert!(std::rc::Rc::ptr_eq(&g, &again), "not rebuilt while nothing moved");
+}
+
+/// A branch can start at any earlier commit - the budget as it stood then.
+#[test]
+fn a_branch_starts_from_an_earlier_commit() {
+    let s = std::cell::RefCell::new(session());
+    let first = *s.borrow().repo.log(None).unwrap().last().map(|c| &c.id).unwrap();
+    s.borrow_mut().selected_commit = Some(first);
+    let w = Window::new(1400.0, 900.0);
+    let mut draw = |ctx: &egui::Context| {
+        egui::CentralPanel::default().show(ctx, |ui| views::history::show(ui, &mut s.borrow_mut()));
+    };
+    let texts = w.settle(&mut draw);
+    // The branch panel has a "new branch name" box too; this one is in the
+    // commit's detail, the rightmost pane.
+    let field = find(&texts, "new branch name")
+        .into_iter()
+        .max_by(|a, b| a.left().total_cmp(&b.left()))
+        .expect("the branch-from-here box")
+        .center();
+    w.click(field, &mut draw);
+    w.pass(vec![egui::Event::Text("before-the-loan".into())], &mut draw);
+    let texts = w.settle(&mut draw);
+    w.click(centre_of(&texts, "Create and switch"), &mut draw);
+
+    let s = s.borrow();
+    let at = s.repo.branches().unwrap().into_iter().find(|(n, _)| n == "before-the-loan");
+    assert_eq!(at.map(|(_, id)| id), Some(first), "the branch starts at the picked commit");
+    // Changes are staged in the fixture, so switching asks first.
+    assert_eq!(s.pending_switch.as_deref(), Some("before-the-loan"));
+    assert_eq!(s.repo.head().branch_name(), Some("main"), "nothing moves until you answer");
+}
+
+/// The long-text box pops out into a full editor on the same text.
+#[test]
+fn a_long_text_pops_out_into_a_full_editor() {
+    let text = std::cell::RefCell::new(String::from("Top up"));
+    let w = Window::new(1200.0, 800.0);
+    let mut draw = |ctx: &egui::Context| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            crate::textbox::LongText::new("probe", &mut text.borrow_mut())
+                .title("Alert message")
+                .show(ui);
+        });
+    };
+    let texts = w.settle(&mut draw);
+    let boxed = centre_of(&texts, "Top up");
+    assert!(!texts.iter().any(|(t, _)| t == "Alert message"));
+    // The pop-out button sits just right of the box.
+    let button = texts.iter().find(|(t, _)| t == "\u{2197}").map(|(_, r)| r.center()).unwrap();
+    assert!(button.x > boxed.x);
+    let texts = w.click(button, &mut draw);
+    assert!(texts.iter().any(|(t, _)| t == "Alert message"), "the editor opened");
+    w.pass(vec![egui::Event::Text(" from savings".into())], &mut draw);
+    let texts = w.settle(&mut draw);
+    assert_eq!(*text.borrow(), "Top up from savings", "it edits the same text");
+    let texts = w.click(centre_of(&texts, "Done"), &mut draw);
+    assert!(!texts.iter().any(|(t, _)| t == "Alert message"), "Done closes it");
 }

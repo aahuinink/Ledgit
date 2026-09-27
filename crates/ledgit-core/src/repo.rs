@@ -241,6 +241,57 @@ impl<S: Store> Repo<S> {
         Ok(out)
     }
 
+    /// Every commit reachable from a branch or from HEAD, newest first, and
+    /// always a child before its parents - the order a commit graph is drawn
+    /// in. `log` walks only HEAD's first parents; this is the whole tree.
+    /// Commits that nothing reaches any more (a rebase's originals) are left
+    /// out, as `git log --all` would.
+    pub fn graph(&self, limit: Option<usize>) -> Result<Vec<Commit>> {
+        let mut tips: Vec<CommitId> = self.branches()?.into_iter().map(|(_, id)| id).collect();
+        tips.extend(self.head_commit()?);
+
+        // Everything reachable, and how many children each has among it.
+        let mut commits: HashMap<CommitId, Commit> = HashMap::new();
+        let mut children: HashMap<CommitId, usize> = HashMap::new();
+        let mut queue: VecDeque<CommitId> = tips.iter().copied().collect();
+        while let Some(id) = queue.pop_front() {
+            if commits.contains_key(&id) {
+                continue;
+            }
+            let c = self.get_commit(id)?;
+            for p in &c.parents {
+                *children.entry(*p).or_default() += 1;
+                queue.push_back(*p);
+            }
+            commits.insert(id, c);
+        }
+
+        // Kahn's algorithm, taking the newest ready commit each time, so
+        // branches interleave by date but no parent precedes a child.
+        let key = |c: &Commit| (c.timestamp, c.id);
+        let mut ready: std::collections::BinaryHeap<(i64, CommitId)> = commits
+            .values()
+            .filter(|c| children.get(&c.id).copied().unwrap_or(0) == 0)
+            .map(key)
+            .collect();
+        let mut out = Vec::new();
+        while let Some((_, id)) = ready.pop() {
+            if limit.is_some_and(|n| out.len() >= n) {
+                break;
+            }
+            let c = commits.remove(&id).expect("queued commits are collected");
+            for p in &c.parents {
+                let n = children.get_mut(p).expect("counted above");
+                *n -= 1;
+                if *n == 0 {
+                    ready.push(key(&commits[p]));
+                }
+            }
+            out.push(c);
+        }
+        Ok(out)
+    }
+
     pub fn branches(&self) -> Result<Vec<(String, CommitId)>> {
         self.store.list_refs()
     }

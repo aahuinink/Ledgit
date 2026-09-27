@@ -5,17 +5,19 @@
 //! asks first: shelve them on the branch you are leaving (they come back when
 //! you return), or bring them along. Rebase refuses while anything is staged.
 
+use super::graph::{self, Graph};
 use super::{empty, heading, split};
 use crate::app::{Screen, Session};
 use crate::fmt;
 use egui::{RichText, Ui};
 use ledgit_core::prelude::*;
+use std::rc::Rc;
 
 pub fn show(ui: &mut Ui, s: &mut Session) {
     heading(ui, "History", "Every commit, every branch, and the two ways to take something back.");
 
-    let commits = match s.repo.log(Some(200)) {
-        Ok(c) => c,
+    let graph = match graph(s) {
+        Ok(g) => g,
         Err(e) => {
             ui.colored_label(fmt::bad(), e.to_string());
             return;
@@ -25,23 +27,39 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
     // Three panes, the outer two draggable, so the commit detail - the one
     // with the most to say - gets whatever the window can spare.
     split(ui, "history_branches", 250.0, s, branch_panel, |ui, s| {
-        if commits.is_empty() {
+        if graph.commits.is_empty() {
             empty(ui, "No commits yet. Stage something and commit it.");
             return;
         }
         split(
             ui,
             "history_log",
-            320.0,
+            380.0,
             s,
-            |ui, s| log_list(ui, s, &commits),
+            |ui, s| log_list(ui, s, &graph),
             |ui, s| {
                 egui::ScrollArea::vertical()
                     .id_salt("commit_detail")
-                    .show(ui, |ui| commit_detail(ui, s, &commits));
+                    .show(ui, |ui| commit_detail(ui, s, &graph.commits));
             },
         );
     });
+}
+
+/// How far back the graph reaches.
+const GRAPH_LIMIT: usize = 500;
+
+/// The commit graph, from the session's cache while no branch has moved.
+fn graph(s: &mut Session) -> Result<Rc<Graph>> {
+    let key = Graph::key(&s.repo);
+    if let Some((k, g)) = &s.graph {
+        if *k == key {
+            return Ok(Rc::clone(g));
+        }
+    }
+    let g = Rc::new(Graph::build(&s.repo, GRAPH_LIMIT)?);
+    s.graph = Some((key, Rc::clone(&g)));
+    Ok(g)
 }
 
 fn branch_panel(ui: &mut Ui, s: &mut Session) {
@@ -74,6 +92,14 @@ fn branch_panel(ui: &mut Ui, s: &mut Session) {
             } else {
                 RichText::new(name.as_str())
             };
+            // Its colour in the graph: the branch list is the graph's key.
+            let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+            let at = branches.iter().position(|(n, _)| n == name);
+            ui.painter().circle_filled(
+                dot.center(),
+                4.5,
+                graph::colour(at, ui.visuals().dark_mode),
+            );
             ui.add(egui::Label::new(label).truncate()).on_hover_text(name.as_str());
             ui.label(RichText::new(id.short()).monospace().small().color(fmt::dim()));
             if shelved > 0 {
@@ -239,29 +265,13 @@ fn checkout(s: &mut Session, to: &str, work: StagedWork) {
     }
 }
 
-fn log_list(ui: &mut Ui, s: &mut Session, commits: &[Commit]) {
-    ui.label(RichText::new("COMMITS").small().color(fmt::dim()));
+fn log_list(ui: &mut Ui, s: &mut Session, g: &Graph) {
+    ui.label(RichText::new("COMMITS, EVERY BRANCH").small().color(fmt::dim()));
     ui.add_space(4.0);
-    if s.selected_commit.is_none() {
-        s.selected_commit = commits.first().map(|c| c.id);
+    if s.selected_commit.is_none_or(|id| !g.commits.iter().any(|c| c.id == id)) {
+        s.selected_commit = g.head.or(g.commits.first().map(|c| c.id));
     }
-    let branches = s.repo.branches().unwrap_or_default();
-
-    egui::ScrollArea::vertical().id_salt("commit_log").auto_shrink([false, false]).show(ui, |ui| {
-        // One line per commit however narrow the pane; the rest on hover.
-        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-        for c in commits {
-            let tips: Vec<&str> =
-                branches.iter().filter(|(_, id)| *id == c.id).map(|(n, _)| n.as_str()).collect();
-            let selected = s.selected_commit == Some(c.id);
-            let tips =
-                if tips.is_empty() { String::new() } else { format!("  [{}]", tips.join(", ")) };
-            let text = format!("{}  {}{tips}", c.id.short(), c.summary());
-            if ui.selectable_label(selected, &text).on_hover_text(&text).clicked() {
-                s.selected_commit = Some(c.id);
-            }
-        }
-    });
+    super::graph::show(ui, g, &mut s.selected_commit);
 }
 
 fn commit_detail(ui: &mut Ui, s: &mut Session, commits: &[Commit]) {
@@ -319,4 +329,60 @@ fn commit_detail(ui: &mut Ui, s: &mut Session, commits: &[Commit]) {
         .small()
         .color(fmt::dim()),
     );
+
+    ui.add_space(16.0);
+    branch_from(ui, s, c);
+}
+
+/// Start a branch at this commit: the budget exactly as it stood then. A
+/// ledger opened after it does not exist there - the way to "delete" one
+/// without rewriting history, since history keeps everything.
+fn branch_from(ui: &mut Ui, s: &mut Session, c: &Commit) {
+    ui.label(RichText::new("BRANCH FROM HERE").small().color(fmt::dim()));
+    ui.label(
+        RichText::new(
+            "A new branch starting from this commit: the budget as it stood then. Anything \
+             created after it - a ledger you regret, say - is not on that branch. The branch \
+             you are on is not touched.",
+        )
+        .small()
+        .color(fmt::dim()),
+    );
+    let mut create: Option<bool> = None;
+    ui.horizontal(|ui| {
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut s.branch_at)
+                .hint_text("new branch name")
+                .desired_width(180.0),
+        );
+        let named = !s.branch_at.trim().is_empty();
+        if ui.add_enabled(named, egui::Button::new("Create branch")).clicked() {
+            create = Some(false);
+        }
+        if ui
+            .add_enabled(named, egui::Button::new("Create and switch"))
+            .on_hover_text("If you have staged changes you will be asked what to do with them")
+            .clicked()
+            || (named && edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+        {
+            create = Some(true);
+        }
+    });
+    let Some(switch) = create else { return };
+    let name = s.branch_at.trim().to_string();
+    match s.repo.branch(&name, Some(&c.id.to_string())) {
+        Ok(at) => {
+            s.branch_at.clear();
+            s.note(format!("Created {name} at {}.", at.short()));
+            if switch {
+                if s.repo.has_staged_changes() {
+                    // The branch panel asks: shelve or bring.
+                    s.pending_switch = Some(name);
+                } else {
+                    checkout(s, &name, StagedWork::Refuse);
+                }
+            }
+        }
+        Err(e) => s.fail(e),
+    }
 }

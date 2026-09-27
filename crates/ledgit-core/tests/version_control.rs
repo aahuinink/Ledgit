@@ -1399,3 +1399,35 @@ fn a_view_compares_against_an_earlier_commit() {
     assert_eq!(pairs.len(), 3);
     assert_eq!(pairs.iter().filter(|p| p.is_none()).count(), 1);
 }
+
+#[test]
+fn the_graph_holds_every_branch_children_before_parents() {
+    let mut f = fixture();
+    let root = f.repo.head_commit().unwrap().unwrap();
+    f.repo.checkout_new("side").unwrap();
+    f.repo.post("side 1", "", d("2024-01-09"), Money::from_major(1), f.cash, f.salary).unwrap();
+    let side = f.repo.commit("side 1").unwrap();
+    f.repo.checkout("main").unwrap();
+    f.repo.post("main 1", "", d("2024-01-10"), Money::from_major(2), f.cash, f.salary).unwrap();
+    let main = f.repo.commit("main 1").unwrap();
+
+    let g = f.repo.graph(None).unwrap();
+    let ids: Vec<CommitId> = g.iter().map(|c| c.id).collect();
+    assert_eq!(ids.len(), 3, "both branches and their shared root");
+    assert!(ids.contains(&side) && ids.contains(&main));
+    assert_eq!(*ids.last().unwrap(), root, "the root comes after everything built on it");
+    for (i, c) in g.iter().enumerate() {
+        for p in &c.parents {
+            let at = ids.iter().position(|x| x == p).unwrap();
+            assert!(at > i, "{} is listed before its child", p.short());
+        }
+    }
+    assert_eq!(f.repo.graph(Some(2)).unwrap().len(), 2);
+
+    // Rebasing side leaves its original commit unreachable, and out.
+    f.repo.checkout("side").unwrap();
+    f.repo.rebase("side", "main").unwrap();
+    let g = f.repo.graph(None).unwrap();
+    assert!(!g.iter().any(|c| c.id == side), "the pre-rebase commit is gone");
+    assert_eq!(g.len(), 3, "root, main 1, and side 1 replayed on top");
+}

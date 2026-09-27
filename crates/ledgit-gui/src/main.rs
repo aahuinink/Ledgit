@@ -17,6 +17,7 @@ mod picker;
 #[cfg(test)]
 mod smoke;
 mod table;
+mod textbox;
 mod views;
 
 use app::LedgitApp;
