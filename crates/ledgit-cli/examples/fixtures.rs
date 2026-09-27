@@ -268,6 +268,69 @@ fn household(repo: &mut Budget, today: Date) -> R {
         today.add_days(60),
     )?;
 
+    // Issuers whose amount follows a balance: interest charged on both
+    // loans, and a sweep of a share of chequing into the emergency fund.
+    let car_interest = repo.add_ledger("Expenses:Interest:Car Loan", "", D, start)?;
+    let mortgage_interest = repo.add_ledger("Expenses:Interest:Mortgage", "", D, start)?;
+    let apr = |s: &str| Rate::parse_percent(s).expect("a valid rate");
+    let car_apr = repo.add_rule_issuer(
+        "Car loan interest",
+        "6.45% APR, charged monthly",
+        car_interest,
+        b.car_loan,
+        AmountRule::Interest { of: b.car_loan, apr: apr("6.45") },
+        monthly(1),
+        start.add_months(1),
+    )?;
+    let mortgage_apr = repo.add_rule_issuer(
+        "Mortgage interest",
+        "4.89% APR",
+        mortgage_interest,
+        b.mortgage,
+        AmountRule::Interest { of: b.mortgage, apr: apr("4.89") },
+        monthly(1),
+        start.add_months(1),
+    )?;
+    let sweep = repo.add_rule_issuer(
+        "Sweep to emergency fund",
+        "2% of chequing each month",
+        b.emergency,
+        b.chequing,
+        AmountRule::ShareOfBalance { of: b.chequing, rate: apr("2") },
+        monthly(28),
+        start,
+    )?;
+
+    // Variables for formulas and names.
+    for (name, value) in [("Car_Km_Rate", "0.68"), ("Home", "Toronto"), ("Grocery_Budget", "650")] {
+        repo.stage(Op::SetVariable { name: name.into(), value: VarValue::guess(value) })?;
+    }
+
+    // Targets and alerts. Every debt has a target, so the Debt bucket and
+    // the Debt payoff view's total get one too; chequing's alert fires now
+    // and then as the card is paid.
+    let alert = |when, level: i64, message: &str| Alert {
+        when,
+        level: Money::from_major(level),
+        message: message.into(),
+    };
+    for (uid, target, alerts) in [
+        (b.car_loan, Some(0), vec![]),
+        (b.mortgage, Some(0), vec![]),
+        (b.card, Some(0), vec![alert(AlertWhen::Above, 3_000, "Pay the card down")]),
+        (b.emergency, Some(15_000), vec![]),
+        (
+            b.chequing,
+            None,
+            vec![
+                alert(AlertWhen::Below, 1_000, "Move money over from savings"),
+                alert(AlertWhen::Above, 25_000, "Too much sitting in chequing"),
+            ],
+        ),
+    ] {
+        repo.stage(Op::SetLedgerGoals { uid, target: target.map(Money::from_major), alerts })?;
+    }
+
     let bills = repo.add_cohort("Bills", "the ones that must be paid")?;
     let subs = repo.add_cohort("Subscriptions", "")?;
     let income = repo.add_cohort("Income", "")?;
@@ -286,6 +349,9 @@ fn household(repo: &mut Budget, today: Date) -> R {
         (saving, save),
         (saving, tfsa_contrib),
         (saving, venue_due),
+        (saving, sweep),
+        (bills, car_apr),
+        (bills, mortgage_apr),
     ] {
         repo.stage(Op::AddToCohort { cohort, issuer })?;
     }
@@ -381,6 +447,19 @@ fn household(repo: &mut Budget, today: Date) -> R {
                 repo.commit("Revert the Costco typo and post it properly")?;
             }
             7 => repo.stage(Op::SetIssuerPaused { uid: gym_fee, paused: true })?,
+            11 => {
+                // A lump sum on the car loan, in a commit of its own: compare
+                // the Debt payoff view against the commit before it.
+                repo.post(
+                    "Bonus to the car loan",
+                    "",
+                    end,
+                    Money::from_major(3_000),
+                    b.car_loan,
+                    b.savings,
+                )?;
+                repo.commit("Lump sum on the car loan")?;
+            }
             _ => {}
         }
         if month == branch_at {
@@ -403,6 +482,17 @@ fn household(repo: &mut Budget, today: Date) -> R {
     )?;
     repo.post("Tuxedo fitting", "", today, Money::from_major(250), b.tuxedo, b.card)?;
     repo.add_ledger("Wedding:Photographer", "not booked yet", D, today)?;
+    // An entry worked out from variables, as the forms do it.
+    let vars = &repo.working().variables;
+    let mileage = ledgit_core::expr::eval_money("180 * Car_Km_Rate", vars)?;
+    let name = vars.substitute("Mileage to {Home}")?;
+    repo.post(name, "180 km at Car_Km_Rate", today, mileage, b.fuel, b.side_work)?;
+    // And one that no longer applies: its ledger was staged, then dropped.
+    // The commit screen flags it and will not commit until it is fixed.
+    let flowers = repo.add_ledger("Wedding:Flowers", "", D, today)?;
+    repo.post("Flowers deposit", "", today, Money::from_major(400), flowers, b.card)?;
+    let at = repo.staged().len() - 2;
+    repo.unstage_at(at)?;
     Ok(())
 }
 

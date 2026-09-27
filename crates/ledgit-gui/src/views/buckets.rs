@@ -198,6 +198,60 @@ fn formula(s: &Session) -> String {
     out
 }
 
+/// The bucket's members' targets, totalled under its roll-up.
+fn targets(ui: &mut Ui, s: &mut Session, uid: BucketUid) {
+    let Some(t) = ledgit_core::goals::bucket_targets(s.budget(), uid, s.bucket_roll) else {
+        return;
+    };
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        if t.lines.is_empty() {
+            ui.label(
+                RichText::new("No member has a target. Set one on a ledger's page.")
+                    .color(fmt::dim()),
+            );
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("Target {}", fmt::amount(t.target))).strong());
+            ui.separator();
+            if t.is_reached() {
+                ui.colored_label(fmt::good(), "reached");
+            } else {
+                ui.label(format!(
+                    "{} now, {} to go",
+                    fmt::amount(t.balance),
+                    fmt::amount(t.remaining())
+                ));
+            }
+        });
+        if t.lines.len() < t.members {
+            ui.label(
+                RichText::new(format!(
+                    "{} of {} members have a target; the others are left out of both figures.",
+                    t.lines.len(),
+                    t.members
+                ))
+                .small()
+                .color(fmt::dim()),
+            );
+        }
+        egui::Grid::new("bucket_targets").num_columns(4).spacing([16.0, 4.0]).show(ui, |ui| {
+            ui.label("");
+            for h in ["balance", "target", "to go"] {
+                num(ui, RichText::new(h).small().color(fmt::dim()));
+            }
+            ui.end_row();
+            for line in &t.lines {
+                ui.label(&line.name);
+                num(ui, fmt::mono(fmt::amount(line.balance)));
+                num(ui, fmt::mono(fmt::amount(line.target)));
+                num(ui, fmt::mono(fmt::amount(Money((line.target.0 - line.balance.0).abs()))));
+                ui.end_row();
+            }
+        });
+    });
+}
+
 fn detail(ui: &mut Ui, s: &mut Session) {
     let Some(uid) = s.selected_bucket else { return };
     let Some(roll) = roll_up(s.budget(), uid, s.bucket_roll, s.ledger_sort, Order::Asc) else {
@@ -239,7 +293,16 @@ fn detail(ui: &mut Ui, s: &mut Session) {
     );
     ui.add_space(8.0);
 
-    ui.label(fmt::money_text(roll.total).size(26.0));
+    ui.horizontal(|ui| {
+        ui.label(fmt::money_text(roll.total).size(26.0));
+        ui.add_space(16.0);
+        ui.checkbox(&mut s.bucket_targets, "Aggregate targets").on_hover_text(
+            "Add up the targets of the members that have one, the way the balance is added up",
+        );
+    });
+    if s.bucket_targets {
+        targets(ui, s, uid);
+    }
     ui.add_space(8.0);
 
     let explicit: Vec<LedgerIx> = s.budget().buckets.explicit[bix.get()].clone();
@@ -250,7 +313,7 @@ fn detail(ui: &mut Ui, s: &mut Session) {
             ui.label(RichText::new("Includes everything under").color(fmt::dim()));
             for path in &subtrees {
                 if ui
-                    .button(format!("{path}  \u{2715}"))
+                    .button(format!("{path}  \u{1F5D9}"))
                     .on_hover_text("Stop including this subtree")
                     .clicked()
                 {

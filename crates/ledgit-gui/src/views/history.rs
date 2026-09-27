@@ -57,7 +57,7 @@ fn branch_panel(ui: &mut Ui, s: &mut Session) {
         ui.horizontal(|ui| {
             let is_current = current.as_deref() == Some(name.as_str());
             ui.label(if is_current {
-                RichText::new(format!("\u{25cf} {name}")).strong()
+                RichText::new(format!("\u{23FA} {name}")).strong()
             } else {
                 RichText::new(format!("   {name}"))
             });

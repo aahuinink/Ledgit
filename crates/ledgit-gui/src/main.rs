@@ -9,6 +9,7 @@
 
 mod app;
 mod brand;
+mod datepick;
 mod fmt;
 mod forms;
 mod picker;

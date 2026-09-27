@@ -26,12 +26,20 @@ pub enum Screen {
     Buckets,
     Cohorts,
     Views,
+    Variables,
     Commit,
     History,
 }
 
+fn screen_name(v: Screen) -> &'static str {
+    match v {
+        Screen::Register => "Register",
+        _ => Screen::NAV.iter().find(|(s, _)| *s == v).map(|(_, n)| *n).unwrap_or("?"),
+    }
+}
+
 impl Screen {
-    const NAV: [(Screen, &'static str); 9] = [
+    const NAV: [(Screen, &'static str); 10] = [
         (Screen::Dashboard, "Dashboard"),
         (Screen::Ledgers, "Ledgers"),
         (Screen::Transactions, "Transactions"),
@@ -39,6 +47,7 @@ impl Screen {
         (Screen::Buckets, "Buckets"),
         (Screen::Cohorts, "Cohorts"),
         (Screen::Views, "Views"),
+        (Screen::Variables, "Variables"),
         (Screen::Commit, "Commit"),
         (Screen::History, "History"),
     ];
@@ -77,6 +86,8 @@ pub struct Session {
     /// Tree levels folded shut, by lowercased path.
     pub collapsed: std::collections::HashSet<String>,
     pub bucket_roll: RollUp,
+    /// Show the selected bucket's members' targets added up.
+    pub bucket_targets: bool,
     /// Buckets being totalled together on the Buckets screen, in the order
     /// picked so the formula reads the way it was built. Empty means the
     /// screen is showing a single bucket instead.
@@ -94,7 +105,39 @@ pub struct Session {
     /// "Simulate until" override for the Views screen; empty means the
     /// view's own horizon.
     pub view_until: String,
+    /// What the Views screen lays the selected view over, if anything.
+    pub view_compare: Option<crate::views::saved::CompareWith>,
+    /// The budget at the compared commit, folded once and kept.
+    pub compare_cache: Option<(CommitId, Budget)>,
+    pub var_draft: crate::views::variables::VarDraft,
+    pub goals_draft: crate::views::goals::GoalsDraft,
+    /// Show on a ledger's page when its target is (or will be) reached.
+    pub show_target_reached: bool,
+    /// How far ahead to look for it, in years.
+    pub target_horizon_years: u32,
+
+    // --- back and undo.
+    /// Screens visited, most recent last, for the back arrow.
+    pub back: Vec<Screen>,
+    /// Set by the back arrow, so that `track` does not record going back
+    /// as a visit - which would make the arrow bounce between two screens.
+    went_back: bool,
+    /// Earlier states of the staging area, most recent last. Everything you
+    /// do before committing is an edit to the stage - an entry staged, a
+    /// change dropped or edited, issuers run, everything discarded - so
+    /// undoing any of it is putting back the stage as it was.
+    pub undo: Vec<Vec<Op>>,
+    pub redo: Vec<Vec<Op>>,
+    /// The stage as of the end of the last frame, to notice it change.
+    last_stage: Vec<Op>,
+    /// Where HEAD was at the end of the last frame. Once it moves - a
+    /// commit, a checkout, a rebase - earlier stages belong to another
+    /// base, and putting one back would re-post what is now history.
+    last_head: String,
 }
+
+/// How far back undo and the back arrow reach.
+const HISTORY_LIMIT: usize = 100;
 
 impl Session {
     pub fn open(path: PathBuf, author: &str) -> Result<Session> {
@@ -127,6 +170,7 @@ impl Session {
             ledger_tree: true,
             collapsed: Default::default(),
             bucket_roll: RollUp::ByNormality,
+            bucket_targets: false,
             bucket_combo: Vec::new(),
             tx_from: String::new(),
             tx_to: String::new(),
@@ -135,6 +179,97 @@ impl Session {
             calendar_month: Period::Month.start_of(Date::today_utc()),
             view_draft: None,
             view_until: String::new(),
+            view_compare: None,
+            compare_cache: None,
+            var_draft: Default::default(),
+            goals_draft: Default::default(),
+            show_target_reached: true,
+            target_horizon_years: 5,
+            back: Vec::new(),
+            went_back: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            last_stage: Vec::new(),
+            last_head: String::new(),
+        }
+        .tracking()
+    }
+
+    fn tracking(mut self) -> Session {
+        self.last_stage = self.repo.staged().to_vec();
+        self.last_head = self.head_key();
+        self
+    }
+
+    fn head_key(&self) -> String {
+        let id = self.repo.head_commit().ok().flatten().map(|c| c.to_string());
+        format!("{} {}", self.repo.head(), id.unwrap_or_default())
+    }
+
+    /// Called once a frame, after everything has drawn: record a screen
+    /// change for the back arrow, and a stage change for undo.
+    pub fn track(&mut self, screen_before: Screen) {
+        if self.view != screen_before && !self.went_back {
+            push_bounded(&mut self.back, screen_before);
+        }
+        self.went_back = false;
+        let head = self.head_key();
+        if head != self.last_head {
+            self.last_head = head;
+            self.undo.clear();
+            self.redo.clear();
+            self.last_stage = self.repo.staged().to_vec();
+        } else if self.repo.staged() != self.last_stage.as_slice() {
+            let before = std::mem::replace(&mut self.last_stage, self.repo.staged().to_vec());
+            push_bounded(&mut self.undo, before);
+            self.redo.clear();
+        }
+    }
+
+    pub fn go_back(&mut self) {
+        if let Some(v) = self.back.pop() {
+            self.view = v;
+            self.went_back = true;
+        }
+    }
+
+    pub fn undo(&mut self) {
+        if let Some(prev) = self.undo.pop() {
+            let now = self.repo.staged().to_vec();
+            if self.restore(prev, "Undid") {
+                push_bounded(&mut self.redo, now);
+            }
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if let Some(next) = self.redo.pop() {
+            let now = self.repo.staged().to_vec();
+            if self.restore(next, "Redid") {
+                push_bounded(&mut self.undo, now);
+            }
+        }
+    }
+
+    fn restore(&mut self, ops: Vec<Op>, verb: &str) -> bool {
+        let before = self.repo.staged().len();
+        match self.repo.set_stage(ops) {
+            Ok(()) => {
+                self.last_stage = self.repo.staged().to_vec();
+                let after = self.repo.staged().len();
+                let broken = self.repo.broken().len();
+                let mut msg =
+                    format!("{verb} the last change: {before} staged change(s) -> {after}.");
+                if broken > 0 {
+                    msg.push_str(&format!(" {broken} of them no longer apply; see Commit."));
+                }
+                self.note(msg);
+                true
+            }
+            Err(e) => {
+                self.fail(e);
+                false
+            }
         }
     }
 
@@ -179,6 +314,13 @@ impl Session {
 
     pub fn is_pinned(&self, uid: LedgerUid) -> bool {
         self.pins.contains(&uid)
+    }
+}
+
+fn push_bounded<T>(stack: &mut Vec<T>, item: T) {
+    stack.push(item);
+    if stack.len() > HISTORY_LIMIT {
+        stack.remove(0);
     }
 }
 
@@ -353,6 +495,8 @@ impl LedgitApp {
         // Take the session out so views get `&mut Session` without fighting the
         // borrow checker over `self`.
         let mut session = self.session.take().expect("workspace only runs with a session");
+        let screen_before = session.view;
+        shortcuts(ctx, &mut session);
 
         top_bar(ctx, &mut session, &self.brand);
         nav_panel(ctx, &mut session);
@@ -374,6 +518,7 @@ impl LedgitApp {
                 Screen::Buckets => views::buckets::show(ui, &mut session),
                 Screen::Cohorts => views::cohorts::show(ui, &mut session),
                 Screen::Views => views::saved::show(ui, &mut session),
+                Screen::Variables => views::variables::show(ui, &mut session),
                 Screen::Commit => views::commit::show(ui, &mut session),
                 Screen::History => views::history::show(ui, &mut session),
             }
@@ -384,6 +529,7 @@ impl LedgitApp {
         if let Some(v) = session.goto.take() {
             session.view = v;
         }
+        session.track(screen_before);
         self.session = Some(session);
         self.remember_pins();
     }
@@ -429,10 +575,50 @@ fn apply_zoom(ctx: &egui::Context) {
     }
 }
 
+/// Back: Alt+Left or the mouse's back button. Undo: Ctrl+Z; redo: Ctrl+Y or
+/// Ctrl+Shift+Z. Undo and redo leave a focused text box alone, so Ctrl+Z
+/// there still undoes typing rather than your last staged entry.
+fn shortcuts(ctx: &egui::Context, s: &mut Session) {
+    use egui::{Key, KeyboardShortcut, Modifiers};
+    let back = ctx.input_mut(|i| {
+        i.consume_shortcut(&KeyboardShortcut::new(Modifiers::ALT, Key::ArrowLeft))
+            || i.pointer.button_clicked(egui::PointerButton::Extra1)
+    });
+    if back {
+        s.go_back();
+    }
+    if s.forms.open.is_some() || ctx.wants_keyboard_input() {
+        return;
+    }
+    let (undo, redo) = ctx.input_mut(|i| {
+        let redo = i.consume_shortcut(&KeyboardShortcut::new(
+            Modifiers::COMMAND | Modifiers::SHIFT,
+            Key::Z,
+        )) || i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Y));
+        let undo = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z));
+        (undo, redo)
+    });
+    if undo {
+        s.undo();
+    }
+    if redo {
+        s.redo();
+    }
+}
+
 pub(crate) fn top_bar(ctx: &egui::Context, s: &mut Session, brand: &Brand) {
     egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
+            let back_to = s.back.last().map(|v| screen_name(*v)).unwrap_or("nowhere yet");
+            if ui
+                .add_enabled(!s.back.is_empty(), egui::Button::new("\u{2B05}"))
+                .on_hover_text(format!("Back to {back_to} (Alt+Left)"))
+                .on_disabled_hover_text("Nothing to go back to")
+                .clicked()
+            {
+                s.go_back();
+            }
             let name = s
                 .path
                 .file_stem()
@@ -461,6 +647,34 @@ pub(crate) fn top_bar(ctx: &egui::Context, s: &mut Session, brand: &Brand) {
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let fired = ledgit_core::goals::fired(s.budget()).len();
+                if fired > 0
+                    && ui
+                        .button(RichText::new(format!("\u{26A0} {fired}")).color(fmt::bad()))
+                        .on_hover_text(format!(
+                            "{fired} alert(s) past their level. See the Dashboard."
+                        ))
+                        .clicked()
+                {
+                    s.goto = Some(Screen::Dashboard);
+                }
+                if ui
+                    .add_enabled(!s.redo.is_empty(), egui::Button::new("\u{27F3}"))
+                    .on_hover_text("Redo (Ctrl+Y)")
+                    .clicked()
+                {
+                    s.redo();
+                }
+                if ui
+                    .add_enabled(!s.undo.is_empty(), egui::Button::new("\u{27F2} Undo"))
+                    .on_hover_text(
+                        "Undo the last change to the staging area (Ctrl+Z). Commits are \
+                         undone by reverting them on the History screen.",
+                    )
+                    .clicked()
+                {
+                    s.undo();
+                }
                 let staged = s.repo.staged().len();
                 let text = if staged == 0 {
                     RichText::new("nothing staged").color(fmt::dim())
@@ -602,9 +816,10 @@ fn status_bar(ctx: &egui::Context, s: &mut Session) {
 
 fn show_form_modal(ctx: &egui::Context, s: &mut Session) {
     let Some(kind) = s.forms.open else { return };
+    let title = s.forms.title();
     let response = egui::Modal::new(egui::Id::new("form_modal")).show(ctx, |ui| {
         ui.set_width(kind.width());
-        ui.heading(kind.title());
+        ui.heading(&title);
         ui.add_space(8.0);
 
         // The budget is read while the form is drawn, and staging happens after,
@@ -621,10 +836,21 @@ fn show_form_modal(ctx: &egui::Context, s: &mut Session) {
     });
 
     match response.inner {
-        Outcome::Submit(ops) => {
-            let what = kind.title().to_lowercase().replace("new ", "");
-            s.stage(ops, &what);
-        }
+        Outcome::Submit(mut ops) => match s.forms.editing.take() {
+            Some(index) if ops.len() == 1 => match s.repo.replace_staged(index, ops.remove(0)) {
+                Ok(_) => s.note("Edited the staged change."),
+                Err(e) => {
+                    // Keep the form open on what was typed, so it can be fixed.
+                    s.forms.error = Some(e.to_string());
+                    s.forms.editing = Some(index);
+                    s.forms.open = Some(kind);
+                }
+            },
+            _ => {
+                let what = kind.title().to_lowercase().replace("new ", "");
+                s.stage(ops, &what);
+            }
+        },
         Outcome::Cancelled => s.forms.open = None,
         Outcome::Pending => {}
     }

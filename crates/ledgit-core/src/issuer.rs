@@ -7,10 +7,21 @@
 //!
 //! Each batch ends with an `AdvanceIssuer` op recording the date emitted
 //! through, so replaying history - or rebasing it - never double-posts rent.
+//!
+//! Most issuers post the same entry every time. One with an [`AmountRule`]
+//! works its amount out from a balance - interest on a loan, a share of
+//! savings - so its occurrences cannot be priced one issuer at a time: this
+//! month's interest depends on last month's, and on the payment another
+//! issuer made in between. [`project`] therefore walks every occurrence of
+//! every issuer in date order, keeping the balances it has moved, and is the
+//! one place amounts are worked out - for posting ([`run_all`]) and for the
+//! simulation in saved views alike.
 
 use crate::date::Date;
-use crate::id::{IssuerIx, TxUid};
-use crate::model::Parent;
+use crate::expr::Ratio;
+use crate::id::{IssuerIx, LedgerIx, TxUid};
+use crate::model::{magnitude, AmountRule, Leg, Parent, Schedule};
+use crate::money::Money;
 use crate::op::Op;
 use crate::state::Budget;
 
@@ -63,38 +74,199 @@ pub struct IssuerRun {
 /// Paused issuers produce nothing, and stay exactly where they were - so
 /// resuming one does not retroactively post the payments it missed. If you
 /// want those, unpause and then run `through` an earlier date first.
+///
+/// An occurrence whose rule comes to nothing - interest on a loan already
+/// paid off - posts no entry, but still counts as done.
 pub fn run_all(l: &Budget, through: Date) -> Vec<IssuerRun> {
-    l.issuers
-        .indices()
-        .filter(|ix| !l.issuers.paused[ix.get()])
+    let active: Vec<IssuerIx> =
+        l.issuers.indices().filter(|ix| !l.issuers.paused[ix.get()]).collect();
+    let occurrences = project(l, &active, through);
+    active
+        .into_iter()
         .filter_map(|ix| {
-            let dates = due_dates(l, ix, through);
-            if dates.is_empty() {
-                return None;
-            }
+            let mine: Vec<&Occurrence> = occurrences.iter().filter(|o| o.issuer == ix).collect();
+            let last = mine.last()?.date;
             let i = ix.get();
             let s = &l.issuers;
-            let mut ops: Vec<Op> = dates
+            let mut ops: Vec<Op> = mine
                 .iter()
-                .map(|d| Op::PostTransaction {
-                    uid: TxUid::new(),
-                    name: s.name[i].clone(),
-                    description: s.description[i].clone(),
-                    date: *d,
+                .filter_map(|o| {
                     // The whole entry, splits and all, is copied from the
                     // issuer: a recurring paycheque posts its tax and pension
                     // legs every time, not just its net.
-                    legs: s.legs[i].clone(),
-                    parent: Parent::Issuer(s.uid[i]),
+                    let legs = o.legs.clone()?;
+                    Some(Op::PostTransaction {
+                        uid: TxUid::new(),
+                        name: s.name[i].clone(),
+                        description: s.description[i].clone(),
+                        date: o.date,
+                        legs,
+                        parent: Parent::Issuer(s.uid[i]),
+                    })
                 })
                 .collect();
-            ops.push(Op::AdvanceIssuer {
-                uid: s.uid[i],
-                through: *dates.last().expect("non-empty"),
-            });
-            Some(IssuerRun { issuer: ix, dates, ops })
+            ops.push(Op::AdvanceIssuer { uid: s.uid[i], through: last });
+            Some(IssuerRun { issuer: ix, dates: mine.iter().map(|o| o.date).collect(), ops })
         })
         .collect()
+}
+
+/// One occurrence an issuer owes, priced.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Occurrence {
+    pub issuer: IssuerIx,
+    pub date: Date,
+    /// What it posts, or `None` when its rule comes to nothing.
+    pub legs: Option<Vec<Leg>>,
+}
+
+/// Every occurrence `issuers` owe on or before `through`, in date order, with
+/// amounts worked out against the balances as they will stand - each rule
+/// reading its ledger after every earlier occurrence in the list.
+pub fn project(l: &Budget, issuers: &[IssuerIx], through: Date) -> Vec<Occurrence> {
+    let mut due: Vec<(Date, IssuerIx)> = issuers
+        .iter()
+        .flat_map(|ix| due_dates(l, *ix, through).into_iter().map(move |d| (d, *ix)))
+        .collect();
+    due.sort_by_key(|(d, ix)| (*d, ix.0));
+
+    // Raw movement from occurrences already projected, per ledger: settled
+    // ones (earlier days) and today's, which a rule on the same day must not
+    // see - it reads the balance at the start of its day.
+    let mut settled = vec![Money::ZERO; l.ledgers.len()];
+    let mut today: Vec<(LedgerIx, Money)> = Vec::new();
+    let mut day = None;
+
+    let mut out = Vec::with_capacity(due.len());
+    for (date, ix) in due {
+        if day != Some(date) {
+            for (a, m) in today.drain(..) {
+                settled[a.get()] += m;
+            }
+            day = Some(date);
+        }
+        let i = ix.get();
+        let legs = match l.issuers.rule[i] {
+            None => Some(l.issuers.legs[i].clone()),
+            Some(rule) => l.ledgers.ix(rule.of()).and_then(|of| {
+                let raw = raw_before(l, of, date) + settled[of.get()];
+                let balance = l.ledgers.normality[of.get()].present(raw);
+                let amount = rule_amount(rule, l.issuers.schedule[i], date, balance)?;
+                Some(scale_legs(&l.issuers.legs[i], amount))
+            }),
+        };
+        if let Some(legs) = &legs {
+            for leg in legs {
+                if let Some(a) = l.ledgers.ix(leg.ledger) {
+                    today.push((a, leg.amount));
+                }
+            }
+        }
+        out.push(Occurrence { issuer: ix, date, legs });
+    }
+    out
+}
+
+/// What one issuer's next entry comes to, going by balances as they stand
+/// now. Exact for a fixed issuer; for one with a rule, an estimate - the
+/// real amount depends on what happens before it fires.
+pub fn estimate(l: &Budget, ix: IssuerIx) -> Money {
+    magnitude(&estimate_legs(l, ix))
+}
+
+/// The legs behind [`estimate`].
+pub fn estimate_legs(l: &Budget, ix: IssuerIx) -> Vec<Leg> {
+    let i = ix.get();
+    let Some(rule) = l.issuers.rule[i] else {
+        return l.issuers.legs[i].clone();
+    };
+    let Some(of) = l.ledgers.ix(rule.of()) else {
+        return Vec::new();
+    };
+    let date = next_due(l, ix).unwrap_or(l.issuers.start[i]);
+    match rule_amount(rule, l.issuers.schedule[i], date, l.ledgers.balance(of)) {
+        Some(amount) => scale_legs(&l.issuers.legs[i], amount),
+        None => Vec::new(),
+    }
+}
+
+/// The ledger's raw balance from postings dated before `date`.
+fn raw_before(l: &Budget, of: LedgerIx, date: Date) -> Money {
+    l.ledgers.postings[of.get()]
+        .iter()
+        .filter(|p| l.transactions.date[l.postings.tx[p.get()].get()] < date)
+        .map(|p| l.postings.amount[p.get()])
+        .sum()
+}
+
+/// What a rule charges on `date` against `balance`, or `None` for nothing.
+pub fn rule_amount(
+    rule: AmountRule,
+    schedule: Schedule,
+    date: Date,
+    balance: Money,
+) -> Option<Money> {
+    if balance.cents() <= 0 {
+        return None;
+    }
+    let b = Ratio::from_money(balance);
+    let amount = match rule {
+        AmountRule::ShareOfBalance { rate, .. } => b.checked_mul(rate.ratio()),
+        AmountRule::Interest { apr, .. } => {
+            let days = Ratio::int(accrual_days(schedule, date) as i64);
+            b.checked_mul(apr.ratio())
+                .and_then(|x| x.checked_mul(days))
+                .and_then(|x| x.checked_div(Ratio::int(365)))
+        }
+    };
+    amount.ok()?.to_money().ok().filter(|m| m.cents() > 0)
+}
+
+/// Days of interest an occurrence on `date` covers: back to the occurrence
+/// before it.
+pub fn accrual_days(schedule: Schedule, date: Date) -> i32 {
+    match schedule {
+        Schedule::EveryNDays { n } => n as i32,
+        Schedule::MonthlyOn { every_n_months, .. } => {
+            date.0 - date.add_months(-(every_n_months as i32)).0
+        }
+        Schedule::Once => 0,
+    }
+}
+
+/// Scale an entry so it comes to `total`: each leg keeps its share of its
+/// side, debits and credits each summing to exactly `total`. Cents that do
+/// not divide evenly go to the legs with the largest remainders.
+pub fn scale_legs(legs: &[Leg], total: Money) -> Vec<Leg> {
+    let mut out: Vec<Leg> = legs.to_vec();
+    for debit in [true, false] {
+        let side: Vec<usize> = (0..legs.len()).filter(|i| legs[*i].is_debit() == debit).collect();
+        let weight: i128 =
+            side.iter().map(|i| legs[*i].amount.cents().unsigned_abs() as i128).sum();
+        if weight == 0 {
+            continue;
+        }
+        let t = total.cents() as i128;
+        let mut given = 0i128;
+        let mut rem: Vec<(i128, usize)> = Vec::with_capacity(side.len());
+        for i in &side {
+            let w = legs[*i].amount.cents().unsigned_abs() as i128;
+            let share = t * w / weight;
+            rem.push((t * w % weight, *i));
+            out[*i].amount = Money(share as i64);
+            given += share;
+        }
+        rem.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        for (_, i) in rem.iter().take((t - given) as usize) {
+            out[*i].amount.0 += 1;
+        }
+        if !debit {
+            for i in &side {
+                out[*i].amount.0 = -out[*i].amount.0;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -127,6 +299,7 @@ mod tests {
                 legs: simple_legs(loan, cash, Money::from_major(400)),
                 schedule,
                 start,
+                rule: None,
             },
         ])
         .unwrap();

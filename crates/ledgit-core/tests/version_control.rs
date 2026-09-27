@@ -326,21 +326,87 @@ fn balance_as_of_ignores_later_transactions() {
 }
 
 #[test]
-fn unstaging_a_dependency_is_refused_rather_than_corrupting_the_stage() {
+fn unstaging_a_dependency_flags_what_it_breaks_and_blocks_the_commit() {
     let mut f = fixture();
     let scratch = f.repo.add_ledger("Scratch", "", Normality::Debit, d("2024-01-01")).unwrap();
     f.repo
         .post("uses scratch", "", d("2024-01-02"), Money::from_major(5), scratch, f.cash)
         .unwrap();
+    f.repo.post("fine", "", d("2024-01-03"), Money::from_major(7), f.cash, f.salary).unwrap();
 
-    let err = f.repo.unstage_at(0).unwrap_err();
-    assert!(err.to_string().contains("depends on it"), "{err}");
-    assert_eq!(f.repo.staged().len(), 2, "the stage is intact after the refusal");
+    // Dropping the ledger is allowed; the entry that used it is kept, flagged.
+    f.repo.unstage_at(0).unwrap();
+    assert_eq!(f.repo.staged().len(), 2, "nothing else was thrown away");
+    assert_eq!(f.repo.broken().len(), 1);
+    assert_eq!(f.repo.broken()[0].index, 0);
+    assert!(f.repo.broken()[0].reason.contains("ledger"), "{:?}", f.repo.broken());
 
-    // Dropping them newest-first works.
-    f.repo.unstage_last().unwrap();
-    f.repo.unstage_last().unwrap();
-    assert_eq!(f.repo.staged().len(), 0);
+    // The working budget holds only what applies: the healthy entry.
+    let cash = f.repo.working().ledgers.ix(f.cash).unwrap();
+    assert_eq!(f.repo.working().ledgers.balance(cash), Money::from_major(7));
+    let r = f.repo.report().unwrap();
+    assert_eq!(r.lines.len(), 2, "the report still lists the broken change");
+    assert_eq!(r.manual_transactions, 1, "but counts only the healthy one");
+    assert!(!r.can_commit());
+
+    let err = f.repo.commit("should not go through").unwrap_err();
+    assert!(err.to_string().contains("no longer apply"), "{err}");
+    assert!(f.repo.head_commit().is_ok());
+    assert_eq!(f.repo.staged().len(), 2, "a refused commit keeps the stage");
+
+    // Fixing the entry - pointing it at a ledger that exists - mends it.
+    let Op::PostTransaction { uid, name, description, date, parent, .. } =
+        f.repo.staged()[0].clone()
+    else {
+        panic!("expected the transaction first");
+    };
+    let fixed = Op::PostTransaction {
+        uid,
+        name,
+        description,
+        date,
+        legs: simple_legs(f.loan, f.cash, Money::from_major(5)),
+        parent,
+    };
+    f.repo.replace_staged(0, fixed).unwrap();
+    assert!(f.repo.broken().is_empty());
+    assert!(f.repo.report().unwrap().can_commit());
+    f.repo.commit("fixed").unwrap();
+}
+
+#[test]
+fn an_edit_that_does_not_apply_is_refused_and_leaves_the_stage_alone() {
+    let mut f = fixture();
+    f.repo.post("rent", "", d("2024-01-02"), Money::from_major(5), f.loan, f.cash).unwrap();
+    let before = f.repo.staged().to_vec();
+    let bad = Op::PostTransaction {
+        uid: TxUid::new(),
+        name: "rent".into(),
+        description: String::new(),
+        date: d("2024-01-02"),
+        legs: simple_legs(LedgerUid::new(), f.cash, Money::from_major(5)),
+        parent: Parent::Manual,
+    };
+    assert!(f.repo.replace_staged(0, bad).is_err());
+    assert_eq!(f.repo.staged(), &before[..]);
+    assert!(f.repo.broken().is_empty());
+    assert!(f.repo.replace_staged(9, before[0].clone()).is_err());
+}
+
+#[test]
+fn a_whole_stage_can_be_put_back_even_when_part_of_it_is_broken() {
+    let mut f = fixture();
+    let scratch = f.repo.add_ledger("Scratch", "", Normality::Debit, d("2024-01-01")).unwrap();
+    f.repo
+        .post("uses scratch", "", d("2024-01-02"), Money::from_major(5), scratch, f.cash)
+        .unwrap();
+    let snapshot = f.repo.staged().to_vec();
+    f.repo.unstage_at(0).unwrap();
+    assert_eq!(f.repo.broken().len(), 1);
+    // Undo: put the ledger back and the entry applies again.
+    f.repo.set_stage(snapshot).unwrap();
+    assert!(f.repo.broken().is_empty());
+    assert_eq!(f.repo.staged().len(), 2);
 }
 
 #[test]
@@ -880,4 +946,388 @@ fn renaming_a_subtree_moves_every_ledger_and_keeps_every_posting() {
     assert_eq!(under.len(), 2);
     let spent = TxQuery::new().filter(TxFilter::TouchesUnder("Marriage".into())).run(w);
     assert_eq!(spent.len(), 1);
+}
+
+#[test]
+#[allow(clippy::inconsistent_digit_grouping)]
+fn variables_are_versioned_and_price_entries_when_they_are_made() {
+    use ledgit_core::expr::eval_money;
+    let mut f = fixture();
+    let set =
+        |name: &str, v: &str| Op::SetVariable { name: name.into(), value: VarValue::guess(v) };
+    f.repo.stage(set("Car_Km_Rate", "0.68")).unwrap();
+    f.repo.stage(set("Home", "Toronto")).unwrap();
+    let r = f.repo.report().unwrap();
+    assert_eq!(r.variables_changed, 2);
+    f.repo.commit("rates").unwrap();
+
+    let vars = &f.repo.working().variables;
+    let amount = eval_money("200 * car_km_rate", vars).unwrap();
+    assert_eq!(amount, Money(136_00));
+    assert_eq!(
+        vars.substitute("Mileage from {Home} at {Car_Km_Rate}/km").unwrap(),
+        "Mileage from Toronto at 0.68/km"
+    );
+    assert!(vars.substitute("{Nope}").is_err());
+    assert_eq!(vars.substitute("literal {{ brace").unwrap(), "literal { brace");
+    assert!(eval_money("2 * Home", vars).unwrap_err().to_string().contains("text"));
+    f.repo.post("Mileage", "", d("2024-02-01"), amount, f.loan, f.cash).unwrap();
+    f.repo.commit("mileage").unwrap();
+
+    // A new rate re-prices nothing already posted.
+    f.repo.stage(set("CAR_KM_RATE", "0.70")).unwrap();
+    let raised = f.repo.commit("rate up").unwrap();
+    assert_eq!(f.repo.working().variables.len(), 2, "same variable, whatever the case");
+    assert_eq!(
+        f.repo.working().variables.get("car_km_rate"),
+        Some(&VarValue::Number("0.70".into()))
+    );
+    let loan = f.repo.working().ledgers.ix(f.loan).unwrap();
+    assert_eq!(f.repo.working().ledgers.balance(loan), Money(-136_00));
+
+    // Reverting the change puts the old rate back; reverting a delete restores it.
+    f.repo.revert(&raised.to_string()).unwrap();
+    f.repo.commit("undo the raise").unwrap();
+    assert_eq!(
+        f.repo.working().variables.get("Car_Km_Rate"),
+        Some(&VarValue::Number("0.68".into()))
+    );
+    f.repo.stage(Op::DeleteVariable { name: "home".into() }).unwrap();
+    let deleted = f.repo.commit("no home").unwrap();
+    assert!(f.repo.working().variables.get("Home").is_none());
+    f.repo.revert(&deleted.to_string()).unwrap();
+    assert_eq!(f.repo.working().variables.get("Home"), Some(&VarValue::Text("Toronto".into())));
+
+    // Bad names and bad numbers never land.
+    assert!(f.repo.stage(set("Km Rate", "1")).is_err());
+    assert!(f.repo.stage(set("2fast", "1")).is_err());
+    assert!(f
+        .repo
+        .stage(Op::SetVariable { name: "X".into(), value: VarValue::Number("abc".into()) })
+        .is_err());
+    assert!(f.repo.stage(Op::DeleteVariable { name: "Nope".into() }).is_err());
+}
+
+#[test]
+fn rates_read_and_print_as_percentages() {
+    assert_eq!(Rate::parse_percent("6.45").unwrap(), Rate(64_500));
+    assert_eq!(Rate::parse_percent(" 5% ").unwrap(), Rate(50_000));
+    assert_eq!(Rate::parse_percent("0.0001").unwrap(), Rate(1));
+    assert!(Rate::parse_percent("0.00001").is_err(), "finer than a millionth");
+    assert!(Rate::parse_percent("abc").is_err());
+    assert_eq!(Rate(64_500).to_string(), "6.45%");
+    assert_eq!(Rate(50_000).to_string(), "5%");
+    assert_eq!(Rate(1_250).to_string(), "0.125%");
+}
+
+/// Interest compounds on interest already charged, and reads the balance
+/// after a payment another issuer made earlier in the run.
+#[test]
+#[allow(clippy::inconsistent_digit_grouping)]
+fn interest_is_worked_out_in_date_order_across_issuers() {
+    use ledgit_core::expr::Ratio;
+    let mut f = fixture();
+    let interest = f.repo.add_ledger("Interest", "", Normality::Debit, d("2024-01-01")).unwrap();
+    f.repo.post("Car", "", d("2024-01-01"), Money::from_major(10_000), f.cash, f.loan).unwrap();
+    let monthly = |day| Schedule::MonthlyOn { day, every_n_months: 1 };
+    let apr = Rate::parse_percent("6.45").unwrap();
+    f.repo
+        .add_rule_issuer(
+            "Loan interest",
+            "",
+            interest,
+            f.loan,
+            AmountRule::Interest { of: f.loan, apr },
+            monthly(1),
+            d("2024-02-01"),
+        )
+        .unwrap();
+    f.repo
+        .add_issuer(
+            "Payment",
+            "",
+            f.loan,
+            f.cash,
+            Money::from_major(1_000),
+            monthly(15),
+            d("2024-01-15"),
+        )
+        .unwrap();
+    f.repo.commit("loan").unwrap();
+
+    let runs = f.repo.run_issuers(d("2024-03-01")).unwrap();
+    assert_eq!(runs.iter().map(|r| r.dates.len()).sum::<usize>(), 4);
+
+    // By hand: Jan 15 payment leaves 9,000; Feb 1 charges 31 days on it;
+    // Feb 15 pays 1,000; Mar 1 charges 29 days (2024 is a leap year).
+    let charge = |balance: Money, days: i64| {
+        Ratio::from_money(balance)
+            .checked_mul(apr.ratio())
+            .unwrap()
+            .checked_mul(Ratio::int(days))
+            .unwrap()
+            .checked_div(Ratio::int(365))
+            .unwrap()
+            .to_money()
+            .unwrap()
+    };
+    let feb = charge(Money::from_major(9_000), 31);
+    let mar = charge(Money::from_major(8_000) + feb, 29);
+    assert_eq!(feb, Money(49_30));
+    let l = f.repo.working();
+    let loan = l.ledgers.ix(f.loan).unwrap();
+    let interest = l.ledgers.ix(interest).unwrap();
+    assert_eq!(l.ledgers.balance(interest), feb + mar);
+    assert_eq!(l.ledgers.balance(loan), Money::from_major(8_000) + feb + mar);
+    assert!(l.is_balanced());
+
+    // A saved view simulating forward prices each month the same way.
+    let spec = ViewSpec { ledgers: vec![f.loan], horizon: Span::Months(3), ..ViewSpec::default() };
+    let report = ledgit_core::view::evaluate(l, &spec, d("2024-03-02"));
+    let apr_end = report.series[0].at_end;
+    let mut expected = Money::from_major(8_000) + feb + mar;
+    // Paid on the 15th; charged on the 1st for the month before.
+    for days in [31, 30, 31] {
+        expected -= Money::from_major(1_000);
+        expected += charge(expected, days);
+    }
+    assert_eq!(apr_end, expected);
+}
+
+#[test]
+#[allow(clippy::inconsistent_digit_grouping)]
+fn a_share_of_a_balance_moves_each_time_and_stops_at_zero() {
+    let mut f = fixture();
+    let savings = f.repo.add_ledger("Savings", "", Normality::Debit, d("2024-01-01")).unwrap();
+    f.repo.post("seed", "", d("2024-01-01"), Money::from_major(1_000), savings, f.salary).unwrap();
+    let rate = Rate::parse_percent("5").unwrap();
+    let sweep = f
+        .repo
+        .add_rule_issuer(
+            "Sweep",
+            "",
+            f.cash,
+            savings,
+            AmountRule::ShareOfBalance { of: savings, rate },
+            Schedule::EveryNDays { n: 7 },
+            d("2024-01-08"),
+        )
+        .unwrap();
+    // A share of something empty is nothing, and a rule needs a real rate.
+    let empty = f.repo.add_ledger("Empty", "", Normality::Debit, d("2024-01-01")).unwrap();
+    let idle = f
+        .repo
+        .add_rule_issuer(
+            "Idle",
+            "",
+            f.cash,
+            empty,
+            AmountRule::ShareOfBalance { of: empty, rate },
+            Schedule::EveryNDays { n: 7 },
+            d("2024-01-08"),
+        )
+        .unwrap();
+    assert!(f
+        .repo
+        .add_rule_issuer(
+            "Zero",
+            "",
+            f.cash,
+            empty,
+            AmountRule::ShareOfBalance { of: empty, rate: Rate(0) },
+            Schedule::Once,
+            d("2024-01-08"),
+        )
+        .is_err());
+    assert!(
+        f.repo
+            .add_rule_issuer(
+                "Once",
+                "",
+                f.cash,
+                empty,
+                AmountRule::Interest { of: empty, apr: rate },
+                Schedule::Once,
+                d("2024-01-08"),
+            )
+            .is_err(),
+        "interest needs a period to accrue over"
+    );
+
+    f.repo.run_issuers(d("2024-01-22")).unwrap();
+    let l = f.repo.working();
+    let sav = l.ledgers.ix(savings).unwrap();
+    // 1000 -> 950 -> 902.50 -> 857.38 (45.125 rounds to 45.13)
+    assert_eq!(l.ledgers.balance(sav), Money(857_37));
+    let posted_by = |uid: IssuerUid| {
+        (0..l.transactions.len())
+            .filter(|i| l.transactions.parent[*i] == Parent::Issuer(uid))
+            .count()
+    };
+    assert_eq!(posted_by(sweep), 3);
+    assert_eq!(posted_by(idle), 0, "nothing to take, nothing posted");
+    let idle_ix = l.issuers.ix(idle).unwrap();
+    assert_eq!(
+        l.issuers.emitted_through[idle_ix.get()],
+        Some(d("2024-01-22")),
+        "but it is caught up"
+    );
+    assert!(ledgit_core::issuer::estimate(l, l.issuers.ix(sweep).unwrap()) == Money(42_87));
+}
+
+#[test]
+fn a_rule_scales_a_split_entry_and_keeps_it_balanced() {
+    use ledgit_core::issuer::scale_legs;
+    let (a, b, c) = (LedgerUid::new(), LedgerUid::new(), LedgerUid::new());
+    let legs = vec![
+        Leg::debit(a, Money::from_major(2)),
+        Leg::debit(b, Money::from_major(1)),
+        Leg::credit(c, Money::from_major(3)),
+    ];
+    let scaled = scale_legs(&legs, Money(100));
+    assert_eq!(
+        scaled,
+        vec![Leg::debit(a, Money(67)), Leg::debit(b, Money(33)), Leg::credit(c, Money(100))]
+    );
+    assert!(validate_legs(&scaled).is_ok());
+}
+
+/// Issuers made before amount rules existed must encode exactly as they did,
+/// or every old commit would stop matching its own hash.
+#[test]
+fn an_issuer_without_a_rule_encodes_as_it_always_did() {
+    let op = Op::CreateIssuer {
+        uid: IssuerUid::new(),
+        name: "Rent".into(),
+        description: String::new(),
+        legs: simple_legs(LedgerUid::new(), LedgerUid::new(), Money(100)),
+        schedule: Schedule::Once,
+        start: d("2024-01-01"),
+        rule: None,
+    };
+    let json = serde_json::to_string(&op).unwrap();
+    assert!(!json.contains("rule"), "{json}");
+    let back: Op = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, op);
+}
+
+#[test]
+fn targets_and_alerts_are_settings_that_travel_with_the_ledger() {
+    use ledgit_core::goals;
+    let mut f = fixture();
+    f.repo.post("Car", "", d("2024-01-01"), Money::from_major(3_000), f.cash, f.loan).unwrap();
+    let low = Alert {
+        when: AlertWhen::Below,
+        level: Money::from_major(2_500),
+        message: "Top up chequing".into(),
+    };
+    f.repo
+        .stage(Op::SetLedgerGoals { uid: f.cash, target: None, alerts: vec![low.clone()] })
+        .unwrap();
+    f.repo
+        .stage(Op::SetLedgerGoals { uid: f.loan, target: Some(Money::ZERO), alerts: vec![] })
+        .unwrap();
+    let goals_commit = f.repo.commit("goals").unwrap();
+    assert!(goals::fired(f.repo.working()).is_empty());
+
+    // A payment that takes chequing under its level shows up in the report.
+    f.repo.post("Payment", "", d("2024-01-20"), Money::from_major(600), f.loan, f.cash).unwrap();
+    let r = f.repo.report().unwrap();
+    assert_eq!(r.alerts.len(), 1);
+    assert_eq!(r.alerts[0].alert, low);
+    assert_eq!(r.alerts[0].balance, Money::from_major(2_400));
+    f.repo.commit("paid").unwrap();
+    assert_eq!(goals::fired(f.repo.working()).len(), 1);
+
+    // Pay 600 a month from Feb 1: 2,400 left owing is gone by May 1.
+    f.repo
+        .add_issuer(
+            "Loan payment",
+            "",
+            f.loan,
+            f.salary,
+            Money::from_major(600),
+            Schedule::MonthlyOn { day: 1, every_n_months: 1 },
+            d("2024-02-01"),
+        )
+        .unwrap();
+    let spec =
+        ViewSpec { ledgers: vec![f.loan, f.cash], horizon: Span::Months(6), ..ViewSpec::default() };
+    let report = ledgit_core::view::evaluate(f.repo.working(), &spec, d("2024-01-25"));
+    let loan = report.series.iter().find(|s| s.label == "Car Loan").unwrap();
+    assert_eq!(loan.target, Some(Money::ZERO));
+    assert_eq!(loan.target_reached, Some(d("2024-05-01")));
+    let cash = report.series.iter().find(|s| s.label == "Cash").unwrap();
+    assert_eq!(cash.target, None, "chequing has alerts but no target");
+
+    // A bucket adds up the targets its members have, the way it adds balances.
+    let debt = f.repo.add_bucket("Debt", "").unwrap();
+    for ledger in [f.loan, f.cash] {
+        f.repo.stage(Op::AddToBucket { bucket: debt, ledger }).unwrap();
+    }
+    let t = goals::bucket_targets(f.repo.working(), debt, RollUp::Sum).unwrap();
+    assert_eq!((t.members, t.lines.len()), (2, 1), "only the loan has a target");
+    assert_eq!(t.balance, Money::from_major(2_400));
+    assert_eq!(t.target, Money::ZERO);
+    assert_eq!(t.remaining(), Money::from_major(2_400));
+
+    // Reverting the goals commit takes them off again.
+    f.repo.clear_stage().unwrap();
+    f.repo.revert(&goals_commit.to_string()).unwrap();
+    f.repo.commit("no goals").unwrap();
+    let l = f.repo.working();
+    assert!(l.ledgers.target.iter().all(Option::is_none));
+    assert!(l.ledgers.alerts.iter().all(Vec::is_empty));
+}
+
+/// "How does a lump-sum payment change when the loan is paid off?" - the
+/// same view read off the commit before it and the budget after.
+#[test]
+fn a_view_compares_against_an_earlier_commit() {
+    let mut f = fixture();
+    f.repo.post("Car", "", d("2024-01-01"), Money::from_major(6_000), f.cash, f.loan).unwrap();
+    f.repo
+        .stage(Op::SetLedgerGoals { uid: f.loan, target: Some(Money::ZERO), alerts: vec![] })
+        .unwrap();
+    f.repo
+        .add_issuer(
+            "Payment",
+            "",
+            f.loan,
+            f.salary,
+            Money::from_major(500),
+            Schedule::MonthlyOn { day: 1, every_n_months: 1 },
+            d("2024-02-01"),
+        )
+        .unwrap();
+    let before = f.repo.commit("loan and plan").unwrap();
+
+    f.repo
+        .post("Lump sum", "", d("2024-01-20"), Money::from_major(2_000), f.loan, f.salary)
+        .unwrap();
+    f.repo.commit("bonus goes on the loan").unwrap();
+
+    let spec = ViewSpec { ledgers: vec![f.loan], horizon: Span::Years(2), ..ViewSpec::default() };
+    let today = d("2024-01-25");
+    let now_budget = f.repo.working().clone();
+    let now = ledgit_core::view::evaluate(&now_budget, &spec, today);
+    let then_budget = f.repo.budget_at(before).unwrap();
+    let (then, pairs) = ledgit_core::view::compare(&then_budget, &spec, &now_budget, &now);
+
+    assert_eq!(pairs, vec![Some(0)]);
+    assert_eq!((then.start, then.end, then.today), (now.start, now.end, now.today));
+    // 6,000 at 500 a month from Feb 1 takes twelve payments; 4,000 takes eight.
+    assert_eq!(then.series[0].target_reached, Some(d("2025-01-01")));
+    assert_eq!(now.series[0].target_reached, Some(d("2024-09-01")));
+    assert_eq!(then.series[0].now - now.series[0].now, Money::from_major(2_000));
+
+    // A ledger that did not exist then has no earlier line.
+    let extra = f.repo.add_ledger("New", "", Normality::Debit, d("2024-01-01")).unwrap();
+    let spec = ViewSpec { ledgers: vec![f.loan, extra], ..spec };
+    let now_budget = f.repo.working().clone();
+    let now = ledgit_core::view::evaluate(&now_budget, &spec, today);
+    let (_, pairs) = ledgit_core::view::compare(&then_budget, &spec, &now_budget, &now);
+    // Total, the loan, and the new ledger: only the last is missing then.
+    assert_eq!(pairs.len(), 3);
+    assert_eq!(pairs.iter().filter(|p| p.is_none()).count(), 1);
 }

@@ -35,6 +35,12 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
         ledgers_table(ui, &report);
         ui.add_space(14.0);
         buckets_table(ui, &report);
+        if !report.alerts.is_empty() {
+            ui.add_space(14.0);
+            ui.label(RichText::new("ALERTS THIS SETS OFF").small().color(fmt::dim()));
+            ui.add_space(4.0);
+            super::goals::fired_list(ui, s, &report.alerts);
+        }
         ui.add_space(18.0);
         commit_box(ui, s, &report);
     });
@@ -98,24 +104,81 @@ fn tile(ui: &mut Ui, label: &str, value: &str, sub: &str) {
 
 fn staged_list(ui: &mut Ui, s: &mut Session) {
     ui.label(RichText::new("STAGED CHANGES").small().color(fmt::dim()));
+    let broken = s.repo.broken().to_vec();
+    if !broken.is_empty() {
+        ui.colored_label(
+            fmt::bad(),
+            format!(
+                "{} change(s) below no longer apply - usually because something they use was \
+                 dropped. They are left out of the totals, and nothing can be committed until \
+                 each is edited or dropped.",
+                broken.len()
+            ),
+        );
+    }
     ui.add_space(4.0);
     let mut drop: Option<usize> = None;
-    egui::Grid::new("staged").num_columns(3).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
+    let mut edit: Option<usize> = None;
+    egui::Grid::new("staged").num_columns(4).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
         for (i, op) in s.repo.staged().iter().enumerate() {
             ui.label(RichText::new(format!("{}.", i + 1)).color(fmt::dim()).monospace());
-            ui.label(op.summary());
+            match broken.iter().find(|b| b.index == i) {
+                Some(b) => {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(format!("\u{26A0} {}", op.summary())).color(fmt::bad()),
+                        );
+                        ui.label(RichText::new(&b.reason).small().color(fmt::bad()));
+                    });
+                }
+                None => {
+                    ui.label(op.summary());
+                }
+            }
+            ui.horizontal(|ui| {
+                if editable(op) && ui.small_button("edit").clicked() {
+                    edit = Some(i);
+                }
+            });
             if ui.small_button("drop").clicked() {
                 drop = Some(i);
             }
             ui.end_row();
         }
     });
+    if let Some(i) = edit {
+        let op = s.repo.staged()[i].clone();
+        s.forms.edit_staged(i, &op);
+    }
     if let Some(i) = drop {
         match s.repo.unstage_at(i) {
-            Ok(op) => s.note(format!("Dropped: {}", op.summary())),
+            Ok(op) => {
+                let n = s.repo.broken().len();
+                if n > 0 {
+                    s.fail(format!(
+                        "Dropped: {}. {n} staged change(s) no longer apply; fix or drop them before committing.",
+                        op.summary()
+                    ));
+                } else {
+                    s.note(format!("Dropped: {}", op.summary()));
+                }
+            }
             Err(e) => s.fail(e),
         }
     }
+}
+
+/// Changes that have a form to reopen them in.
+fn editable(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::CreateLedger { .. }
+            | Op::PostTransaction { .. }
+            | Op::CreateIssuer { .. }
+            | Op::CreateBucket { .. }
+            | Op::CreateCohort { .. }
+            | Op::CreateView { .. }
+    )
 }
 
 fn ledgers_table(ui: &mut Ui, r: &ChangeReport) {
@@ -203,10 +266,12 @@ fn commit_box(ui: &mut Ui, s: &mut Session, r: &ChangeReport) {
     ui.add_space(8.0);
 
     ui.horizontal(|ui| {
-        let can_commit = r.balanced && !s.commit_message.trim().is_empty();
+        let can_commit = r.can_commit() && !s.commit_message.trim().is_empty();
         if ui
             .add_enabled(can_commit, egui::Button::new("Commit"))
-            .on_disabled_hover_text(if r.balanced {
+            .on_disabled_hover_text(if !r.broken.is_empty() {
+                "Blocked: some staged changes no longer apply. Edit or drop them first."
+            } else if r.balanced {
                 "Write a message first"
             } else {
                 "Blocked: the budget does not balance"

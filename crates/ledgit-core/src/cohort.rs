@@ -24,7 +24,8 @@ use crate::state::Budget;
 pub struct RateLine {
     pub issuer: IssuerIx,
     pub name: String,
-    /// The size of each entry it posts.
+    /// The size of each entry it posts; for an issuer with an amount rule,
+    /// what the next one comes to on today's balances.
     pub amount: Money,
     pub schedule: Schedule,
     pub paused: bool,
@@ -53,7 +54,7 @@ pub fn rate_lines(l: &Budget, issuers: &[IssuerIx]) -> Vec<RateLine> {
             RateLine {
                 issuer: *ix,
                 name: s.name[i].clone(),
-                amount: s.amount(*ix),
+                amount: crate::issuer::estimate(l, *ix),
                 schedule: s.schedule[i],
                 paused: s.paused[i],
             }
@@ -130,7 +131,7 @@ pub fn calendar(
     let mut out: Vec<CalendarEntry> = Vec::new();
     for ix in issuers {
         let i = ix.get();
-        let amount = s.amount(*ix);
+        let amount = crate::issuer::estimate(l, *ix);
         for date in s.schedule[i].dates_between(s.start[i], from, to) {
             let status = if s.emitted_through[i].is_some_and(|done| date <= done) {
                 DueStatus::Posted
@@ -208,6 +209,7 @@ mod tests {
                 legs: simple_legs(rent_l, cash, Money::from_major(1_500)),
                 schedule: Schedule::MonthlyOn { day: 1, every_n_months: 1 },
                 start: d(2024, 1, 1),
+                rule: None,
             },
             Op::CreateIssuer {
                 uid: food,
@@ -216,6 +218,7 @@ mod tests {
                 legs: simple_legs(food_l, cash, Money::from_major(70)),
                 schedule: Schedule::EveryNDays { n: 7 },
                 start: d(2024, 1, 6),
+                rule: None,
             },
             Op::CreateCohort { uid: cohort, name: "Living".into(), description: String::new() },
             Op::AddToCohort { cohort, issuer: rent },

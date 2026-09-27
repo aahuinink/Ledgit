@@ -3,3 +3,4 @@ target/
 *.xlbudget-journal
 *.xlbudget-wal
 *.xlbudget-shm
+/fixtures/

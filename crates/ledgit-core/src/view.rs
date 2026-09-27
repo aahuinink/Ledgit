@@ -41,7 +41,7 @@
 
 use crate::date::Date;
 use crate::id::{BucketUid, CohortUid, IssuerIx, LedgerIx, TxIx};
-use crate::model::{magnitude, Schedule, ViewSpec};
+use crate::model::{magnitude, Alert, Leg, Schedule, ViewSpec};
 use crate::money::Money;
 use crate::period::{per_period, Period};
 use crate::query::{members, Members, RollUp, TxFilter, TxQuery};
@@ -70,6 +70,16 @@ pub struct Series {
     /// The lowest point from today to the end, and when it happens. The
     /// question a projection exists to answer is usually "do I run dry?".
     pub lowest_ahead: (Date, Money),
+    /// The target this line is heading for: a ledger's own, or for a bucket
+    /// or total, the same sum over its ledgers' targets - when every one of
+    /// them has a target.
+    pub target: Option<Money>,
+    /// When the line gets to its target, from today on: today if it is
+    /// already there, `None` if not before the window ends.
+    pub target_reached: Option<Date>,
+    /// For a ledger's line: each of its alerts that is not firing today, and
+    /// the first day the projection sets it off.
+    pub alerts_ahead: Vec<(Alert, Date)>,
 }
 
 impl Series {
@@ -320,15 +330,18 @@ pub fn evaluate_between(
     }
     let selected: Vec<IssuerIx> = flow_set.iter().map(|(s, _)| *s).collect();
 
-    // The effect of one issuer entry on the scope.
-    let issuer_effect = |ix: IssuerIx| -> Money {
-        l.issuers.legs[ix.get()]
-            .iter()
+    // The effect of one entry on the scope, and of an issuer's next one. An
+    // issuer with a rule has no fixed entry; its flow line shows what it
+    // would come to on today's balances, while the simulation below prices
+    // every occurrence as it falls.
+    let legs_effect = |legs: &[Leg]| -> Money {
+        legs.iter()
             .filter_map(|leg| {
                 l.ledgers.ix(leg.ledger).map(|a| Money(scope[a.get()] * leg.amount.0))
             })
             .sum()
     };
+    let issuer_effect = |ix: IssuerIx| legs_effect(&crate::issuer::estimate_legs(l, ix));
 
     let simulated: Vec<IssuerIx> = if spec.only_selected_issuers {
         selected.iter().copied().filter(|ix| !l.issuers.paused[ix.get()]).collect()
@@ -353,7 +366,7 @@ pub fn evaluate_between(
                 name: l.issuers.name[i].clone(),
                 via,
                 schedule: l.issuers.schedule[i],
-                amount: l.issuers.amount(ix),
+                amount: crate::issuer::estimate(l, ix),
                 effect: directed.then(|| issuer_effect(ix)),
                 paused: l.issuers.paused[i],
                 simulated: simulated.contains(&ix),
@@ -391,19 +404,20 @@ pub fn evaluate_between(
         }
     }
 
-    // Occurrences the simulation expects: (date, issuer), overdue on today.
+    // Occurrences the simulation expects, priced in date order: an overdue
+    // one is worked out on its own date but lands on today.
     let mut overdue_occurrences = 0;
-    let mut occurrences: Vec<(Date, IssuerIx)> = Vec::new();
-    for ix in &simulated {
-        for date in crate::issuer::due_dates(l, *ix, end) {
-            if date < today {
-                overdue_occurrences += 1;
-            }
-            occurrences.push((date.max(today), *ix));
+    let mut occurrences: Vec<(Date, IssuerIx, Vec<Leg>)> = Vec::new();
+    for o in crate::issuer::project(l, &simulated, end) {
+        if o.date < today {
+            overdue_occurrences += 1;
+        }
+        if let Some(legs) = o.legs {
+            occurrences.push((o.date.max(today), o.issuer, legs));
         }
     }
-    for (date, ix) in &occurrences {
-        for leg in &l.issuers.legs[ix.get()] {
+    for (date, _, legs) in &occurrences {
+        for leg in legs {
             let Some(a) = l.ledgers.ix(leg.ledger) else { continue };
             if !feeds[a.get()].is_empty() {
                 ev_date.push(*date);
@@ -441,7 +455,7 @@ pub fn evaluate_between(
     let series = defs
         .into_iter()
         .zip(points)
-        .map(|((label, kind, _), mut pts)| {
+        .map(|((label, kind, weights), mut pts)| {
             // Pin today and the last day, so every line reaches both.
             for d in [today, end] {
                 let v = value_at(&pts, d);
@@ -456,12 +470,32 @@ pub fn evaluate_between(
                 .min_by_key(|(d, v)| (*v, *d))
                 .copied()
                 .unwrap_or((today, Money::ZERO));
+            let target = crate::goals::weighted_target(l, &weights);
+            let target_reached = target.and_then(|t| crate::goals::reached_on(&pts, today, t));
+            // A view of one ledger and no buckets draws it as the scope.
+            let ledger = match kind {
+                SeriesKind::Ledger(ix) => Some(ix),
+                SeriesKind::Scope if spec.buckets.is_empty() && weights.len() == 1 => {
+                    Some(weights[0].0)
+                }
+                _ => None,
+            };
+            let alerts_ahead = match ledger {
+                Some(ix) => crate::goals::alerts_ahead(&pts, today, &l.ledgers.alerts[ix.get()])
+                    .into_iter()
+                    .map(|(a, d)| (a.clone(), d))
+                    .collect(),
+                _ => Vec::new(),
+            };
             Series {
                 label,
                 kind,
                 now: value_at(&pts, today),
                 at_end: value_at(&pts, end),
                 lowest_ahead,
+                target,
+                target_reached,
+                alerts_ahead,
                 points: pts,
             }
         })
@@ -495,16 +529,16 @@ pub fn evaluate_between(
     }
     // Undirected, the simulated side counts only what the view selected;
     // otherwise it would be every issuer's volume and say nothing about it.
-    for (date, ix) in &occurrences {
+    for (date, ix, legs) in &occurrences {
         if !directed && !selected.contains(ix) {
             continue;
         }
-        let effect = directed.then(|| issuer_effect(*ix));
+        let effect = directed.then(|| legs_effect(legs));
         if effect.is_some_and(|e| e.is_zero()) {
             continue;
         }
         let r = row_of(*date);
-        timeline[r].projected.add(effect, magnitude(&l.issuers.legs[ix.get()]));
+        timeline[r].projected.add(effect, magnitude(legs));
     }
 
     ViewReport {
@@ -522,6 +556,41 @@ pub fn evaluate_between(
         missing_buckets,
         missing_cohorts,
     }
+}
+
+/// A name for what a series tracks that is the same in any budget: a
+/// ledger's or bucket's uid, or `total` for the scope. Row indices differ
+/// between two points in history; uids do not.
+pub fn series_key(l: &Budget, kind: SeriesKind) -> String {
+    match kind {
+        SeriesKind::Scope => "total".into(),
+        SeriesKind::Bucket(uid) => format!("bucket {uid}"),
+        SeriesKind::Ledger(ix) => format!("ledger {}", l.ledgers.uid[ix.get()]),
+    }
+}
+
+/// The same view read off another point in history - an earlier commit, or
+/// the budget without its staged changes - over exactly `now`'s window and
+/// from the same "today", so the two can be laid over each other.
+///
+/// Every line of `now` is paired with its counterpart in the result, if that
+/// budget has one: a ledger opened since has no earlier line.
+pub fn compare(
+    then_budget: &Budget,
+    spec: &ViewSpec,
+    now_budget: &Budget,
+    now: &ViewReport,
+) -> (ViewReport, Vec<Option<usize>>) {
+    let then = evaluate_between(then_budget, spec, now.today, now.start, now.end);
+    let pairs = now
+        .series
+        .iter()
+        .map(|s| {
+            let key = series_key(now_budget, s.kind);
+            then.series.iter().position(|t| series_key(then_budget, t.kind) == key)
+        })
+        .collect();
+    (then, pairs)
 }
 
 /// Posted transactions in the window that the view counts as its history.
@@ -660,6 +729,7 @@ mod tests {
             legs,
             schedule: Schedule::MonthlyOn { day, every_n_months: 1 },
             start: d(2024, 1, 1),
+            rule: None,
         };
         let post = |legs, date| Op::PostTransaction {
             uid: TxUid::new(),
@@ -854,6 +924,7 @@ mod tests {
                 legs: x.legs,
                 schedule: x.schedule,
                 start: x.start,
+                rule: x.rule,
             });
         }
         ops

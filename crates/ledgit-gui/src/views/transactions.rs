@@ -7,6 +7,7 @@
 
 use super::{empty, heading, num};
 use crate::app::{Screen, Session};
+use crate::datepick::DateField;
 use crate::fmt;
 use crate::forms::FormKind;
 use egui::{ComboBox, RichText, Ui};
@@ -39,13 +40,9 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
         ui.separator();
 
         ui.label("From");
-        ui.add(
-            egui::TextEdit::singleline(&mut s.tx_from).desired_width(96.0).hint_text("YYYY-MM-DD"),
-        );
+        DateField::new("tx_from", &mut s.tx_from).optional("any").show(ui);
         ui.label("to");
-        ui.add(
-            egui::TextEdit::singleline(&mut s.tx_to).desired_width(96.0).hint_text("YYYY-MM-DD"),
-        );
+        DateField::new("tx_to", &mut s.tx_to).optional("any").show(ui);
 
         ui.separator();
         ui.label("Ledger");

@@ -11,7 +11,7 @@ use crate::app::Session;
 use crate::fmt;
 use crate::forms::FormKind;
 use egui::{Color32, ComboBox, RichText, Ui};
-use egui_plot::{Corner, GridInput, GridMark, Legend, Line, LineStyle, Plot, VLine};
+use egui_plot::{Corner, GridInput, GridMark, HLine, Legend, Line, LineStyle, Plot, VLine};
 use ledgit_core::prelude::*;
 use ledgit_core::view;
 use ledgit_plot::{date_ticks, money_short, MAX_SERIES, SERIES_DARK, SERIES_LIGHT};
@@ -116,16 +116,10 @@ fn detail(ui: &mut Ui, s: &mut Session) {
     let today = Date::today_utc();
     ui.horizontal(|ui| {
         ui.label("Simulate until");
-        ui.add(
-            egui::TextEdit::singleline(&mut s.view_until)
-                .hint_text(spec.horizon.after(today).to_string())
-                .desired_width(110.0),
-        );
-        if !s.view_until.trim().is_empty()
-            && ui.small_button("\u{d7}").on_hover_text("Use the view's own horizon").clicked()
-        {
-            s.view_until.clear();
-        }
+        let horizon = spec.horizon.after(today).to_string();
+        crate::datepick::DateField::new("view_until", &mut s.view_until)
+            .optional(&horizon)
+            .show(ui);
     });
     let until = s.view_until.trim();
     let report = match until.parse::<Date>() {
@@ -166,8 +160,29 @@ fn detail(ui: &mut Ui, s: &mut Session) {
     });
     ui.add_space(6.0);
 
-    chart(ui, &report);
+    // Compare with another point in history: an earlier commit, or the
+    // budget as committed, without what is staged.
+    compare_picker(ui, s);
+    let then_budget: Option<&Budget> = match s.view_compare {
+        None => None,
+        Some(CompareWith::Committed) => Some(s.repo.committed()),
+        Some(CompareWith::Commit(id)) => {
+            // Folding history is the expensive part; do it once per pick.
+            if s.compare_cache.as_ref().is_none_or(|(c, _)| *c != id) {
+                s.compare_cache = s.repo.budget_at(id).ok().map(|b| (id, b));
+            }
+            s.compare_cache.as_ref().map(|(_, b)| b)
+        }
+    };
+    let l = s.repo.working();
+    let compared = then_budget.map(|then| view::compare(then, &spec, l, &report));
+
+    chart(ui, &report, compared.as_ref().map(|(r, p)| (r, p.as_slice())));
     ui.add_space(10.0);
+    if let Some((then, pairs)) = &compared {
+        comparison(ui, &report, then, pairs, &compare_label(s));
+        ui.add_space(10.0);
+    }
     balances(ui, &report);
     ui.add_space(10.0);
     flows(ui, &report);
@@ -377,7 +392,152 @@ fn steps(points: &[(Date, Money)], today: Date) -> (Vec<[f64; 2]>, Vec<[f64; 2]>
     (past, ahead)
 }
 
-fn chart(ui: &mut Ui, r: &ViewReport) {
+/// What the Views screen compares the selected view against.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CompareWith {
+    /// The budget as committed: everything but what is staged.
+    Committed,
+    Commit(CommitId),
+}
+
+fn commit_date(c: &Commit) -> Date {
+    Date(c.timestamp.div_euclid(86_400) as i32)
+}
+
+fn compare_label(s: &Session) -> String {
+    match s.view_compare {
+        None => "nothing".into(),
+        Some(CompareWith::Committed) => "the last commit, without staged changes".into(),
+        Some(CompareWith::Commit(id)) => match s.repo.get_commit(id) {
+            Ok(c) => format!("{} ({}, {})", c.summary(), id.short(), commit_date(&c)),
+            Err(_) => id.short(),
+        },
+    }
+}
+
+fn compare_picker(ui: &mut Ui, s: &mut Session) {
+    let label = compare_label(s);
+    ui.horizontal(|ui| {
+        ui.label("Compare with").on_hover_text(
+            "Lay this view over itself as it stood at another commit - say, before a \
+             lump-sum payment - with the same window and the same today.",
+        );
+        ComboBox::from_id_salt("view_compare").selected_text(label).width(360.0).show_ui(
+            ui,
+            |ui| {
+                // Read only while the list is open: every commit read is
+            // re-hashed, and this would otherwise run on every frame.
+            let log = s.repo.log(Some(60)).unwrap_or_default();
+            ui.selectable_value(&mut s.view_compare, None, "nothing");
+                if s.repo.has_staged_changes() {
+                    ui.selectable_value(
+                        &mut s.view_compare,
+                        Some(CompareWith::Committed),
+                        "the last commit, without staged changes",
+                    );
+                }
+                for c in &log {
+                    ui.selectable_value(
+                        &mut s.view_compare,
+                        Some(CompareWith::Commit(c.id)),
+                        format!(
+                            "{}  {}  {}",
+                            c.id.short(),
+                            commit_date(c),
+                            fmt::clip(c.summary(), 48)
+                        ),
+                    );
+                }
+            },
+        );
+    });
+}
+
+/// Each line then and now: where it stands, where it ends, and when it
+/// reaches its target - the question a lump-sum payment is meant to answer.
+fn comparison(
+    ui: &mut Ui,
+    now: &ViewReport,
+    then: &ViewReport,
+    pairs: &[Option<usize>],
+    label: &str,
+) {
+    ui.label(RichText::new(format!("Compared with {label}")).strong());
+    egui::Grid::new("view_compare_table").num_columns(5).striped(true).spacing([18.0, 4.0]).show(
+        ui,
+        |ui| {
+            ui.label("");
+            for h in ["today", "at end", "change at end", "target"] {
+                num(ui, RichText::new(h).small().color(fmt::dim()));
+            }
+            ui.end_row();
+            for (s, pair) in now.series.iter().zip(pairs) {
+                ui.label(&s.label);
+                let Some(t) = pair.map(|j| &then.series[j]) else {
+                    ui.label(RichText::new("not in that commit").small().color(fmt::dim()));
+                    ui.end_row();
+                    continue;
+                };
+                num(
+                    ui,
+                    fmt::mono(format!("{} \u{27A1} {}", fmt::amount(t.now), fmt::amount(s.now)))
+                        .small(),
+                );
+                num(
+                    ui,
+                    fmt::mono(format!(
+                        "{} \u{27A1} {}",
+                        fmt::amount(t.at_end),
+                        fmt::amount(s.at_end)
+                    ))
+                    .small(),
+                );
+                num(ui, fmt::delta_text(s.at_end - t.at_end));
+                let target = match (t.target_reached, s.target_reached) {
+                    _ if s.target.is_none() && t.target.is_none() => RichText::new(""),
+                    (Some(a), Some(b)) if a == b => {
+                        RichText::new(format!("{b}, unchanged")).small()
+                    }
+                    (Some(a), Some(b)) => {
+                        let days = a.0 - b.0;
+                        let (text, colour) = if days > 0 {
+                            (format!("{b}, {} sooner", span_words(days)), fmt::good())
+                        } else {
+                            (format!("{b}, {} later", span_words(-days)), fmt::bad())
+                        };
+                        RichText::new(text).small().color(colour).strong()
+                    }
+                    (None, Some(b)) => {
+                        RichText::new(format!("{b}, was not reached")).small().color(fmt::good())
+                    }
+                    (Some(a), None) => {
+                        RichText::new(format!("not reached, was {a}")).small().color(fmt::bad())
+                    }
+                    (None, None) => {
+                        RichText::new("not reached either way").small().color(fmt::dim())
+                    }
+                };
+                num(ui, target);
+                ui.end_row();
+            }
+        },
+    );
+}
+
+/// "3 months", "12 days", "1 year 2 months".
+fn span_words(days: i32) -> String {
+    if days < 45 {
+        return format!("{days} day(s)");
+    }
+    let months = (days as f64 / 30.44).round() as i32;
+    match (months / 12, months % 12) {
+        (0, m) => format!("{m} month(s)"),
+        (y, 0) => format!("{y} year(s)"),
+        (y, m) => format!("{y} year(s) {m} month(s)"),
+    }
+}
+
+fn chart(ui: &mut Ui, r: &ViewReport, then: Option<(&ViewReport, &[Option<usize>])>) {
     if r.series.is_empty() {
         ui.label(
             RichText::new(
@@ -412,6 +572,26 @@ fn chart(ui: &mut Ui, r: &ViewReport) {
                         .width(2.0_f32)
                         .style(LineStyle::Dashed { length: 8.0 }),
                 );
+                if let Some(j) = then.and_then(|(_, pairs)| pairs[i]) {
+                    let earlier = &then.expect("paired").0.series[j];
+                    let (past, ahead) = steps(&earlier.points, today);
+                    let mut line = past;
+                    line.extend(ahead);
+                    plot.line(
+                        Line::new(format!("{} (then)", s.label), line)
+                            .color(colour.gamma_multiply(0.45))
+                            .width(1.5_f32)
+                            .style(LineStyle::Dotted { spacing: 4.0 }),
+                    );
+                }
+                if let Some(t) = s.target {
+                    plot.hline(
+                        HLine::new(format!("{} target", s.label), t.cents() as f64 / 100.0)
+                            .color(colour.gamma_multiply(0.7))
+                            .width(1.0_f32)
+                            .style(LineStyle::Dotted { spacing: 6.0 }),
+                    );
+                }
             }
             plot.vline(VLine::new("today", today.0 as f64).color(fmt::dim()).width(1.0_f32));
         });
@@ -457,11 +637,11 @@ fn balances(ui: &mut Ui, r: &ViewReport) {
     }
     let dark = ui.visuals().dark_mode;
     ui.label(RichText::new("Balances").strong());
-    egui::Grid::new("view_balances").num_columns(5).striped(true).spacing([18.0, 4.0]).show(
+    egui::Grid::new("view_balances").num_columns(6).striped(true).spacing([18.0, 4.0]).show(
         ui,
         |ui| {
             ui.label("");
-            for h in ["today", "at end", "change", "lowest ahead"] {
+            for h in ["today", "at end", "change", "lowest ahead", "target"] {
                 num(ui, RichText::new(h).small().color(fmt::dim()));
             }
             ui.end_row();
@@ -484,10 +664,48 @@ fn balances(ui: &mut Ui, r: &ViewReport) {
                 num(ui, fmt::delta_text(s.at_end - s.now));
                 let (d, low) = s.lowest_ahead;
                 num(ui, fmt::mono(format!("{} on {d}", fmt::amount(low))).small());
+                match (s.target, s.target_reached) {
+                    (None, _) => num(ui, RichText::new("")),
+                    (Some(t), Some(d)) if d == r.today => num(
+                        ui,
+                        RichText::new(format!("{} reached", fmt::amount(t)))
+                            .small()
+                            .color(fmt::good()),
+                    ),
+                    (Some(t), Some(d)) => num(
+                        ui,
+                        RichText::new(format!("{} on {d}", fmt::amount(t))).small().strong(),
+                    )
+                    .on_hover_text(format!(
+                        "Reaches its target in {} day(s), going by the simulation.",
+                        d.0 - r.today.0
+                    )),
+                    (Some(t), None) => num(
+                        ui,
+                        RichText::new(format!("{} not by {}", fmt::amount(t), r.end))
+                            .small()
+                            .color(fmt::dim()),
+                    ),
+                };
                 ui.end_row();
             }
         },
     );
+    let ahead: Vec<_> =
+        r.series.iter().flat_map(|s| s.alerts_ahead.iter().map(move |a| (s, a))).collect();
+    if !ahead.is_empty() {
+        ui.add_space(6.0);
+        ui.label(RichText::new("Alerts ahead").strong());
+        for (s, (a, d)) in ahead {
+            let msg = if a.message.is_empty() { "Alert".to_string() } else { a.message.clone() };
+            ui.label(format!(
+                "\u{26A0} {d}  {}: {msg}  ({} {})",
+                s.label,
+                a.when,
+                fmt::amount(a.level)
+            ));
+        }
+    }
 }
 
 fn flows(ui: &mut Ui, r: &ViewReport) {
@@ -513,12 +731,12 @@ fn flows(ui: &mut Ui, r: &ViewReport) {
                 match f.effect {
                     Some(e) => num(ui, fmt::money_text(e)),
                     None => num(ui, fmt::mono(fmt::amount(f.amount))),
-                }
+                };
                 match (f.rate(p), f.effect.is_some()) {
                     (Some(m), true) => num(ui, fmt::money_text(m)),
                     (Some(m), false) => num(ui, fmt::mono(fmt::amount(m))),
                     (None, _) => num(ui, RichText::new("one-off").color(fmt::dim())),
-                }
+                };
                 let mut notes = Vec::new();
                 if f.paused {
                     notes.push("paused".to_string());

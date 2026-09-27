@@ -282,6 +282,9 @@ pub struct Ledger {
     pub opened: Date,
     /// Debit-positive running total. Use [`Ledger::balance`] to display it.
     pub raw_balance: Money,
+    /// Where you want the balance to get to, as displayed, if anywhere.
+    pub target: Option<Money>,
+    pub alerts: Vec<Alert>,
 }
 
 impl Ledger {
@@ -336,6 +339,9 @@ pub struct Issuer {
     /// Last date it has already emitted a transaction for, if any.
     pub emitted_through: Option<Date>,
     pub paused: bool,
+    /// How each occurrence's amount is worked out, when it is not simply
+    /// `legs` as written.
+    pub rule: Option<AmountRule>,
 }
 
 impl Issuer {
@@ -576,5 +582,192 @@ mod tests {
     fn once_never_repeats() {
         let s = Schedule::Once;
         assert_eq!(s.next_after(d(2024, 1, 1), d(2024, 1, 1)), None);
+    }
+}
+
+/// A named value you can use when making entries: a number in an amount
+/// (`200 * Car_Km_Rate`), or text in a name or description
+/// (`Mileage at {Car_Km_Rate}/km`).
+///
+/// Variables are versioned with the budget, so a rate changes in a commit
+/// like anything else. Entries store what their formula worked out to, so a
+/// later change re-prices nothing already posted.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum VarValue {
+    /// Kept as the decimal text it was entered as, e.g. `"0.68"`; always
+    /// parses with [`crate::expr::Ratio::parse_decimal`].
+    Number(String),
+    Text(String),
+}
+
+impl VarValue {
+    /// Read what someone typed: a number if it is one, else text.
+    pub fn guess(s: &str) -> VarValue {
+        let t = s.trim();
+        match crate::expr::Ratio::parse_decimal(t) {
+            Ok(_) if !t.is_empty() => VarValue::Number(t.replace([',', '$', '_', ' '], "")),
+            _ => VarValue::Text(s.to_string()),
+        }
+    }
+
+    pub fn is_number(&self) -> bool {
+        matches!(self, VarValue::Number(_))
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            VarValue::Number(s) | VarValue::Text(s) => s,
+        }
+    }
+}
+
+impl fmt::Display for VarValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// A variable name is an identifier - letters, digits and underscores, not
+/// starting with a digit - so it can sit in a formula unquoted.
+pub fn validate_var_name(name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    match chars.next() {
+        None => Err("a variable needs a name".into()),
+        Some(c) if !(c.is_alphabetic() || c == '_') => {
+            Err(format!("\"{name}\" must start with a letter or _"))
+        }
+        _ if !name.chars().all(|c| c.is_alphanumeric() || c == '_') => Err(format!(
+            "\"{name}\" may only hold letters, digits and _ (try {})",
+            name.replace(|c: char| !(c.is_alphanumeric() || c == '_'), "_")
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// A rate, in millionths: 6.45% is `Rate(64_500)`, 5% is `Rate(50_000)`.
+///
+/// Millionths are exact for any rate written to four decimal places of a
+/// percent, which covers every rate a bank will quote you.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Rate(pub i64);
+
+impl Rate {
+    /// Parse a percentage: `"6.45"` or `"6.45%"` is 6.45%.
+    pub fn parse_percent(s: &str) -> Result<Rate, String> {
+        use crate::expr::Ratio;
+        let t = s.trim().trim_end_matches('%').trim();
+        let pct = Ratio::parse_decimal(t).map_err(|_| format!("\"{s}\" is not a percentage"))?;
+        let millionths = pct.checked_mul(Ratio::int(10_000)).map_err(|e| e.to_string())?;
+        let whole = millionths.to_money().map_err(|e| e.to_string())?.cents();
+        // `to_money` scales by 100; undo it, and insist nothing was rounded.
+        if whole % 100 != 0 {
+            return Err(format!("\"{s}\" has more than four decimal places"));
+        }
+        Ok(Rate(whole / 100))
+    }
+
+    /// As a fraction of one: 6.45% is 0.0645.
+    pub fn ratio(self) -> crate::expr::Ratio {
+        crate::expr::Ratio::new(self.0 as i128, 1_000_000).expect("non-zero denominator")
+    }
+}
+
+impl fmt::Display for Rate {
+    /// `6.45%`, `5%`, `0.125%`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let pct = crate::expr::Ratio::new(self.0 as i128, 10_000).expect("non-zero denominator");
+        f.pad(&format!("{pct}%"))
+    }
+}
+
+/// How an issuer works out its amount each time it fires, when that depends
+/// on a balance rather than being written down once.
+///
+/// The issuer's legs still say which ledgers move and which way; with a rule
+/// their amounts are only proportions, scaled so the entry comes to the
+/// worked-out total. A plain two-sided issuer is simply "all of it, here".
+///
+/// The balance read is `of`'s, as displayed for its normality, at the start
+/// of the day the occurrence falls on - after every earlier occurrence,
+/// including other issuers', so interest compounds on interest already
+/// charged. A balance at or below zero produces nothing that time.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AmountRule {
+    /// A share of a balance each time: "move 5% of savings".
+    ShareOfBalance { of: LedgerUid, rate: Rate },
+    /// Interest at an annual rate, for the days since the previous
+    /// occurrence (actual/365): "6.45% APR on the car loan".
+    Interest { of: LedgerUid, apr: Rate },
+}
+
+impl AmountRule {
+    pub fn of(&self) -> LedgerUid {
+        match *self {
+            AmountRule::ShareOfBalance { of, .. } | AmountRule::Interest { of, .. } => of,
+        }
+    }
+
+    pub fn validate(&self, schedule: &Schedule) -> Result<(), &'static str> {
+        let rate = match *self {
+            AmountRule::ShareOfBalance { rate, .. } => rate,
+            AmountRule::Interest { apr, .. } => {
+                if *schedule == Schedule::Once {
+                    return Err("interest needs a repeating schedule to know how long it accrues");
+                }
+                apr
+            }
+        };
+        if rate.0 <= 0 {
+            return Err("the rate must be above zero");
+        }
+        Ok(())
+    }
+
+    /// "6.45% APR on", "5% of" - completed by the ledger's name.
+    pub fn describe(&self) -> String {
+        match *self {
+            AmountRule::ShareOfBalance { rate, .. } => format!("{rate} of"),
+            AmountRule::Interest { apr, .. } => format!("{apr} APR on"),
+        }
+    }
+}
+
+/// Which side of a level an [`Alert`] watches.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertWhen {
+    Below,
+    Above,
+}
+
+impl fmt::Display for AlertWhen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            AlertWhen::Below => "below",
+            AlertWhen::Above => "above",
+        })
+    }
+}
+
+/// "Tell me when chequing drops below 500": a level on a ledger's displayed
+/// balance, and what to say when the balance is past it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Alert {
+    pub when: AlertWhen,
+    pub level: Money,
+    pub message: String,
+}
+
+impl Alert {
+    /// Whether a displayed balance is past the level. Strictly: a balance of
+    /// exactly 500 is not below 500.
+    pub fn fires(&self, balance: Money) -> bool {
+        match self.when {
+            AlertWhen::Below => balance < self.level,
+            AlertWhen::Above => balance > self.level,
+        }
     }
 }

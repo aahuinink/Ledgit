@@ -135,8 +135,13 @@ pub fn date(s: &str) -> Result<Date> {
     s.parse().map_err(|_| Error::Invalid(format!("date must be YYYY-MM-DD, not \"{s}\"")))
 }
 
-pub fn money(s: &str) -> Result<Money> {
-    Money::parse(s).map_err(|_| Error::Invalid(format!("amount must look like 12.34, not \"{s}\"")))
+/// An amount, or a formula over the budget's variables: `200*Car_Km_Rate`.
+pub fn amount(l: &Budget, s: &str) -> Result<Money> {
+    if let Ok(m) = Money::parse(s) {
+        return Ok(m);
+    }
+    ledgit_core::expr::eval_money(s, &l.variables)
+        .map_err(|e| Error::Invalid(format!("amount \"{s}\": {e}")))
 }
 
 /// Build the legs of an entry from repeated `--debit`/`--credit` arguments.
@@ -163,7 +168,7 @@ fn side_spec<'a>(l: &Budget, spec: &'a str) -> Result<(&'a str, Option<Money>)> 
         return Ok((spec, None));
     }
     match spec.rsplit_once(':') {
-        Some((n, a)) if Money::parse(a.trim()).is_ok() => Ok((n, Some(money(a.trim())?))),
+        Some((n, a)) if amount(l, a.trim()).is_ok() => Ok((n, Some(amount(l, a.trim())?))),
         _ => Ok((spec, None)),
     }
 }
@@ -201,7 +206,7 @@ pub fn legs(
                         .into(),
                 ));
             }
-            let amount = money(text)?;
+            let amount = amount(l, text)?;
             if amount.cents() <= 0 {
                 return Err(Error::Invalid("the amount must be positive".into()));
             }

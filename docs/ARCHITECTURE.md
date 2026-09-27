@@ -31,6 +31,10 @@ Everything in the feature list falls out of that:
 | Split entries (a paycheque) | one op with N legs summing to zero |
 | Cohorts, saved views | ops, like buckets; read by pure functions, results never stored |
 | A ledger tree (`Wedding:Tuxedo`) | paths in names; the tree is derived, never stored |
+| Undo in the app | put back an earlier `Vec<Op>` as the stage |
+| Edit a staged entry | replace one op in the stage, under the same uid |
+| Variables, targets, alerts | ops, like a ledger's name; versioned, never money |
+| Interest and percentage issuers | a rule on the issuer, priced in date order at run time |
 
 ## Crates
 
@@ -214,6 +218,81 @@ posting; a slope would invent money between paydays), solid up to today and
 dashed after, over a faint shading of the future. Series colours are one
 fixed, colour-blind-checked order, shared by the GUI and the exports.
 
+## The stage can hold broken changes
+
+Every op applies when it is staged. It may stop applying later: drop the
+staged ledger that a staged transaction posts to, and the transaction has
+nowhere to go. Refusing the drop (the old behaviour) makes you unpick
+everything in reverse; dropping the transaction silently loses work. So the
+op stays in the stage, **broken**: `rebuild_working` folds the stage,
+skips what fails, and records each failure (`Repo::broken()`). `working`,
+the report and every screen show only what applies; `commit` refuses while
+anything is broken. Editing the op (`replace_staged`, same uid) or dropping
+it clears the flag.
+
+The same fold handles a stage that stops applying after a checkout, which
+used to drop those ops with an error.
+
+The GUI's undo is built on this. Every change to the stage - an entry, a
+drop, an edit, an issuer run, "discard everything" - is a new `Vec<Op>`, so
+undo puts the previous one back with `Repo::set_stage`, which never refuses:
+a stage that no longer fully applies comes back flagged, not lost. Undo
+stops at a commit, because an older stage on a new base would re-post
+history.
+
+## Variables and formulas
+
+`SetVariable { name, value }` stores a number (as the decimal text it was
+typed as) or some text. An amount field may hold a formula over the numbers -
+`200 * Car_Km_Rate`, `5%`, `(1850 - 400) / 2` - worked out by `expr` in exact
+fractions of two `i128`s and rounded once, to the cent, half away from zero.
+A name or description may use text as `{Home}`.
+
+Both are worked out **when the entry is made**, and the entry stores the
+resulting money and text. Changing a rate later re-prices nothing already
+posted. That is the ledger's promise, and it means an entry never depends on
+a variable existing.
+
+## Issuers whose amount follows a balance
+
+An issuer may carry an `AmountRule`: a share of a ledger's balance each time
+(`5% of savings`), or interest at an APR for the days since the previous
+occurrence, actual/365 (`6.45% APR on the car loan`). Its legs then only say
+which ledgers move and which way, as proportions; the rule sets the total.
+
+Such an amount depends on everything that happened before it - last month's
+interest, and the payment another issuer made in between - so occurrences
+cannot be priced one issuer at a time. `issuer::project` lists every
+occurrence of every issuer in date order and walks them once, reading each
+rule's ledger at the start of its day with every earlier projected occurrence
+included. Posting (`run_all`) and the saved-view simulation both go through
+it, so a view predicts exactly what a run will post. A balance at or below
+zero produces no entry that time; the issuer still advances.
+
+`CreateIssuer.rule` is left out of the encoding when absent (not written as
+`null`), so every issuer committed before rules existed encodes - and hashes
+- exactly as it did.
+
+## Targets and alerts
+
+`SetLedgerGoals { uid, target, alerts }` replaces a ledger's target balance
+and its alerts (below/above a level, with a message). Both are about the
+balance as displayed, so a loan's target of 0 means "paid off". A target has
+no direction: it is reached going whichever way the balance has to travel
+from where it stands.
+
+They are read, never stored as results: `goals::fired` for the alert list,
+`goals::newly_fired(base, after)` for "this commit sets off...", the view
+series (`target`, `target_reached`, `alerts_ahead`) for the simulation, and
+`goals::bucket_targets` for a bucket's combined target - over only the
+members that have one, on both sides, so progress is never mixed with money
+nobody set a goal for. A view's total or bucket line gets a target only when
+every ledger in it has one.
+
+Comparing a view with an earlier commit (`view::compare`) evaluates the same
+spec against `Repo::budget_at(commit)` over the same window and the same
+today, and pairs the lines by uid rather than by row.
+
 ## "Up to date through"
 
 The top bar reads `through 2026-09-24 · issuers 2026-09-25`:
@@ -364,6 +443,11 @@ rather than rediscovered:
    history can be replayed in any valid order without re-posting rent.
 7. **Reading never writes.** Evaluating a view or a cohort, however far
    ahead it simulates, stages nothing and stores nothing.
+8. **Nothing broken is committed.** A staged op that does not apply is kept
+   and flagged, and `commit` refuses until there are none.
+9. **Old commits keep their hashes.** A field added to an op is left out of
+   the encoding when it holds its default, so ops written before it existed
+   encode byte for byte as they did.
 
 ## Performance, and when to worry
 

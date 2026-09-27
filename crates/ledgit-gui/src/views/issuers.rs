@@ -21,7 +21,7 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
         }
         ui.separator();
         ui.label("Run everything due through");
-        ui.add(egui::TextEdit::singleline(&mut s.issuer_through).desired_width(110.0));
+        crate::datepick::DateField::new("issuer_through", &mut s.issuer_through).show(ui);
         if ui.button("Stage what is owed").clicked() {
             run_issuers(s);
         }
@@ -55,12 +55,17 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
                     let name = RichText::new(&l.issuers.name[i]);
                     ui.label(if paused { name.color(fmt::dim()).strikethrough() } else { name });
                     ui.label(RichText::new(l.issuers.schedule[i].describe()).color(fmt::dim()));
-                    ui.label(RichText::new(fmt::issuer_flow(l, ix)).small().color(fmt::dim()))
-                        .on_hover_text(if l.issuers.legs[i].len() > 2 {
+                    let flow = match fmt::issuer_rule(l, ix) {
+                        Some(rule) => format!("{}  ({rule})", fmt::issuer_flow(l, ix)),
+                        None => fmt::issuer_flow(l, ix),
+                    };
+                    ui.label(RichText::new(flow).small().color(fmt::dim())).on_hover_text(
+                        if l.issuers.legs[i].len() > 2 {
                             format!("posts a split entry of {} sides", l.issuers.legs[i].len())
                         } else {
                             String::new()
-                        });
+                        },
+                    );
 
                     match (paused, issuer::next_due(l, ix)) {
                         (true, _) => ui.label(RichText::new("paused").color(fmt::dim())),
@@ -74,7 +79,18 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
                     if ui.button(if paused { "Resume" } else { "Pause" }).clicked() {
                         toggles.push((uid, !paused));
                     }
-                    num(ui, fmt::mono(fmt::amount(l.issuers.amount(ix))));
+                    match fmt::issuer_rule(l, ix) {
+                        Some(rule) => num(
+                            ui,
+                            RichText::new(format!("~{}", fmt::amount(issuer::estimate(l, ix))))
+                                .monospace(),
+                        )
+                        .on_hover_text(format!(
+                            "{rule}. Worked out each time it fires; this is what the next one \
+                             comes to on today's balance."
+                        )),
+                        None => num(ui, fmt::mono(fmt::amount(l.issuers.amount(ix)))),
+                    };
                     ui.end_row();
                 }
             },

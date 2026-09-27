@@ -8,16 +8,22 @@
 //!
 //! Staging an op applies it to `working` immediately, so an invalid entry is
 //! rejected at the moment it is made rather than at commit time.
+//!
+//! An op that applied when it was staged can stop applying later: drop the
+//! staged ledger a staged transaction posts to, and the transaction has
+//! nowhere to go. It is not thrown away. It stays in the stage, *broken* -
+//! left out of `working`, listed by [`Repo::broken`] - and nothing can be
+//! committed until it is edited back into shape or dropped.
 
 use crate::commit::{validate_branch_name, Commit, CommitId, Head};
 use crate::date::Date;
 use crate::error::{Error, Result};
 use crate::id::{BucketUid, CohortUid, IssuerUid, LedgerUid, TxUid, ViewUid};
 use crate::issuer::{self, IssuerRun};
-use crate::model::{simple_legs, Leg, Normality, Parent, Schedule, ViewSpec};
+use crate::model::{simple_legs, AmountRule, Leg, Normality, Parent, Schedule, ViewSpec};
 use crate::money::Money;
 use crate::op::Op;
-use crate::report::{self, ChangeReport};
+use crate::report::{self, Broken, ChangeReport};
 use crate::state::Budget;
 use crate::store::{Store, DEFAULT_BRANCH};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -29,6 +35,8 @@ pub struct Repo<S: Store> {
     head: Head,
     base: Budget,
     stage: Vec<Op>,
+    /// Staged ops that do not apply, in stage order. Derived; see above.
+    broken: Vec<Broken>,
     working: Budget,
 }
 
@@ -59,6 +67,7 @@ impl<S: Store> Repo<S> {
             head,
             base: Budget::new(),
             stage: Vec::new(),
+            broken: Vec::new(),
             working: Budget::new(),
         })
     }
@@ -76,6 +85,7 @@ impl<S: Store> Repo<S> {
                     head,
                     base: Budget::new(),
                     stage,
+                    broken: Vec::new(),
                     working: Budget::new(),
                 };
                 r.reload()?;
@@ -90,30 +100,9 @@ impl<S: Store> Repo<S> {
             Some(id) => self.budget_at(id)?,
             None => Budget::new(),
         };
-        self.working = self.base.clone();
-        // A staged op can become invalid after a checkout (it may reference an
-        // ledger that does not exist on this branch). Keep what still applies
-        // and report the rest rather than silently dropping work.
-        let mut kept = Vec::with_capacity(self.stage.len());
-        let mut dropped = Vec::new();
-        for op in std::mem::take(&mut self.stage) {
-            match self.working.apply(&op) {
-                Ok(()) => kept.push(op),
-                Err(e) => dropped.push((op, e)),
-            }
-        }
-        self.stage = kept;
-        if !dropped.is_empty() {
-            self.store.set_stage(&self.stage)?;
-            self.store.flush()?;
-            let first = &dropped[0];
-            return Err(Error::History(format!(
-                "{} staged change(s) do not apply here and were dropped; first: {} ({})",
-                dropped.len(),
-                first.0.summary(),
-                first.1
-            )));
-        }
+        // A staged op can become invalid under a new base (it may reference a
+        // ledger that is not on this branch). It is flagged, not dropped.
+        self.rebuild_working();
         Ok(())
     }
 
@@ -139,6 +128,12 @@ impl<S: Store> Repo<S> {
 
     pub fn staged(&self) -> &[Op] {
         &self.stage
+    }
+
+    /// Staged ops that no longer apply. Committing is refused while there
+    /// are any.
+    pub fn broken(&self) -> &[Broken] {
+        &self.broken
     }
 
     pub fn has_staged_changes(&self) -> bool {
@@ -284,9 +279,7 @@ impl<S: Store> Repo<S> {
 
     /// Stage one op. Rejected immediately if it does not apply.
     pub fn stage(&mut self, op: Op) -> Result<()> {
-        self.working.apply(&op)?;
-        self.stage.push(op);
-        self.persist_stage()
+        self.stage_all([op])
     }
 
     pub fn stage_all(&mut self, ops: impl IntoIterator<Item = Op>) -> Result<()> {
@@ -306,44 +299,71 @@ impl<S: Store> Repo<S> {
     pub fn unstage_last(&mut self) -> Result<Option<Op>> {
         let popped = self.stage.pop();
         if popped.is_some() {
-            self.rebuild_working()?;
+            self.rebuild_working();
             self.persist_stage()?;
         }
         Ok(popped)
     }
 
     /// Drop the staged op at `index`, e.g. from a list in the UI.
+    ///
+    /// Later ops that depended on it are kept but become [broken](Repo::broken).
     pub fn unstage_at(&mut self, index: usize) -> Result<Op> {
         if index >= self.stage.len() {
             return Err(Error::Invalid(format!("no staged change at position {index}")));
         }
         let removed = self.stage.remove(index);
-        // Removing an earlier op can invalidate a later one (unstage the
-        // ledger, and the transaction using it has nowhere to go).
-        if let Err(e) = self.rebuild_working() {
-            self.stage.insert(index, removed);
-            self.rebuild_working()?;
-            return Err(Error::Invalid(format!(
-                "cannot drop that change: a later staged change depends on it ({e})"
-            )));
-        }
+        self.rebuild_working();
         self.persist_stage()?;
         Ok(removed)
     }
 
+    /// Replace the staged op at `index` with an edited version of it, in
+    /// place. The edit itself must apply; ops after it are re-checked, so an
+    /// edit can break a later op or mend one.
+    pub fn replace_staged(&mut self, index: usize, op: Op) -> Result<Op> {
+        if index >= self.stage.len() {
+            return Err(Error::Invalid(format!("no staged change at position {index}")));
+        }
+        let old = std::mem::replace(&mut self.stage[index], op);
+        self.rebuild_working();
+        if let Some(b) = self.broken.iter().find(|b| b.index == index) {
+            let reason = b.reason.clone();
+            self.stage[index] = old;
+            self.rebuild_working();
+            return Err(Error::Invalid(format!("that edit does not apply: {reason}")));
+        }
+        self.persist_stage()?;
+        Ok(old)
+    }
+
+    /// Swap the whole staging area for `ops`, e.g. to undo the last edit to
+    /// it. Unlike [`Repo::stage_all`] this never refuses: ops that do not
+    /// apply are kept, flagged as broken.
+    pub fn set_stage(&mut self, ops: Vec<Op>) -> Result<()> {
+        self.stage = ops;
+        self.rebuild_working();
+        self.persist_stage()
+    }
+
     pub fn clear_stage(&mut self) -> Result<()> {
         self.stage.clear();
+        self.broken.clear();
         self.working = self.base.clone();
         self.persist_stage()
     }
 
-    fn rebuild_working(&mut self) -> Result<()> {
+    /// Refold `working` from `base` and the stage, flagging every op that
+    /// does not apply rather than stopping at the first.
+    fn rebuild_working(&mut self) {
         let mut w = self.base.clone();
-        for op in &self.stage {
-            w.apply(op)?;
+        self.broken.clear();
+        for (index, op) in self.stage.iter().enumerate() {
+            if let Err(e) = w.apply(op) {
+                self.broken.push(Broken { index, reason: e.to_string() });
+            }
         }
         self.working = w;
-        Ok(())
     }
 
     fn persist_stage(&mut self) -> Result<()> {
@@ -353,7 +373,17 @@ impl<S: Store> Repo<S> {
 
     /// What committing right now would do.
     pub fn report(&self) -> Result<ChangeReport> {
-        report::build(&self.base, &self.stage)
+        let healthy: Vec<Op> = self
+            .stage
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !self.broken.iter().any(|b| b.index == *i))
+            .map(|(_, op)| op.clone())
+            .collect();
+        let mut r = report::build(&self.base, &healthy)?;
+        r.lines = self.stage.iter().map(|o| o.summary()).collect();
+        r.broken = self.broken.clone();
+        Ok(r)
     }
 
     // ----------------------------------------------------------- committing
@@ -367,6 +397,15 @@ impl<S: Store> Repo<S> {
         let message = message.into();
         if message.trim().is_empty() {
             return Err(Error::Invalid("a commit needs a message".into()));
+        }
+        if let Some(b) = self.broken.first() {
+            return Err(Error::Invalid(format!(
+                "{} staged change(s) no longer apply; fix or drop them first. \
+                 First: {} ({})",
+                self.broken.len(),
+                self.stage[b.index].summary(),
+                b.reason
+            )));
         }
         if !self.working.is_balanced() {
             return Err(Error::Invalid(
@@ -721,6 +760,38 @@ impl<S: Store> Repo<S> {
             legs,
             schedule,
             start,
+            rule: None,
+        })?;
+        Ok(uid)
+    }
+
+    /// Stage an issuer whose amount is worked out from a balance each time
+    /// it fires: `debit` receives it, `credit` gives it.
+    ///
+    /// Interest on a loan debits an interest expense and credits the loan,
+    /// with the loan as `of`; a 5% sweep from savings debits the target and
+    /// credits savings, with savings as `of`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_rule_issuer(
+        &mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        debit: LedgerUid,
+        credit: LedgerUid,
+        rule: AmountRule,
+        schedule: Schedule,
+        start: Date,
+    ) -> Result<IssuerUid> {
+        let uid = IssuerUid::new();
+        self.stage(Op::CreateIssuer {
+            uid,
+            name: name.into(),
+            description: description.into(),
+            // Proportions only: all of the worked-out amount, one way.
+            legs: simple_legs(debit, credit, Money::from_major(1)),
+            schedule,
+            start,
+            rule: Some(rule),
         })?;
         Ok(uid)
     }
@@ -794,6 +865,14 @@ fn invert(op: &Op, before: &Budget, source: &str) -> Inverse {
         Op::CreateLedger { name, .. } => Inverse::Nothing(format!(
             "ledger \"{name}\" stays open: ledgers are permanent, so its creation was not reverted"
         )),
+        Op::SetLedgerGoals { uid, .. } => match before.ledgers.ix(*uid) {
+            Some(ix) => Inverse::Op(Op::SetLedgerGoals {
+                uid: *uid,
+                target: before.ledgers.target[ix.get()],
+                alerts: before.ledgers.alerts[ix.get()].clone(),
+            }),
+            None => Inverse::Nothing(format!("ledger {} is gone; goals not reverted", uid.short())),
+        },
         Op::EditLedger { uid, name, description } => match before.ledgers.ix(*uid) {
             Some(ix) => Inverse::Op(Op::EditLedger {
                 uid: *uid,
@@ -963,6 +1042,20 @@ fn invert(op: &Op, before: &Budget, source: &str) -> Inverse {
                 })
             }
             None => Inverse::Nothing(format!("view {} was already gone", uid.short())),
+        },
+        Op::SetVariable { name, .. } => match before.variables.position(name.trim()) {
+            Some(i) => Inverse::Op(Op::SetVariable {
+                name: before.variables.name[i].clone(),
+                value: before.variables.value[i].clone(),
+            }),
+            None => Inverse::Op(Op::DeleteVariable { name: name.trim().to_string() }),
+        },
+        Op::DeleteVariable { name } => match before.variables.position(name.trim()) {
+            Some(i) => Inverse::Op(Op::SetVariable {
+                name: before.variables.name[i].clone(),
+                value: before.variables.value[i].clone(),
+            }),
+            None => Inverse::Nothing(format!("variable {name} was already gone")),
         },
     }
 }

@@ -106,6 +106,7 @@ fn tree(ui: &mut Ui, s: &mut Session) {
     let mut open: Option<LedgerUid> = None;
     let mut pin: Option<LedgerUid> = None;
     let mut move_from: Option<String> = None;
+    let mut add_under: Option<String> = None;
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         egui::Grid::new("ledger_tree").num_columns(6).striped(true).spacing([16.0, 5.0]).show(
@@ -146,7 +147,7 @@ fn tree(ui: &mut Ui, s: &mut Session) {
                     ui.horizontal(|ui| {
                         ui.add_space(16.0 * node.depth as f32);
                         if parent {
-                            let arrow = if folded { "\u{25b8}" } else { "\u{25be}" };
+                            let arrow = if folded { "\u{23F5}" } else { "\u{23F7}" };
                             if ui.small_button(arrow).clicked() {
                                 toggle = Some(key.clone());
                             }
@@ -162,6 +163,13 @@ fn tree(ui: &mut Ui, s: &mut Session) {
                             None => {
                                 ui.label(RichText::new(node.name()).strong());
                             }
+                        }
+                        if ui
+                            .small_button("+")
+                            .on_hover_text(format!("New ledger under {}", node.path))
+                            .clicked()
+                        {
+                            add_under = Some(node.path.clone());
                         }
                         if parent
                             && ui
@@ -228,6 +236,9 @@ fn tree(ui: &mut Ui, s: &mut Session) {
     if let Some(from) = move_from {
         s.forms.open_move(&from);
     }
+    if let Some(parent) = add_under {
+        s.forms.open_ledger_under(&parent, s.repo.working());
+    }
 }
 
 pub fn register(ui: &mut Ui, s: &mut Session) {
@@ -264,6 +275,8 @@ pub fn register(ui: &mut Ui, s: &mut Session) {
             }
         });
     });
+    ui.add_space(4.0);
+    super::goals::ledger_section(ui, s, uid);
     ui.add_space(8.0);
 
     let rows = ledgit_core::query::register(s.budget(), ix);

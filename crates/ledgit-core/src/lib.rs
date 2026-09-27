@@ -54,6 +54,8 @@ pub mod cohort;
 pub mod commit;
 pub mod date;
 pub mod error;
+pub mod expr;
+pub mod goals;
 pub mod id;
 pub mod issuer;
 pub mod model;
@@ -78,8 +80,9 @@ pub mod prelude {
     pub use crate::error::{Error, Result};
     pub use crate::id::{BucketUid, CohortUid, IssuerUid, LedgerUid, TxUid, ViewUid};
     pub use crate::model::{
-        magnitude, simple_legs, validate_legs, Bucket, Cohort, Issuer, Ledger, Leg, Normality,
-        Parent, SavedView, Schedule, Transaction, ViewSpec,
+        magnitude, simple_legs, validate_legs, Alert, AlertWhen, AmountRule, Bucket, Cohort,
+        Issuer, Ledger, Leg, Normality, Parent, Rate, SavedView, Schedule, Transaction, VarValue,
+        ViewSpec,
     };
     pub use crate::money::Money;
     pub use crate::op::Op;
@@ -90,7 +93,7 @@ pub mod prelude {
         RollUp, Sign, Term, TxFilter, TxQuery, TxSort,
     };
     pub use crate::repo::Repo;
-    pub use crate::report::ChangeReport;
+    pub use crate::report::{Broken, ChangeReport};
     pub use crate::state::Budget;
     pub use crate::store::{MemStore, Store, DEFAULT_BRANCH};
     pub use crate::tree::LedgerTree;

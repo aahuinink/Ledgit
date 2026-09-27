@@ -16,8 +16,8 @@ use crate::id::{
     TxIx, TxUid, ViewIx, ViewUid,
 };
 use crate::model::{
-    magnitude, validate_legs, Bucket, Cohort, Issuer, Ledger, Leg, Normality, Parent, SavedView,
-    Schedule, Transaction, ViewSpec,
+    magnitude, validate_legs, validate_var_name, Alert, AmountRule, Bucket, Cohort, Issuer, Ledger,
+    Leg, Normality, Parent, SavedView, Schedule, Transaction, VarValue, ViewSpec,
 };
 use crate::money::Money;
 use crate::op::Op;
@@ -33,6 +33,9 @@ pub struct LedgerArena {
     pub opened: Vec<Date>,
     /// Debit-positive running total, the column bucket maths sums over.
     pub raw_balance: Vec<Money>,
+    /// Target balance, as displayed. Sparse in practice, so optional per row.
+    pub target: Vec<Option<Money>>,
+    pub alerts: Vec<Vec<Alert>>,
     /// Postings against each ledger, in the order they were entered. These
     /// index the flat [`PostingArena`], so walking a ledger's register reads
     /// two contiguous arrays and never touches a transaction it does not need.
@@ -59,6 +62,8 @@ impl LedgerArena {
             normality: self.normality[i],
             opened: self.opened[i],
             raw_balance: self.raw_balance[i],
+            target: self.target[i],
+            alerts: self.alerts[i].clone(),
         }
     }
     pub fn indices(&self) -> impl Iterator<Item = LedgerIx> {
@@ -156,6 +161,9 @@ pub struct IssuerArena {
     pub start: Vec<Date>,
     pub emitted_through: Vec<Option<Date>>,
     pub paused: Vec<bool>,
+    /// With a rule, `legs` are proportions and the amount is worked out
+    /// each time; see [`AmountRule`].
+    pub rule: Vec<Option<AmountRule>>,
     by_uid: HashMap<IssuerUid, u32>,
 }
 
@@ -183,6 +191,7 @@ impl IssuerArena {
             start: self.start[i],
             emitted_through: self.emitted_through[i],
             paused: self.paused[i],
+            rule: self.rule[i],
         }
     }
 
@@ -339,6 +348,73 @@ impl ViewArena {
     }
 }
 
+/// Variables, in the order they were first set. A handful of rows, looked
+/// up by name; deleting one removes its row, since nothing refers to it by
+/// position.
+#[derive(Clone, Default, Debug)]
+pub struct VarArena {
+    pub name: Vec<String>,
+    pub value: Vec<VarValue>,
+}
+
+impl VarArena {
+    pub fn len(&self) -> usize {
+        self.name.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.name.is_empty()
+    }
+    /// Row of the variable called `name`, ignoring case.
+    pub fn position(&self, name: &str) -> Option<usize> {
+        self.name.iter().position(|n| n.eq_ignore_ascii_case(name))
+    }
+    pub fn get(&self, name: &str) -> Option<&VarValue> {
+        self.position(name).map(|i| &self.value[i])
+    }
+
+    /// Replace every `{Name}` in `text` with that variable's value. `{{` is
+    /// a literal brace. Unknown names are an error rather than left in, so a
+    /// typo cannot slip into the record unnoticed.
+    pub fn substitute(&self, text: &str) -> std::result::Result<String, String> {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(i) = rest.find('{') {
+            out.push_str(&rest[..i]);
+            rest = &rest[i + 1..];
+            if let Some(r) = rest.strip_prefix('{') {
+                out.push('{');
+                rest = r;
+                continue;
+            }
+            let Some(j) = rest.find('}') else {
+                return Err("a \"{\" is never closed; write {{ for a literal brace".into());
+            };
+            let name = rest[..j].trim();
+            match self.get(name) {
+                Some(v) => out.push_str(v.as_str()),
+                None => return Err(format!("no variable called {name}")),
+            }
+            rest = &rest[j + 1..];
+        }
+        out.push_str(rest);
+        Ok(out)
+    }
+}
+
+impl crate::expr::Lookup for VarArena {
+    fn number(
+        &self,
+        name: &str,
+    ) -> std::result::Result<crate::expr::Ratio, crate::expr::ExprError> {
+        use crate::expr::{ExprError, Ratio};
+        match self.get(name) {
+            Some(VarValue::Number(n)) => Ratio::parse_decimal(n),
+            Some(VarValue::Text(_)) => Err(ExprError::new(format!("{name} is text, not a number"))),
+            None => Err(ExprError::new(format!("no variable called {name}"))),
+        }
+    }
+}
+
 /// The whole budget, materialised.
 #[derive(Clone, Default, Debug)]
 pub struct Budget {
@@ -349,6 +425,7 @@ pub struct Budget {
     pub buckets: BucketArena,
     pub cohorts: CohortArena,
     pub views: ViewArena,
+    pub variables: VarArena,
 }
 
 impl Budget {
@@ -451,6 +528,8 @@ impl Budget {
                 a.normality.push(normality);
                 a.opened.push(opened);
                 a.raw_balance.push(Money::ZERO);
+                a.target.push(None);
+                a.alerts.push(Vec::new());
                 a.postings.push(Vec::new());
                 self.buckets.refresh_subtrees(&self.ledgers);
             }
@@ -465,6 +544,11 @@ impl Budget {
                     // A rename can move a ledger into or out of a subtree.
                     self.buckets.refresh_subtrees(&self.ledgers);
                 }
+            }
+            Op::SetLedgerGoals { uid, target, alerts } => {
+                let ix = self.ledger_ix(uid)?.get();
+                self.ledgers.target[ix] = target;
+                self.ledgers.alerts[ix] = alerts;
             }
             Op::PostTransaction { uid, name, description, date, legs, parent } => {
                 if self.transactions.ix(uid).is_some() {
@@ -516,7 +600,7 @@ impl Budget {
                     self.transactions.description[ix] = d;
                 }
             }
-            Op::CreateIssuer { uid, name, description, legs, schedule, start } => {
+            Op::CreateIssuer { uid, name, description, legs, schedule, start, rule } => {
                 if self.issuers.ix(uid).is_some() {
                     return Err(Error::Duplicate { kind: "issuer", uid: uid.0 });
                 }
@@ -525,6 +609,10 @@ impl Budget {
                 let name = check_name(name, "issuer name")?;
                 for leg in &legs {
                     self.ledger_ix(leg.ledger)?;
+                }
+                if let Some(r) = &rule {
+                    r.validate(&schedule).map_err(invalid)?;
+                    self.ledger_ix(r.of())?;
                 }
                 let s = &mut self.issuers;
                 s.by_uid.insert(uid, s.uid.len() as u32);
@@ -536,6 +624,7 @@ impl Budget {
                 s.start.push(start);
                 s.emitted_through.push(None);
                 s.paused.push(false);
+                s.rule.push(rule);
             }
             Op::EditIssuer { uid, name, description } => {
                 let ix = self.issuer_ix(uid)?.get();
@@ -732,6 +821,29 @@ impl Budget {
             Op::DeleteView { uid } => {
                 let ix = self.view_ix(uid)?.get();
                 self.views.alive[ix] = false;
+            }
+            Op::SetVariable { name, value } => {
+                let name = name.trim().to_string();
+                validate_var_name(&name).map_err(invalid)?;
+                if let VarValue::Number(n) = &value {
+                    crate::expr::Ratio::parse_decimal(n).map_err(|e| invalid(e.to_string()))?;
+                }
+                let v = &mut self.variables;
+                match v.position(&name) {
+                    Some(i) => v.value[i] = value,
+                    None => {
+                        v.name.push(name);
+                        v.value.push(value);
+                    }
+                }
+            }
+            Op::DeleteVariable { name } => {
+                let v = &mut self.variables;
+                let i = v
+                    .position(name.trim())
+                    .ok_or_else(|| invalid(format!("no variable called {}", name.trim())))?;
+                v.name.remove(i);
+                v.value.remove(i);
             }
         }
         Ok(())
@@ -1021,6 +1133,7 @@ mod tests {
                 legs: simple_legs(a, b, Money(100)),
                 schedule: Schedule::EveryNDays { n: 14 },
                 start: Date::from_ymd(2024, 1, 1).unwrap(),
+                rule: None,
             },
         ])
         .unwrap();

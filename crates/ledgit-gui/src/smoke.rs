@@ -96,6 +96,24 @@ fn session() -> Session {
     s.repo.stage(Op::AddToCohort { cohort: bills, issuer: pay }).unwrap();
     let net = s.repo.add_view("Net worth", "", ViewSpec::all_buckets(s.repo.working())).unwrap();
 
+    s.repo
+        .stage(Op::SetVariable { name: "Car_Km_Rate".into(), value: VarValue::guess("0.68") })
+        .unwrap();
+    s.repo
+        .stage(Op::SetVariable { name: "Home".into(), value: VarValue::guess("Toronto") })
+        .unwrap();
+
+    // A target on the loan, and an alert on chequing that is firing.
+    s.repo
+        .stage(Op::SetLedgerGoals { uid: loan, target: Some(Money::ZERO), alerts: vec![] })
+        .unwrap();
+    let low = Alert {
+        when: AlertWhen::Below,
+        level: Money::from_major(1_000_000),
+        message: "Top up".into(),
+    };
+    s.repo.stage(Op::SetLedgerGoals { uid: cash, target: None, alerts: vec![low] }).unwrap();
+
     s.selected_ledger = Some(cash);
     s.selected_bucket = Some(bucket);
     s.selected_cohort = Some(bills);
@@ -124,12 +142,13 @@ fn draw(s: &mut Session, view: Screen) {
         Screen::Buckets => views::buckets::show(ui, s),
         Screen::Cohorts => views::cohorts::show(ui, s),
         Screen::Views => views::saved::show(ui, s),
+        Screen::Variables => views::variables::show(ui, s),
         Screen::Commit => views::commit::show(ui, s),
         Screen::History => views::history::show(ui, s),
     });
 }
 
-const EVERY_VIEW: [Screen; 10] = [
+const EVERY_VIEW: [Screen; 11] = [
     Screen::Dashboard,
     Screen::Ledgers,
     Screen::Register,
@@ -138,6 +157,7 @@ const EVERY_VIEW: [Screen; 10] = [
     Screen::Buckets,
     Screen::Cohorts,
     Screen::Views,
+    Screen::Variables,
     Screen::Commit,
     Screen::History,
 ];
@@ -381,4 +401,257 @@ fn how_long_the_artwork_takes_to_load() {
     let _ = crate::brand::Brand::load(&ctx);
     let _ = crate::brand::window_icon();
     println!("brand artwork loaded in {:?}", t.elapsed());
+}
+
+/// A ledger picker inside the form modal must open *above* the modal. Both
+/// live on the Foreground order, and the modal is raised whenever it is
+/// clicked - which is exactly how the picker gets opened - so without help
+/// the list draws underneath the form and only the part hanging past its
+/// edge is visible.
+#[test]
+fn a_picker_in_the_form_modal_opens_on_top_of_it() {
+    let s = session();
+    let budget = s.repo.working().clone();
+    let ctx = egui::Context::default();
+    let button = std::cell::Cell::new(egui::Rect::NOTHING);
+    let modal_layer = std::cell::Cell::new(None);
+    let pass = |ctx: &egui::Context, events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1200.0, 800.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |_| {});
+            egui::Modal::new(egui::Id::new("form_modal")).show(ctx, |ui| {
+                ui.set_width(640.0);
+                modal_layer.set(Some(ui.layer_id()));
+                let before = ui.cursor().min;
+                crate::picker::Picker::new("probe", &budget).width(220.0).show(ui);
+                button.set(egui::Rect::from_min_max(before, ui.min_rect().max));
+            });
+        });
+    };
+    pass(&ctx, vec![]);
+    pass(&ctx, vec![]);
+    let button = button.get();
+    let at = egui::pos2(button.left() + 20.0, button.center().y);
+    let press = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    pass(&ctx, vec![egui::Event::PointerMoved(at), press(true)]);
+    pass(&ctx, vec![press(false)]);
+    pass(&ctx, vec![]);
+    pass(&ctx, vec![]);
+
+    // Just under the button is where the list opens. The modal's backdrop
+    // covers the whole window, so whichever layer is on top there wins.
+    let below = egui::pos2(at.x, button.bottom() + 30.0);
+    let top = ctx.layer_id_at(below).expect("something is drawn there");
+    assert_ne!(Some(top), modal_layer.get(), "the picker's list is hidden behind the form");
+}
+
+/// Dropping a staged ledger that a staged entry posts to leaves the entry
+/// broken; the commit screen draws it flagged, and an edit reopens it.
+#[test]
+fn the_commit_screen_draws_broken_changes() {
+    let mut s = session();
+    let open = "2024-01-01".parse().unwrap();
+    let scratch = s.repo.add_ledger("Scratch", "", Normality::Debit, open).unwrap();
+    let cash = s.repo.working().ledgers.uid[0];
+    s.repo.post("uses it", "", open, Money::from_major(3), scratch, cash).unwrap();
+    let at = s.repo.staged().len() - 2;
+    s.repo.unstage_at(at).unwrap();
+    assert_eq!(s.repo.broken().len(), 1);
+    draw(&mut s, Screen::Commit);
+    assert!(!s.repo.report().unwrap().can_commit());
+
+    let i = s.repo.broken()[0].index;
+    let op = s.repo.staged()[i].clone();
+    assert!(s.forms.edit_staged(i, &op));
+    let budget = s.repo.working().clone();
+    let forms = &mut s.forms;
+    run_ui(|ui| {
+        forms.show(ui, &budget);
+    });
+}
+
+/// The back arrow walks visited screens in reverse without bouncing, and
+/// undo/redo step the staging area - but never across a commit.
+#[test]
+fn back_undo_and_redo() {
+    let mut s = session();
+    for next in [Screen::Ledgers, Screen::Buckets, Screen::Commit] {
+        let before = s.view;
+        s.view = next;
+        s.track(before);
+    }
+    for expected in [Screen::Buckets, Screen::Ledgers, Screen::Dashboard] {
+        let before = s.view;
+        s.go_back();
+        s.track(before);
+        assert_eq!(s.view, expected);
+    }
+    assert!(s.back.is_empty());
+
+    let staged = s.repo.staged().to_vec();
+    let cash = s.repo.working().ledgers.uid[0];
+    let loan = s.repo.working().ledgers.uid[1];
+    let open = "2024-02-01".parse().unwrap();
+    s.repo.post("one", "", open, Money::from_major(1), cash, loan).unwrap();
+    s.track(s.view);
+    s.repo.post("two", "", open, Money::from_major(2), cash, loan).unwrap();
+    s.track(s.view);
+    s.repo.unstage_at(0).unwrap();
+    s.track(s.view);
+    assert_eq!(s.undo.len(), 3);
+
+    s.undo();
+    s.track(s.view);
+    assert_eq!(s.repo.staged().len(), staged.len() + 2, "the dropped change is back");
+    s.undo();
+    s.undo();
+    s.track(s.view);
+    assert_eq!(s.repo.staged(), &staged[..]);
+    assert!(s.repo.broken().is_empty());
+    s.redo();
+    s.track(s.view);
+    assert_eq!(s.repo.staged().len(), staged.len() + 1);
+    assert_eq!(s.redo.len(), 2);
+
+    // A commit draws a line: nothing before it can be put back.
+    s.repo.commit("done").unwrap();
+    s.track(s.view);
+    assert!(s.undo.is_empty() && s.redo.is_empty());
+    s.undo();
+    assert!(s.repo.staged().is_empty());
+}
+
+/// Every symbol the GUI writes as a `\u{...}` escape must exist in egui's
+/// bundled fonts. They cover only part of Unicode, and a missing glyph draws
+/// as an empty box - which no other test would ever notice.
+#[test]
+fn every_symbol_in_the_source_has_a_glyph() {
+    let sources = [
+        include_str!("app.rs"),
+        include_str!("brand.rs"),
+        include_str!("datepick.rs"),
+        include_str!("fmt.rs"),
+        include_str!("forms.rs"),
+        include_str!("picker.rs"),
+        include_str!("views/buckets.rs"),
+        include_str!("views/cohorts.rs"),
+        include_str!("views/commit.rs"),
+        include_str!("views/dashboard.rs"),
+        include_str!("views/goals.rs"),
+        include_str!("views/history.rs"),
+        include_str!("views/issuers.rs"),
+        include_str!("views/ledgers.rs"),
+        include_str!("views/mod.rs"),
+        include_str!("views/saved.rs"),
+        include_str!("views/search.rs"),
+        include_str!("views/transactions.rs"),
+        include_str!("views/variables.rs"),
+    ];
+    let mut used = std::collections::BTreeSet::new();
+    for src in sources {
+        for (i, _) in src.match_indices("\\u{") {
+            let hex: String = src[i + 3..].chars().take_while(|c| *c != '}').collect();
+            if let Some(c) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                used.insert(c);
+            }
+        }
+    }
+    assert!(used.len() > 10, "the scan found {used:?}; is it still reading the sources?");
+
+    let ctx = egui::Context::default();
+    let _ = ctx.run(egui::RawInput::default(), |_| {});
+    let missing: Vec<String> = used
+        .into_iter()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .filter(|c| !ctx.fonts_mut(|f| f.has_glyph(&egui::FontId::proportional(14.0), *c)))
+        .map(|c| format!("U+{:04X}", c as u32))
+        .collect();
+    assert!(missing.is_empty(), "no glyph in egui's fonts for {missing:?}");
+}
+
+/// Targets and alerts on every screen that shows them: a ledger's page with
+/// the "when is it reached" projection on, a bucket's aggregated targets,
+/// and a view with a target line and an alert ahead.
+#[test]
+fn targets_and_alerts_draw_everywhere() {
+    let mut s = session();
+    assert!(!ledgit_core::goals::fired(s.budget()).is_empty(), "the fixture sets one off");
+    let loan = s.budget().ledgers.uid[1];
+    s.selected_ledger = Some(loan);
+    s.show_target_reached = true;
+    draw(&mut s, Screen::Register);
+    draw(&mut s, Screen::Dashboard);
+    s.bucket_targets = true;
+    draw(&mut s, Screen::Buckets);
+    let (uid, _) = s.view_draft.clone().unwrap_or((s.selected_view.unwrap(), ViewSpec::default()));
+    s.view_draft = Some((
+        uid,
+        ViewSpec { ledgers: vec![loan, s.budget().ledgers.uid[0]], ..ViewSpec::default() },
+    ));
+    draw(&mut s, Screen::Views);
+    egui::__run_test_ctx(|ctx| {
+        let brand = crate::brand::Brand::load(ctx);
+        crate::app::top_bar(ctx, &mut s, &brand);
+    });
+}
+
+/// The Views screen laid over an earlier commit, and over the budget
+/// without its staged changes: the chart overlay and the comparison table.
+#[test]
+fn the_views_screen_compares_against_history() {
+    use crate::views::saved::CompareWith;
+    let mut s = session();
+    let first = *s.repo.log(None).unwrap().last().map(|c| &c.id).unwrap();
+    for with in [CompareWith::Commit(first), CompareWith::Committed] {
+        s.view_compare = Some(with);
+        draw(&mut s, Screen::Views);
+    }
+    assert_eq!(s.compare_cache.as_ref().map(|(c, _)| *c), Some(first), "folded once, kept");
+}
+
+/// Every screen, drawn against a real budget file - e.g. the generated
+/// fixtures, which hold far more than the in-memory one above:
+///
+/// ```sh
+/// cargo run -p ledgit-cli --example fixtures
+/// LEDGIT_SMOKE_FILE=$PWD/fixtures/household.ledgit cargo test -p ledgit-gui -- --ignored draws_a_real_file
+/// ```
+///
+/// It opens the file read-only in spirit: nothing is staged or committed.
+#[test]
+#[ignore]
+fn draws_a_real_file() {
+    let path = std::env::var("LEDGIT_SMOKE_FILE").expect("set LEDGIT_SMOKE_FILE to a .ledgit file");
+    let mut s = Session::open(PathBuf::from(&path), "tester").unwrap();
+    let staged = s.repo.staged().to_vec();
+    let l = s.repo.working();
+    s.selected_ledger = l
+        .ledgers
+        .indices()
+        .find(|ix| l.ledgers.target[ix.get()].is_some())
+        .map(|ix| l.ledgers.uid[ix.get()]);
+    s.selected_bucket = l.buckets.live().next().map(|b| l.buckets.uid[b.get()]);
+    s.selected_cohort = l.cohorts.live().next().map(|c| l.cohorts.uid[c.get()]);
+    s.selected_view = l.views.live().nth(1).map(|v| l.views.uid[v.get()]);
+    s.bucket_targets = true;
+    let first = s.repo.log(None).unwrap().last().map(|c| c.id);
+    s.view_compare = first.map(crate::views::saved::CompareWith::Commit);
+    let t = std::time::Instant::now();
+    for view in EVERY_VIEW {
+        draw(&mut s, view);
+    }
+    println!("{path}: every screen drawn in {:?}", t.elapsed());
+    assert_eq!(s.repo.staged(), &staged[..], "drawing must not change the stage");
 }

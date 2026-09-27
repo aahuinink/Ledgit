@@ -21,7 +21,7 @@ original spec.
 
 ```sh
 cargo build --release      # Windows or Linux
-cargo test                 # 69 tests
+cargo test                 # 169 tests
 cargo run -p ledgit-gui        # the desktop app
 ```
 
@@ -77,10 +77,33 @@ ledgit status                            # review it
 ledgit commit -m "february car payments"
 ```
 
+An issuer's amount can follow a balance instead: interest on a loan, or a
+share of an account, worked out each time it fires.
+
+```sh
+ledgit issuer add "Loan interest" --debit Interest --credit "Car Loan" --apr 6.45 --every monthly:1
+ledgit issuer add "Sweep" --debit Investments --credit Savings --share 5 --every monthly:28
+```
+
 Issuers *propose*. They never post on their own - their transactions land in the
 staging area next to your manual entries and wait for you to approve them.
 Schedules: `daily`, `weekly`, `biweekly`, `14d`, `monthly`, `monthly:15`,
 `quarterly:1`, `yearly`, `once`.
+
+## Variables, targets and alerts
+
+```sh
+ledgit var set Car_Km_Rate 0.68
+ledgit var set Home Toronto
+ledgit post "Mileage to {Home}" "200*Car_Km_Rate" --debit Travel --credit Owed
+
+ledgit ledger goals "Car Loan" --target 0
+ledgit ledger goals Chequing --below "500:Top up from savings"
+ledgit view show "Debt payoff" --compare <commit>   # how much sooner is it paid off?
+```
+
+A formula is worked out when the entry is made; changing the variable later
+re-prices nothing already posted.
 
 ## Version control
 

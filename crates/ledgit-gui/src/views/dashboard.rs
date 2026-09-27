@@ -24,6 +24,7 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         pending_banner(ui, s);
+        alerts(ui, s);
         bucket_tiles(ui, s);
         ui.add_space(16.0);
         ui.columns(2, |cols| {
@@ -31,6 +32,19 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
             upcoming(&mut cols[1], s);
         });
     });
+}
+
+/// Every alert past its level, at the top where it cannot be missed.
+fn alerts(ui: &mut Ui, s: &mut Session) {
+    let fired = ledgit_core::goals::fired(s.budget());
+    if fired.is_empty() {
+        return;
+    }
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.label(RichText::new("ALERTS").small().color(fmt::dim()));
+        super::goals::fired_list(ui, s, &fired);
+    });
+    ui.add_space(12.0);
 }
 
 fn pending_banner(ui: &mut Ui, s: &mut Session) {
@@ -149,7 +163,7 @@ fn upcoming(ui: &mut Ui, s: &mut Session) {
         .filter(|ix| !l.issuers.paused[ix.get()])
         .filter_map(|ix| {
             issuer::next_due(l, ix)
-                .map(|d| (d, l.issuers.name[ix.get()].clone(), l.issuers.amount(ix)))
+                .map(|d| (d, l.issuers.name[ix.get()].clone(), issuer::estimate(l, ix)))
         })
         .collect();
     due.sort();

@@ -6,12 +6,14 @@ pub mod buckets;
 pub mod cohorts;
 pub mod commit;
 pub mod dashboard;
+pub mod goals;
 pub mod history;
 pub mod issuers;
 pub mod ledgers;
 pub mod saved;
 pub mod search;
 pub mod transactions;
+pub mod variables;
 
 use crate::fmt;
 use egui::{RichText, Ui};
@@ -27,10 +29,8 @@ pub fn heading(ui: &mut Ui, title: &str, subtitle: &str) {
 }
 
 /// A right-aligned monospace cell, so decimal points line up down a column.
-pub fn num(ui: &mut Ui, text: RichText) {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.label(text);
-    });
+pub fn num(ui: &mut Ui, text: RichText) -> egui::Response {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(text)).inner
 }
 
 pub fn empty(ui: &mut Ui, message: &str) {

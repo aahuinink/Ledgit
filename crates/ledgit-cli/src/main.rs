@@ -46,6 +46,9 @@ enum Command {
     },
     /// Discard everything staged.
     Reset,
+    /// Drop one staged change, by its number in `ledgit status`. Changes that
+    /// depended on it are kept but flagged as broken.
+    Drop { index: usize },
     /// Show history, newest first.
     Log {
         #[arg(short = 'n', long, default_value_t = 20)]
@@ -90,6 +93,11 @@ enum Command {
     ///
     ///   ledgit post "Groceries" 42.50 --debit Groceries --credit Visa
     ///   ledgit post "Paycheque" --debit Chequing:1800 --debit Tax:600 --credit "Gross pay"
+    ///
+    /// An amount may be a formula over your variables, and a name or
+    /// description may use one as {Name}:
+    ///
+    ///   ledgit post "Mileage to {Home}" "200*Car_Km_Rate" --debit Travel --credit Owed
     Post {
         name: String,
         /// Amount for the simple two-sided form, e.g. 42.50
@@ -119,6 +127,9 @@ enum Command {
     /// simulation of the issuers forward to a date.
     #[command(subcommand)]
     View(ViewCmd),
+    /// Variables: numbers for amount formulas, text for names.
+    #[command(subcommand)]
+    Var(VarCmd),
     /// Every posting against one ledger, with a running balance.
     Register {
         ledger: String,
@@ -162,6 +173,24 @@ enum LedgerCmd {
     /// `ledgit ledger move Wedding Events:Wedding`. Buckets that include the
     /// subtree follow it. Only names change; no money moves.
     Move { from: String, to: String },
+    /// Set a ledger's target balance and alerts, replacing what it had.
+    ///
+    ///   ledgit ledger goals "Car Loan" --target 0
+    ///   ledgit ledger goals Chequing --below "500:Top up from savings" --above 20000
+    Goals {
+        ledger: String,
+        /// The balance you are aiming for, as displayed.
+        #[arg(long, conflicts_with = "no_target")]
+        target: Option<String>,
+        #[arg(long)]
+        no_target: bool,
+        /// Alert when the balance drops below AMOUNT[:MESSAGE]. Repeatable.
+        #[arg(long)]
+        below: Vec<String>,
+        /// Alert when the balance goes above AMOUNT[:MESSAGE]. Repeatable.
+        #[arg(long)]
+        above: Vec<String>,
+    },
     List {
         /// Only credit- or debit-normal ledgers.
         #[arg(long)]
@@ -173,11 +202,19 @@ enum LedgerCmd {
 }
 
 #[derive(Subcommand, Debug)]
+// Parsed once from the command line; boxing a variant would buy nothing.
+#[allow(clippy::large_enum_variant)]
 enum IssuerCmd {
     /// Create an issuer. Issuers can be paused but never deleted.
     ///
     /// Sides work exactly as they do for `ledgit post`, so a recurring paycheque
     /// keeps its tax and pension legs.
+    ///
+    /// Or let the amount follow a balance, with one --debit and one --credit
+    /// and no amount:
+    ///
+    ///   ledgit issuer add "Loan interest" --debit Interest --credit "Car Loan" --apr 6.45 --every monthly:1
+    ///   ledgit issuer add "Sweep" --debit Investments --credit Savings --share 5 --every monthly:28
     Add {
         name: String,
         amount: Option<String>,
@@ -185,6 +222,16 @@ enum IssuerCmd {
         debit: Vec<String>,
         #[arg(long)]
         credit: Vec<String>,
+        /// Charge interest at this APR (a percentage) on --of's balance,
+        /// for the days since the previous occurrence.
+        #[arg(long, conflicts_with_all = ["share", "amount"])]
+        apr: Option<String>,
+        /// Move this percentage of --of's balance each time.
+        #[arg(long, conflicts_with = "amount")]
+        share: Option<String>,
+        /// Whose balance --apr or --share reads. Defaults to the --credit side.
+        #[arg(long)]
+        of: Option<String>,
         /// 14d, weekly, biweekly, monthly, monthly:15, quarterly:1, yearly, once
         #[arg(long)]
         every: String,
@@ -353,6 +400,22 @@ struct SpecArgs {
 }
 
 #[derive(Subcommand, Debug)]
+enum VarCmd {
+    /// Create or change a variable: `ledgit var set Car_Km_Rate 0.68`.
+    Set {
+        name: String,
+        value: String,
+        /// Keep the value as text even if it looks like a number.
+        #[arg(long)]
+        text: bool,
+    },
+    Delete {
+        name: String,
+    },
+    List,
+}
+
+#[derive(Subcommand, Debug)]
 enum ViewCmd {
     /// Save a view.
     ///
@@ -398,6 +461,11 @@ enum ViewCmd {
         /// Save every balance series as CSV.
         #[arg(long, value_name = "FILE")]
         csv: Option<PathBuf>,
+        /// Also read the view as it stood at this commit (or branch), over
+        /// the same window, and show what changed - e.g. how much sooner a
+        /// loan reaches its target after a lump-sum payment.
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
     },
 }
 
@@ -456,6 +524,17 @@ fn run(cli: Cli) -> Result<()> {
             println!("Discarded {n} staged change(s).");
         }
 
+        Command::Drop { index } => {
+            let op = repo.unstage_at(index)?;
+            println!("Dropped: {}", op.summary());
+            if !repo.broken().is_empty() {
+                println!(
+                    "{} staged change(s) no longer apply; see `ledgit status`.",
+                    repo.broken().len()
+                );
+            }
+        }
+
         Command::Log { limit } => show::log(&repo, limit)?,
 
         Command::Show { rev } => show::commit(&repo, &rev)?,
@@ -510,6 +589,29 @@ fn run(cli: Cli) -> Result<()> {
         Command::Bucket(cmd) => bucket_cmd(&mut repo, cmd)?,
         Command::Cohort(cmd) => cohort_cmd(&mut repo, cmd)?,
         Command::View(cmd) => view_cmd(&mut repo, cmd)?,
+        Command::Var(cmd) => match cmd {
+            VarCmd::Set { name, value, text } => {
+                let value = if text { VarValue::Text(value) } else { VarValue::guess(&value) };
+                let op = Op::SetVariable { name, value };
+                println!("Staged: {}", op.summary());
+                repo.stage(op)?;
+            }
+            VarCmd::Delete { name } => {
+                let op = Op::DeleteVariable { name };
+                println!("Staged: {}", op.summary());
+                repo.stage(op)?;
+            }
+            VarCmd::List => {
+                let v = &repo.working().variables;
+                if v.is_empty() {
+                    println!("No variables.");
+                }
+                for i in 0..v.len() {
+                    let kind = if v.value[i].is_number() { "number" } else { "text" };
+                    println!("  {:<24} {:<7} {}", v.name[i], kind, v.value[i]);
+                }
+            }
+        },
 
         Command::Post { name, amount, debit, credit, date, desc } => {
             let legs = resolve::legs(repo.working(), &debit, &credit, amount.as_deref())?;
@@ -518,6 +620,9 @@ fn run(cli: Cli) -> Result<()> {
                 None => Date::today_utc(),
             };
             let total = ledgit_core::model::magnitude(&legs);
+            let vars = &repo.working().variables;
+            let name = vars.substitute(&name).map_err(Error::Invalid)?;
+            let desc = vars.substitute(&desc).map_err(Error::Invalid)?;
             repo.post_split(&name, desc, when, legs.clone())?;
             println!("Staged: {total} on {when}, {} sides.", legs.len());
             for leg in &legs {
@@ -543,6 +648,30 @@ fn run(cli: Cli) -> Result<()> {
 
 fn ledger_cmd(repo: &mut Repo<SqliteStore>, cmd: LedgerCmd) -> Result<()> {
     match cmd {
+        LedgerCmd::Goals { ledger, target, no_target, below, above } => {
+            let l = repo.working();
+            let uid = resolve::ledger(l, &ledger)?;
+            let ix = l.ledgers.ix(uid).expect("just resolved");
+            let target = match (target, no_target) {
+                (Some(t), _) => Some(resolve::amount(l, &t)?),
+                (None, true) => None,
+                (None, false) => l.ledgers.target[ix.get()],
+            };
+            let mut alerts = Vec::new();
+            for (when, specs) in [(AlertWhen::Below, below), (AlertWhen::Above, above)] {
+                for spec in specs {
+                    let (level, message) = spec.split_once(':').unwrap_or((&spec, ""));
+                    alerts.push(Alert {
+                        when,
+                        level: resolve::amount(l, level.trim())?,
+                        message: message.trim().to_string(),
+                    });
+                }
+            }
+            let op = Op::SetLedgerGoals { uid, target, alerts };
+            println!("Staged: {}", op.summary());
+            repo.stage(op)?;
+        }
         LedgerCmd::Add { name, normality, desc, opened } => {
             let n = resolve::normality(&normality)?;
             let opened = match opened {
@@ -575,13 +704,41 @@ fn ledger_cmd(repo: &mut Repo<SqliteStore>, cmd: LedgerCmd) -> Result<()> {
 
 fn issuer_cmd(repo: &mut Repo<SqliteStore>, cmd: IssuerCmd) -> Result<()> {
     match cmd {
-        IssuerCmd::Add { name, amount, debit, credit, every, start, desc } => {
-            let legs = resolve::legs(repo.working(), &debit, &credit, amount.as_deref())?;
+        IssuerCmd::Add { name, amount, debit, credit, apr, share, of, every, start, desc } => {
             let schedule = resolve::schedule(&every)?;
             let start = match start {
                 Some(s) => resolve::date(&s)?,
                 None => Date::today_utc(),
             };
+            if apr.is_some() || share.is_some() {
+                let l = repo.working();
+                let [d] = debit.as_slice() else {
+                    return Err(Error::Invalid("a rate needs exactly one --debit".into()));
+                };
+                let [c] = credit.as_slice() else {
+                    return Err(Error::Invalid("a rate needs exactly one --credit".into()));
+                };
+                let (d, c) = (resolve::ledger(l, d)?, resolve::ledger(l, c)?);
+                let of = match of {
+                    Some(o) => resolve::ledger(l, &o)?,
+                    None => c,
+                };
+                let pct = |s: &str| Rate::parse_percent(s).map_err(Error::Invalid);
+                let rule = match (apr, share) {
+                    (Some(a), _) => AmountRule::Interest { of, apr: pct(&a)? },
+                    (None, Some(s)) => AmountRule::ShareOfBalance { of, rate: pct(&s)? },
+                    (None, None) => unreachable!("checked above"),
+                };
+                repo.add_rule_issuer(&name, desc, d, c, rule, schedule, start)?;
+                println!(
+                    "Staged issuer \"{name}\": {} {} {} from {start}.",
+                    rule.describe(),
+                    l_name(repo, of),
+                    schedule.describe()
+                );
+                return Ok(());
+            }
+            let legs = resolve::legs(repo.working(), &debit, &credit, amount.as_deref())?;
             let total = ledgit_core::model::magnitude(&legs);
             repo.add_issuer_split(&name, desc, legs, schedule, start)?;
             println!("Staged issuer \"{name}\": {total} {} from {start}.", schedule.describe());
@@ -801,7 +958,7 @@ fn view_cmd(repo: &mut Repo<SqliteStore>, cmd: ViewCmd) -> Result<()> {
             println!("Staged: delete view {}. (No balances change.)", uid.short());
         }
         ViewCmd::List => analysis::views(repo.working()),
-        ViewCmd::Show { view, until, today, chart, size, csv } => {
+        ViewCmd::Show { view, until, today, chart, size, csv, compare } => {
             let l = repo.working();
             let v = l.views.get(l.views.ix(resolve::view(l, &view)?).expect("resolved"));
             let today =
@@ -809,6 +966,36 @@ fn view_cmd(repo: &mut Repo<SqliteStore>, cmd: ViewCmd) -> Result<()> {
             let until = until.as_deref().map(resolve::date).transpose()?;
             let r = analysis::evaluate(l, &v.spec, today, until);
             analysis::view(l, &v.name, &r);
+            if let Some(rev) = compare {
+                let id = repo.resolve(&rev)?;
+                let then_budget = repo.budget_at(id)?;
+                let (then, pairs) = ledgit_core::view::compare(&then_budget, &v.spec, l, &r);
+                println!("\nCompared with {} ({}):", id.short(), repo.get_commit(id)?.summary());
+                println!(
+                    "  {:<24} {:>14} {:>14} {:>14} {:>14}  target reached then -> now",
+                    "", "today then", "today now", "end then", "end now"
+                );
+                for (s, pair) in r.series.iter().zip(&pairs) {
+                    let Some(t) = pair.map(|j| &then.series[j]) else {
+                        println!("  {:<24} not in that commit", s.label);
+                        continue;
+                    };
+                    let when = |d: Option<Date>| d.map(|d| d.to_string()).unwrap_or("-".into());
+                    let target = if s.target.is_some() {
+                        format!("{} -> {}", when(t.target_reached), when(s.target_reached))
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "  {:<24} {:>14} {:>14} {:>14} {:>14}  {target}",
+                        s.label,
+                        t.now.to_string(),
+                        s.now.to_string(),
+                        t.at_end.to_string(),
+                        s.at_end.to_string()
+                    );
+                }
+            }
             if let Some(path) = chart {
                 let (w, h) = size
                     .split_once('x')
@@ -836,4 +1023,9 @@ fn view_cmd(repo: &mut Repo<SqliteStore>, cmd: ViewCmd) -> Result<()> {
 /// Re-exported for `show`, which needs it to describe pending issuer work.
 pub(crate) fn next_due(l: &Budget, ix: ledgit_core::id::IssuerIx) -> Option<Date> {
     issuer::next_due(l, ix)
+}
+
+fn l_name(repo: &Repo<SqliteStore>, uid: LedgerUid) -> String {
+    let l = repo.working();
+    l.ledgers.ix(uid).map(|ix| l.ledgers.name[ix.get()].clone()).unwrap_or_default()
 }

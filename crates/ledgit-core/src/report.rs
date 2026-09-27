@@ -63,6 +63,8 @@ pub struct ChangeReport {
     pub deleted_cohorts: usize,
     pub new_views: usize,
     pub deleted_views: usize,
+    /// Variables set or deleted.
+    pub variables_changed: usize,
     pub manual_transactions: usize,
     pub issuer_transactions: usize,
     /// How many of the above have more than two sides.
@@ -74,11 +76,31 @@ pub struct ChangeReport {
     /// Debits equal credits in the resulting budget. Should always be true;
     /// if it is not, refuse to commit and file a bug.
     pub balanced: bool,
+    /// Staged ops that no longer apply. Everything else in the report leaves
+    /// them out; committing is blocked until there are none.
+    pub broken: Vec<Broken>,
+    /// Alerts the staged changes set off: past their level afterwards, and
+    /// not before. Ledger rows index the working budget.
+    pub alerts: Vec<crate::goals::FiredAlert>,
+}
+
+/// A staged op that no longer applies - say a transaction whose staged
+/// ledger was dropped - and why.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Broken {
+    /// Its position in the stage.
+    pub index: usize,
+    pub reason: String,
 }
 
 impl ChangeReport {
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
+    }
+
+    /// Whether committing would be allowed.
+    pub fn can_commit(&self) -> bool {
+        self.balanced && self.broken.is_empty()
     }
 }
 
@@ -92,6 +114,7 @@ pub fn build(base: &Budget, staged: &[Op]) -> Result<ChangeReport> {
     let mut r = ChangeReport {
         lines: staged.iter().map(|o| o.summary()).collect(),
         balanced: after.is_balanced(),
+        alerts: crate::goals::newly_fired(base, &after),
         ..Default::default()
     };
 
@@ -111,6 +134,7 @@ pub fn build(base: &Budget, staged: &[Op]) -> Result<ChangeReport> {
             Op::DeleteCohort { .. } => r.deleted_cohorts += 1,
             Op::CreateView { .. } => r.new_views += 1,
             Op::DeleteView { .. } => r.deleted_views += 1,
+            Op::SetVariable { .. } | Op::DeleteVariable { .. } => r.variables_changed += 1,
             Op::PostTransaction { parent, legs, .. } => {
                 // The size of a split entry is what it debits, not the sum of
                 // every leg - a $2,400 paycheque is $2,400, not $4,800.

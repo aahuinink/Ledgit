@@ -14,7 +14,9 @@
 
 use crate::date::Date;
 use crate::id::{BucketUid, CohortUid, IssuerUid, LedgerUid, TxUid, ViewUid};
-use crate::model::{magnitude, Leg, Normality, Parent, Schedule, ViewSpec};
+use crate::model::{
+    magnitude, Alert, AmountRule, Leg, Normality, Parent, Schedule, VarValue, ViewSpec,
+};
 use crate::money::Money;
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +43,14 @@ pub enum Op {
         name: Option<String>,
         description: Option<String>,
     },
+    /// Set a ledger's target balance and alerts, replacing what it had.
+    /// Like a ledger's name, these are settings on it, not money: they move
+    /// nothing, and an empty set clears them.
+    SetLedgerGoals {
+        uid: LedgerUid,
+        target: Option<Money>,
+        alerts: Vec<Alert>,
+    },
     /// Post an entry. `legs` holds two or more sides that sum to zero; a plain
     /// transfer is two legs, a paycheque is four.
     PostTransaction {
@@ -64,6 +74,11 @@ pub enum Op {
         legs: Vec<Leg>,
         schedule: Schedule,
         start: Date,
+        /// Work each amount out from a balance instead. Absent - not `null` -
+        /// when unset, so every issuer committed before rules existed still
+        /// encodes, and hashes, exactly as it did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rule: Option<AmountRule>,
     },
     EditIssuer {
         uid: IssuerUid,
@@ -157,6 +172,17 @@ pub enum Op {
     DeleteView {
         uid: ViewUid,
     },
+    /// Create a variable, or change its value. Names are matched without
+    /// regard to case, so `car_km_rate` sets `Car_Km_Rate`.
+    SetVariable {
+        name: String,
+        value: VarValue,
+    },
+    /// Variables only help you type entries; deleting one changes no entry
+    /// already made with it.
+    DeleteVariable {
+        name: String,
+    },
 }
 
 impl Op {
@@ -167,6 +193,13 @@ impl Op {
                 format!("create {normality}-normal ledger \"{name}\"")
             }
             Op::EditLedger { uid, .. } => format!("edit ledger {}", uid.short()),
+            Op::SetLedgerGoals { uid, target, alerts } => {
+                let target = match target {
+                    Some(t) => format!("target {t}"),
+                    None => "no target".into(),
+                };
+                format!("set ledger {} goals: {target}, {} alert(s)", uid.short(), alerts.len())
+            }
             Op::PostTransaction { name, legs, date, .. } => {
                 let amount = magnitude(legs);
                 let split = if legs.len() > 2 {
@@ -177,6 +210,12 @@ impl Op {
                 format!("post {amount} on {date}{split} - \"{name}\"")
             }
             Op::EditTransaction { uid, .. } => format!("edit transaction {}", uid.short()),
+            Op::CreateIssuer { name, rule: Some(rule), schedule, .. } => format!(
+                "create issuer \"{name}\" for {} ledger {} {}",
+                rule.describe(),
+                rule.of().short(),
+                schedule.describe()
+            ),
             Op::CreateIssuer { name, legs, schedule, .. } => {
                 format!("create issuer \"{name}\" for {} {}", magnitude(legs), schedule.describe())
             }
@@ -213,6 +252,9 @@ impl Op {
             Op::CreateView { name, .. } => format!("save view \"{name}\""),
             Op::EditView { uid, .. } => format!("edit view {}", uid.short()),
             Op::DeleteView { uid } => format!("delete view {}", uid.short()),
+            Op::SetVariable { name, value: VarValue::Number(v) } => format!("set {name} = {v}"),
+            Op::SetVariable { name, value: VarValue::Text(v) } => format!("set {name} = \"{v}\""),
+            Op::DeleteVariable { name } => format!("delete variable {name}"),
         }
     }
 

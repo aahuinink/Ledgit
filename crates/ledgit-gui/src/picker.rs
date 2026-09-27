@@ -24,6 +24,7 @@ pub struct Picker<'a> {
     selected_text: String,
     width: f32,
     subtrees: bool,
+    paths: bool,
     hide: Vec<LedgerUid>,
 }
 
@@ -35,6 +36,7 @@ impl<'a> Picker<'a> {
             selected_text: "choose a ledger...".into(),
             width: 240.0,
             subtrees: false,
+            paths: false,
             hide: Vec::new(),
         }
     }
@@ -55,6 +57,14 @@ impl<'a> Picker<'a> {
         self
     }
 
+    /// Pick a *place* in the tree rather than a ledger: every level is
+    /// offered, including ones no ledger sits on, plus the top level. Picks
+    /// come back as [`Pick::Subtree`], the top level as an empty path.
+    pub fn paths(mut self, on: bool) -> Self {
+        self.paths = on;
+        self
+    }
+
     /// Ledgers not to offer, e.g. those already in a bucket.
     pub fn hide(mut self, uids: Vec<LedgerUid>) -> Self {
         self.hide = uids;
@@ -64,11 +74,13 @@ impl<'a> Picker<'a> {
     pub fn show(self, ui: &mut Ui) -> Option<Pick> {
         let mut picked = None;
         let search_id = self.id.with("search");
+        let mut list_layer = None;
         egui::ComboBox::from_id_salt(self.id)
             .selected_text(self.selected_text.clone())
             .width(self.width)
             .height(360.0)
             .show_ui(ui, |ui| {
+                list_layer = Some(ui.layer_id());
                 let mut needle: String = ui.data_mut(|d| d.get_temp(search_id)).unwrap_or_default();
                 ui.add(
                     egui::TextEdit::singleline(&mut needle)
@@ -82,6 +94,9 @@ impl<'a> Picker<'a> {
                 }
                 ui.data_mut(|d| d.insert_temp(search_id, needle));
             });
+        if let Some(layer) = list_layer {
+            keep_above(ui, layer);
+        }
         picked
     }
 
@@ -94,6 +109,29 @@ impl<'a> Picker<'a> {
             return None;
         }
         let mut picked = None;
+        if self.paths {
+            if needle.trim().is_empty()
+                && ui.selectable_label(false, RichText::new("(top level)").italics()).clicked()
+            {
+                picked = Some(Pick::Subtree(String::new()));
+            }
+            for (n, node) in tree.nodes.iter().enumerate() {
+                if !visible[n] {
+                    continue;
+                }
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0 * node.depth as f32);
+                    let text = match node.ledger {
+                        Some(_) => RichText::new(node.name()),
+                        None => RichText::new(node.name()).strong(),
+                    };
+                    if ui.selectable_label(false, text).on_hover_text(&node.path).clicked() {
+                        picked = Some(Pick::Subtree(node.path.clone()));
+                    }
+                });
+            }
+            return picked;
+        }
         for (n, node) in tree.nodes.iter().enumerate() {
             if !visible[n] {
                 continue;
@@ -130,6 +168,20 @@ impl<'a> Picker<'a> {
             });
         }
         picked
+    }
+}
+
+/// Keep a popup opened from `ui` drawn directly above it.
+///
+/// A popup and the form modal both sit on egui's Foreground order, where the
+/// last layer raised wins - and the modal is raised whenever it is clicked,
+/// which is exactly how a popup inside it gets opened. Left alone, a list
+/// can end up under the form, visible only where it hangs past the edge.
+/// A sublayer is always drawn straight above its parent.
+pub fn keep_above(ui: &Ui, popup: egui::LayerId) {
+    let parent = ui.layer_id();
+    if parent != popup && parent.order == popup.order {
+        ui.ctx().set_sublayer(parent, popup);
     }
 }
 

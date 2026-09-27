@@ -43,6 +43,22 @@ pub fn status(repo: &Repo<SqliteStore>) -> Result<()> {
     }
     println!("{}", freshness(repo.working(), Date::today_utc()));
 
+    let fired = ledgit_core::goals::fired(repo.working());
+    if !fired.is_empty() {
+        println!("\nAlerts:");
+        for f in &fired {
+            let l = repo.working();
+            println!(
+                "  ! {:<28} {:>14}  {} {}  {}",
+                l.ledgers.name[f.ledger.get()],
+                amt(f.balance),
+                f.alert.when,
+                amt(f.alert.level),
+                f.alert.message
+            );
+        }
+    }
+
     let r = repo.report()?;
     if r.is_empty() {
         println!("\nNothing staged. The budget on disk is what you see.");
@@ -51,7 +67,17 @@ pub fn status(repo: &Repo<SqliteStore>) -> Result<()> {
 
     println!("\nStaged changes ({}):", r.lines.len());
     for (i, line) in r.lines.iter().enumerate() {
-        println!("  {i:>3}. {line}");
+        match r.broken.iter().find(|b| b.index == i) {
+            Some(b) => println!("  {i:>3}. BROKEN {line}\n         {}", b.reason),
+            None => println!("  {i:>3}. {line}"),
+        }
+    }
+    if !r.broken.is_empty() {
+        println!(
+            "\n{} staged change(s) no longer apply and are left out below. \
+             Nothing can be committed until they are fixed in the app or dropped with `ledgit drop <n>`.",
+            r.broken.len()
+        );
     }
 
     println!(
@@ -216,11 +242,23 @@ pub fn issuers(l: &Budget) {
             Some(d) if !l.issuers.paused[i] => d.to_string(),
             _ => "-".to_string(),
         };
+        // A rule's amount depends on a balance; show the next one, marked
+        // as an estimate, and the rule itself after the state.
+        let (amount, rule) = match l.issuers.rule[i] {
+            Some(r) => {
+                let of = l.ledgers.ix(r.of()).map(|a| l.ledgers.name[a.get()].clone());
+                (
+                    format!("~{}", amt(ledgit_core::issuer::estimate(l, ix))),
+                    format!("  ({} {})", r.describe(), of.unwrap_or_default()),
+                )
+            }
+            None => (amt(l.issuers.amount(ix)), String::new()),
+        };
         println!(
-            "{:<10} {:<24} {:>12} {:<22} {:<12} {}",
+            "{:<10} {:<24} {:>12} {:<22} {:<12} {}{rule}",
             l.issuers.uid[i].short(),
             truncate(&l.issuers.name[i], 24),
-            amt(l.issuers.amount(ix)),
+            amount,
             l.issuers.schedule[i].describe(),
             due,
             if l.issuers.paused[i] { "paused" } else { "active" },

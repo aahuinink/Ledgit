@@ -84,7 +84,7 @@ pub fn sides(l: &Budget, tix: ledgit_core::id::TxIx) -> (String, String) {
 /// An entry read as a sentence: "what gave value -> what received it".
 pub fn flow(l: &Budget, tix: ledgit_core::id::TxIx) -> String {
     let (dr, cr) = sides(l, tix);
-    format!("{cr} \u{2192} {dr}")
+    format!("{cr} \u{27A1} {dr}")
 }
 
 /// The same for an issuer, which holds its legs as uids.
@@ -96,7 +96,18 @@ pub fn issuer_flow(l: &Budget, ix: ledgit_core::id::IssuerIx) -> String {
     let legs = &l.issuers.legs[ix.get()];
     let dr: Vec<String> = legs.iter().filter(|l| l.is_debit()).map(|l| name(l.ledger)).collect();
     let cr: Vec<String> = legs.iter().filter(|l| !l.is_debit()).map(|l| name(l.ledger)).collect();
-    format!("{} \u{2192} {}", cr.join(", "), dr.join(", "))
+    format!("{} \u{27A1} {}", cr.join(", "), dr.join(", "))
+}
+
+/// How an issuer's amount is decided: a figure, or its rule in words -
+/// "6.45% APR on Liabilities:Car Loan".
+pub fn issuer_rule(l: &Budget, ix: ledgit_core::id::IssuerIx) -> Option<String> {
+    let rule = l.issuers.rule[ix.get()]?;
+    let of = match l.ledgers.ix(rule.of()) {
+        Some(a) => l.ledgers.name[a.get()].clone(),
+        None => rule.of().short(),
+    };
+    Some(format!("{} {of}", rule.describe()))
 }
 
 /// Clip a cell so one long value - a split naming four ledgers - cannot
