@@ -19,7 +19,7 @@ use std::path::PathBuf;
 /// the system theme - Windows reads one icon for Explorer, the Start menu and
 /// the taskbar alike - so this picks one. The original reads on light
 /// surfaces; `Icon_dark.svg` on dark ones.
-const ICON: &str = "../../assets/Icon.svg";
+const ICON: &str = "../../assets/Icon_dark.svg";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
