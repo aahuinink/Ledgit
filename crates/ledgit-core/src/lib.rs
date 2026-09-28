@@ -80,9 +80,9 @@ pub mod prelude {
     pub use crate::error::{Error, Result};
     pub use crate::id::{BucketUid, CohortUid, IssuerUid, LedgerUid, TxUid, ViewUid};
     pub use crate::model::{
-        magnitude, simple_legs, validate_legs, Alert, AlertWhen, AmountRule, Bucket, Cohort,
-        Issuer, Ledger, Leg, Normality, Parent, Rate, SavedView, Schedule, Transaction, VarValue,
-        ViewSpec,
+        magnitude, simple_legs, validate_legs, Alert, AlertWhen, AmountRule, Bound, Bucket, Cohort,
+        Issuer, Ledger, Leg, Normality, Parent, Rate, SavedView, Schedule, Target, Transaction,
+        VarValue, ViewSpec,
     };
     pub use crate::money::Money;
     pub use crate::op::Op;

@@ -216,6 +216,19 @@ fn targets(ui: &mut Ui, s: &mut Session, uid: BucketUid) {
     let Some(t) = ledgit_core::goals::bucket_targets(s.budget(), uid, s.bucket_roll) else {
         return;
     };
+    let l = s.budget();
+    let has_paces = l.buckets.ix(uid).is_some_and(|bix| {
+        l.buckets.members[bix.get()]
+            .iter()
+            .any(|ix| matches!(l.ledgers.target[ix.get()], Some(Target::Pace { .. })))
+    });
+    if has_paces {
+        paces(ui, s, uid);
+        if t.lines.is_empty() {
+            return;
+        }
+        ui.add_space(6.0);
+    }
     egui::Frame::group(ui.style()).show(ui, |ui| {
         if t.lines.is_empty() {
             ui.label(
@@ -266,6 +279,93 @@ fn targets(ui: &mut Ui, s: &mut Session, uid: BucketUid) {
             });
             row.col(|ui| {
                 num(ui, fmt::mono(fmt::amount(Money((line.target.0 - line.balance.0).abs()))));
+            });
+        });
+    });
+}
+
+/// The bucket's members' paces, in one unit, against this period.
+fn paces(ui: &mut Ui, s: &mut Session, uid: BucketUid) {
+    let today = Date::today_utc();
+    let per = s.bucket_pace_per;
+    let Some(p) = ledgit_core::goals::bucket_paces(s.budget(), uid, s.bucket_roll, per, today)
+    else {
+        return;
+    };
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Paces").strong());
+            for q in Period::ALL {
+                ui.selectable_value(&mut s.bucket_pace_per, q, format!("per {q}"));
+            }
+            ui.separator();
+            let bound = p.bound.map(|b| format!(" {b}")).unwrap_or_default();
+            ui.label(format!(
+                "{} so far of {} a {per}{bound}",
+                fmt::amount(p.flow),
+                fmt::amount(p.amount)
+            ));
+            match p.bound {
+                Some(Bound::AtMost) if p.flow > p.amount => {
+                    ui.colored_label(
+                        fmt::bad(),
+                        format!("over by {}", fmt::amount(p.flow - p.amount)),
+                    );
+                }
+                Some(Bound::AtLeast) if p.flow >= p.amount => {
+                    ui.colored_label(fmt::good(), "met");
+                }
+                _ => {}
+            }
+        });
+        let mut notes = vec![format!(
+            "The calendar {per} from {}. Paces set in other units are converted by average \
+             lengths, so a weekly budget reads as about 4.35 weeks' worth a month.",
+            p.start
+        )];
+        if p.bound.is_none() {
+            notes
+                .push("Members mix at-most and at-least paces, so the total is not judged.".into());
+        }
+        if p.lines.len() < p.members {
+            notes.push(format!(
+                "{} of {} members have a pace; the others are left out.",
+                p.lines.len(),
+                p.members
+            ));
+        }
+        ui.label(RichText::new(notes.join(" ")).small().color(fmt::dim()));
+        Table::new(
+            ("bucket_paces", uid),
+            vec![
+                text("").max(300.0),
+                text("pace").max(220.0),
+                figures(format!("a {per}")),
+                figures("so far"),
+                figures("vs pace"),
+            ],
+        )
+        .height(Height::Max(180.0))
+        .show(ui, p.lines.len(), |row| {
+            let line = &p.lines[row.index()];
+            row.col(|ui| {
+                ui.label(&line.name);
+            });
+            row.col(|ui| {
+                let (amount, own) = line.own;
+                let own = Target::Pace { amount, per: own, bound: line.bound };
+                ui.label(RichText::new(super::goals::describe(own)).color(fmt::dim()));
+            });
+            row.col(|ui| {
+                num(ui, fmt::mono(fmt::amount(line.amount)));
+            });
+            row.col(|ui| {
+                num(ui, fmt::mono(fmt::amount(line.flow)));
+            });
+            row.col(|ui| {
+                let off = !line.bound.keeps(line.amount, line.flow) && line.bound == Bound::AtMost;
+                let text = fmt::mono(fmt::signed(line.flow - line.amount));
+                num(ui, if off { text.color(fmt::bad()) } else { text });
             });
         });
     });

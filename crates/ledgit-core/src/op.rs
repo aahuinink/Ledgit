@@ -15,7 +15,7 @@
 use crate::date::Date;
 use crate::id::{BucketUid, CohortUid, IssuerUid, LedgerUid, TxUid, ViewUid};
 use crate::model::{
-    magnitude, Alert, AmountRule, Leg, Normality, Parent, Schedule, VarValue, ViewSpec,
+    magnitude, Alert, AmountRule, Leg, Normality, Parent, Schedule, Target, VarValue, ViewSpec,
 };
 use crate::money::Money;
 use serde::{Deserialize, Serialize};
@@ -43,12 +43,13 @@ pub enum Op {
         name: Option<String>,
         description: Option<String>,
     },
-    /// Set a ledger's target balance and alerts, replacing what it had.
+    /// Set a ledger's target - a balance or a pace - and alerts, replacing
+    /// what it had.
     /// Like a ledger's name, these are settings on it, not money: they move
     /// nothing, and an empty set clears them.
     SetLedgerGoals {
         uid: LedgerUid,
-        target: Option<Money>,
+        target: Option<Target>,
         alerts: Vec<Alert>,
     },
     /// Post an entry. `legs` holds two or more sides that sum to zero; a plain

@@ -98,12 +98,19 @@ ledgit var set Home Toronto
 ledgit post "Mileage to {Home}" "200*Car_Km_Rate" --debit Travel --credit Owed
 
 ledgit ledger goals "Car Loan" --target 0
+ledgit ledger goals Groceries --target 250 --per week           # a budget: at most
+ledgit ledger goals Savings --target 500 --per month --at-least # a habit
 ledgit ledger goals Chequing --below "500:Top up from savings"
 ledgit view show "Debt payoff" --compare <commit>   # how much sooner is it paid off?
 ```
 
 A formula is worked out when the entry is made; changing the variable later
 re-prices nothing already posted.
+
+A target is either a balance to reach or a *pace*: how far the balance may
+(at most) or should (at least) move in each calendar day, week, month or
+year. Weeks start on Monday. `ledgit status` shows how each pace's current
+period is going, and which paces the staged entries would break.
 
 ## Version control
 

@@ -17,7 +17,7 @@ use crate::id::{
 };
 use crate::model::{
     magnitude, validate_legs, validate_var_name, Alert, AmountRule, Bucket, Cohort, Issuer, Ledger,
-    Leg, Normality, Parent, SavedView, Schedule, Transaction, VarValue, ViewSpec,
+    Leg, Normality, Parent, SavedView, Schedule, Target, Transaction, VarValue, ViewSpec,
 };
 use crate::money::Money;
 use crate::op::Op;
@@ -33,8 +33,9 @@ pub struct LedgerArena {
     pub opened: Vec<Date>,
     /// Debit-positive running total, the column bucket maths sums over.
     pub raw_balance: Vec<Money>,
-    /// Target balance, as displayed. Sparse in practice, so optional per row.
-    pub target: Vec<Option<Money>>,
+    /// Target balance or pace, as displayed. Sparse in practice, so optional
+    /// per row.
+    pub target: Vec<Option<Target>>,
     pub alerts: Vec<Vec<Alert>>,
     /// Postings against each ledger, in the order they were entered. These
     /// index the flat [`PostingArena`], so walking a ledger's register reads
@@ -547,6 +548,9 @@ impl Budget {
             }
             Op::SetLedgerGoals { uid, target, alerts } => {
                 let ix = self.ledger_ix(uid)?.get();
+                if let Some(t) = &target {
+                    t.validate().map_err(invalid)?;
+                }
                 self.ledgers.target[ix] = target;
                 self.ledgers.alerts[ix] = alerts;
             }

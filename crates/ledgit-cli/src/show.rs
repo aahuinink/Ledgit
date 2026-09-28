@@ -59,6 +59,33 @@ pub fn status(repo: &Repo<SqliteStore>) -> Result<()> {
         }
     }
 
+    let paces = ledgit_core::goals::paces(repo.working(), Date::today_utc());
+    if !paces.is_empty() {
+        println!("\nPaces this period:");
+        for p in &paces {
+            use ledgit_core::goals::PaceState;
+            let l = repo.working();
+            let note = match p.state() {
+                PaceState::Over => format!("over by {}", amt(p.over())),
+                PaceState::Met => "met".into(),
+                PaceState::OffPace if p.bound == Bound::AtMost => {
+                    format!("ahead of pace ({} by today)", amt(p.due_by_now))
+                }
+                PaceState::OffPace => format!("behind pace ({} by today)", amt(p.due_by_now)),
+                PaceState::OnPace => format!("{} left", amt(p.left())),
+            };
+            println!(
+                "  {} {:<28} {:>14} of {} a {} {}  {note}",
+                if p.state() == PaceState::Over { "!" } else { " " },
+                truncate(&l.ledgers.name[p.ledger.get()], 28),
+                amt(p.period.flow),
+                amt(p.amount),
+                p.per,
+                p.bound,
+            );
+        }
+    }
+
     let r = repo.report()?;
     if r.is_empty() {
         println!("\nNothing staged. The budget on disk is what you see.");
@@ -126,6 +153,24 @@ pub fn status(repo: &Repo<SqliteStore>) -> Result<()> {
                 amt(b.after),
                 amt(b.change()),
                 if b.membership_changed { "  (membership changed)" } else { "" }
+            );
+        }
+    }
+
+    if !r.paces.is_empty() {
+        println!("\nPaces this breaks:");
+        let l = repo.working();
+        for b in &r.paces {
+            println!(
+                "  ! {:<28} {} a {} {}: the {} from {} goes from {} to {}",
+                truncate(&l.ledgers.name[b.ledger.get()], 28),
+                amt(b.amount),
+                b.per,
+                b.bound,
+                b.per,
+                b.start,
+                amt(b.before),
+                amt(b.after)
             );
         }
     }

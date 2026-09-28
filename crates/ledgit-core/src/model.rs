@@ -282,8 +282,8 @@ pub struct Ledger {
     pub opened: Date,
     /// Debit-positive running total. Use [`Ledger::balance`] to display it.
     pub raw_balance: Money,
-    /// Where you want the balance to get to, as displayed, if anywhere.
-    pub target: Option<Money>,
+    /// Where you want the balance to get to, or how fast, if anywhere.
+    pub target: Option<Target>,
     pub alerts: Vec<Alert>,
 }
 
@@ -769,5 +769,83 @@ impl Alert {
             AlertWhen::Below => balance < self.level,
             AlertWhen::Above => balance > self.level,
         }
+    }
+}
+
+/// Where you want a ledger to go: a balance to get to, or a pace to keep.
+///
+/// Both are read off the balance as displayed. A balance target has no
+/// direction of its own (see [`crate::goals`]); a pace has one, because
+/// "$250 a week on food" is a ceiling and "$500 a month into savings" is a
+/// floor, and nothing about either ledger says which.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Target {
+    /// A balance to reach. Encoded as the bare amount - exactly how a target
+    /// was written before paces existed - so every commit made then still
+    /// decodes, and hashes, the same.
+    Balance(Money),
+    /// How far the balance should move in each calendar `per`: weeks from
+    /// Monday, months from the 1st.
+    Pace { amount: Money, per: Period, bound: Bound },
+}
+
+impl Target {
+    /// The balance to reach, if this is that kind of target.
+    pub const fn balance(self) -> Option<Money> {
+        match self {
+            Target::Balance(m) => Some(m),
+            Target::Pace { .. } => None,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match *self {
+            Target::Pace { amount, .. } if amount.0 < 0 => {
+                Err("a pace is a size; say which way with at most or at least")
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+impl fmt::Display for Target {
+    /// "0.00", "250.00 a week at most".
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Target::Balance(m) => write!(f, "{m}"),
+            Target::Pace { amount, per, bound } => write!(f, "{amount} a {per} {bound}"),
+        }
+    }
+}
+
+/// Which side of its amount a [`Target::Pace`] wants the period to end on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Bound {
+    /// A budget: spend no more than this.
+    #[default]
+    AtMost,
+    /// A habit: put in at least this.
+    AtLeast,
+}
+
+impl Bound {
+    /// Whether a period's movement keeps to `amount`. Exactly the amount
+    /// keeps either way.
+    pub fn keeps(self, amount: Money, flow: Money) -> bool {
+        match self {
+            Bound::AtMost => flow <= amount,
+            Bound::AtLeast => flow >= amount,
+        }
+    }
+}
+
+impl fmt::Display for Bound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Bound::AtMost => "at most",
+            Bound::AtLeast => "at least",
+        })
     }
 }

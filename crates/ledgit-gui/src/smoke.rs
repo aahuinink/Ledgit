@@ -105,7 +105,11 @@ fn session() -> Session {
 
     // A target on the loan, and an alert on chequing that is firing.
     s.repo
-        .stage(Op::SetLedgerGoals { uid: loan, target: Some(Money::ZERO), alerts: vec![] })
+        .stage(Op::SetLedgerGoals {
+            uid: loan,
+            target: Some(Target::Balance(Money::ZERO)),
+            alerts: vec![],
+        })
         .unwrap();
     let low = Alert {
         when: AlertWhen::Below,
@@ -113,6 +117,16 @@ fn session() -> Session {
         message: "Top up".into(),
     };
     s.repo.stage(Op::SetLedgerGoals { uid: cash, target: None, alerts: vec![low] }).unwrap();
+    // A weekly budget on a ledger in the bucket, broken by the staged spending.
+    let food = s.repo.add_ledger("Expenses:Food", "", Normality::Debit, open).unwrap();
+    s.repo.stage(Op::AddToBucket { bucket, ledger: food }).unwrap();
+    let week =
+        Target::Pace { amount: Money::from_major(250), per: Period::Week, bound: Bound::AtMost };
+    s.repo.stage(Op::SetLedgerGoals { uid: food, target: Some(week), alerts: vec![] }).unwrap();
+    for (days_ago, amount) in [(0, 180), (8, 60), (40, 300)] {
+        let date = Date::today_utc().add_days(-days_ago);
+        s.repo.post("Groceries", "", date, Money::from_major(amount), food, cash).unwrap();
+    }
 
     s.selected_ledger = Some(cash);
     s.selected_bucket = Some(bucket);
@@ -169,8 +183,9 @@ fn every_view_draws_a_populated_budget() {
         draw(&mut s, view);
     }
     assert!(s.repo.has_staged_changes(), "drawing must not change the budget");
-    assert_eq!(s.repo.working().transactions.len(), 4);
-    assert_eq!(s.repo.working().postings.len(), 9, "one of them is a three-way split");
+    assert_eq!(s.repo.working().transactions.len(), 7, "four, and three grocery runs");
+    assert_eq!(s.repo.working().postings.len(), 15, "one of them is a three-way split");
+    assert!(!s.repo.report().unwrap().paces.is_empty(), "the groceries break their pace");
 }
 
 #[test]
@@ -598,7 +613,16 @@ fn targets_and_alerts_draw_everywhere() {
     draw(&mut s, Screen::Register);
     draw(&mut s, Screen::Dashboard);
     s.bucket_targets = true;
-    draw(&mut s, Screen::Buckets);
+    for per in Period::ALL {
+        s.bucket_pace_per = per;
+        draw(&mut s, Screen::Buckets);
+    }
+    // The weekly budget: its ledger page, and the dashboard's list of paces.
+    let food = s.budget().ledger_by_name("Expenses:Food").unwrap();
+    assert!(ledgit_core::goals::pace_status(s.budget(), food, Date::today_utc()).is_some());
+    s.selected_ledger = Some(s.budget().ledgers.uid[food.get()]);
+    draw(&mut s, Screen::Register);
+    s.selected_ledger = Some(loan);
     let (uid, _) = s.view_draft.clone().unwrap_or((s.selected_view.unwrap(), ViewSpec::default()));
     s.view_draft = Some((
         uid,
@@ -1178,4 +1202,34 @@ fn new_transaction_from_a_ledger_starts_on_that_ledger() {
     let s = s.borrow();
     assert_eq!(s.forms.open, Some(FormKind::Transaction));
     assert_eq!(s.forms.transaction_sides(), vec![Some(loan), Some(loan)]);
+}
+
+/// A weekly budget on a ledger's page: the week so far against it, and the
+/// dashboard and commit screen naming it.
+#[test]
+fn a_pace_reads_on_the_ledger_page_dashboard_and_commit_screen() {
+    let mut s = session();
+    let food = s.budget().ledger_by_name("Expenses:Food").unwrap();
+    s.selected_ledger = Some(s.budget().ledgers.uid[food.get()]);
+    let size = egui::vec2(1400.0, 900.0);
+    let has = |texts: &[(String, egui::Rect)], needle: &str| {
+        texts.iter().any(|(t, _)| t.contains(needle))
+    };
+
+    let page = painted_text(size, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| views::ledgers::register(ui, &mut s));
+    });
+    assert!(has(&page, "Target 250.00 a week at most"), "{page:?}");
+    assert!(has(&page, "This week: 180.00 of 250.00"), "{page:?}");
+    assert!(has(&page, "per week"), "the editor shows the unit: {page:?}");
+
+    let dash = painted_text(size, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| views::dashboard::show(ui, &mut s));
+    });
+    assert!(has(&dash, "PACES THIS PERIOD"), "{dash:?}");
+
+    let commit = painted_text(size, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| views::commit::show(ui, &mut s));
+    });
+    assert!(has(&commit, "PACES THIS BREAKS"), "the 300 run, 40 days ago: {commit:?}");
 }

@@ -1293,7 +1293,11 @@ fn targets_and_alerts_are_settings_that_travel_with_the_ledger() {
         .stage(Op::SetLedgerGoals { uid: f.cash, target: None, alerts: vec![low.clone()] })
         .unwrap();
     f.repo
-        .stage(Op::SetLedgerGoals { uid: f.loan, target: Some(Money::ZERO), alerts: vec![] })
+        .stage(Op::SetLedgerGoals {
+            uid: f.loan,
+            target: Some(Target::Balance(Money::ZERO)),
+            alerts: vec![],
+        })
         .unwrap();
     let goals_commit = f.repo.commit("goals").unwrap();
     assert!(goals::fired(f.repo.working()).is_empty());
@@ -1355,7 +1359,11 @@ fn a_view_compares_against_an_earlier_commit() {
     let mut f = fixture();
     f.repo.post("Car", "", d("2024-01-01"), Money::from_major(6_000), f.cash, f.loan).unwrap();
     f.repo
-        .stage(Op::SetLedgerGoals { uid: f.loan, target: Some(Money::ZERO), alerts: vec![] })
+        .stage(Op::SetLedgerGoals {
+            uid: f.loan,
+            target: Some(Target::Balance(Money::ZERO)),
+            alerts: vec![],
+        })
         .unwrap();
     f.repo
         .add_issuer(
@@ -1430,4 +1438,116 @@ fn the_graph_holds_every_branch_children_before_parents() {
     let g = f.repo.graph(None).unwrap();
     assert!(!g.iter().any(|c| c.id == side), "the pre-rebase commit is gone");
     assert_eq!(g.len(), 3, "root, main 1, and side 1 replayed on top");
+}
+
+#[test]
+fn a_balance_target_encodes_as_it_did_before_paces() {
+    let uid = LedgerUid::new();
+    let op = Op::SetLedgerGoals {
+        uid,
+        target: Some(Target::Balance(Money::from_major(5))),
+        alerts: vec![],
+    };
+    let json = serde_json::to_string(&op).unwrap();
+    assert!(json.contains("\"target\":500,"), "a bare amount, as before: {json}");
+    assert_eq!(serde_json::from_str::<Op>(&json).unwrap(), op);
+
+    let pace = Op::SetLedgerGoals {
+        uid,
+        target: Some(Target::Pace {
+            amount: Money::from_major(250),
+            per: Period::Week,
+            bound: Bound::AtMost,
+        }),
+        alerts: vec![],
+    };
+    let json = serde_json::to_string(&pace).unwrap();
+    assert_eq!(serde_json::from_str::<Op>(&json).unwrap(), pace);
+    assert_eq!(
+        pace.summary(),
+        format!("set ledger {} goals: target 250.00 a week at most, 0 alert(s)", uid.short())
+    );
+}
+
+#[test]
+fn a_pace_is_a_target_per_calendar_period() {
+    use ledgit_core::goals::{self, PaceState};
+    let mut f = fixture();
+    let open = d("2024-01-01");
+    let food = f.repo.add_ledger("Expenses:Food", "", Normality::Debit, open).unwrap();
+    let savings = f.repo.add_ledger("Savings", "", Normality::Debit, open).unwrap();
+    let m = Money::from_major;
+    let week = Target::Pace { amount: m(250), per: Period::Week, bound: Bound::AtMost };
+    f.repo.stage(Op::SetLedgerGoals { uid: food, target: Some(week), alerts: vec![] }).unwrap();
+    // 2024-03-04 is a Monday; the 1st is the Friday of the week before.
+    f.repo.post("Groceries", "", d("2024-03-01"), m(200), food, f.cash).unwrap();
+    f.repo.post("Groceries", "", d("2024-03-04"), m(120), food, f.cash).unwrap();
+    f.repo.post("Takeout", "", d("2024-03-06"), m(40), food, f.cash).unwrap();
+    assert!(f.repo.report().unwrap().paces.is_empty(), "both weeks are within 250");
+    f.repo.commit("food").unwrap();
+
+    let l = f.repo.working();
+    let ix = l.ledgers.ix(food).unwrap();
+    let s = goals::pace_status(l, ix, d("2024-03-06")).unwrap();
+    assert_eq!((s.period.start, s.period.end), (d("2024-03-04"), d("2024-03-11")));
+    assert_eq!(s.period.flow, m(160));
+    assert_eq!(s.due_by_now, Money(10_714), "3 days of 7");
+    assert_eq!(s.left(), m(90));
+    assert_eq!(s.state(), PaceState::OffPace, "160 by Wednesday is ahead of 107.14");
+    assert_eq!(goals::pace_status(l, ix, d("2024-03-10")).unwrap().state(), PaceState::OnPace);
+    let weeks: Vec<(Date, Money)> = goals::pace_history(l, ix, Period::Week, d("2024-03-06"), 3)
+        .iter()
+        .map(|p| (p.start, p.flow))
+        .collect();
+    assert_eq!(
+        weeks,
+        vec![(d("2024-02-19"), m(0)), (d("2024-02-26"), m(200)), (d("2024-03-04"), m(160))]
+    );
+
+    // A dinner that tips the week over is in the commit report.
+    f.repo.post("Dinner", "", d("2024-03-08"), m(100), food, f.cash).unwrap();
+    let r = f.repo.report().unwrap();
+    assert_eq!(r.paces.len(), 1);
+    let b = r.paces[0];
+    assert_eq!(
+        (b.start, b.before, b.after, b.bound),
+        (d("2024-03-04"), m(160), m(260), Bound::AtMost)
+    );
+    f.repo.commit("dinner").unwrap();
+    let l = f.repo.working();
+    let s = goals::pace_status(l, ix, d("2024-03-08")).unwrap();
+    assert_eq!((s.state(), s.over(), s.left()), (PaceState::Over, m(10), m(0)));
+
+    // A floor: met once the month's contributions reach it.
+    let habit = Target::Pace { amount: m(500), per: Period::Month, bound: Bound::AtLeast };
+    f.repo.stage(Op::SetLedgerGoals { uid: savings, target: Some(habit), alerts: vec![] }).unwrap();
+    f.repo.post("Save", "", d("2024-03-01"), m(300), savings, f.cash).unwrap();
+    let l = f.repo.working();
+    let six = l.ledgers.ix(savings).unwrap();
+    let s = goals::pace_status(l, six, d("2024-03-20")).unwrap();
+    assert_eq!((s.state(), s.left()), (PaceState::OffPace, m(200)), "322.58 due by the 20th");
+    f.repo.post("Save", "", d("2024-03-15"), m(200), savings, f.cash).unwrap();
+    let s = goals::pace_status(f.repo.working(), six, d("2024-03-20")).unwrap();
+    assert_eq!(s.state(), PaceState::Met);
+    f.repo.commit("saving").unwrap();
+    // Taking some back out breaks a month that had met it.
+    f.repo.post("Oops", "", d("2024-03-18"), m(50), f.cash, savings).unwrap();
+    let r = f.repo.report().unwrap();
+    assert_eq!(r.paces.len(), 1);
+    assert_eq!((r.paces[0].bound, r.paces[0].after), (Bound::AtLeast, m(450)));
+    f.repo.clear_stage().unwrap();
+
+    // A bucket adds its members' paces in one unit, over the calendar month.
+    let spend = f.repo.add_bucket("Spending", "").unwrap();
+    for ledger in [food, f.cash] {
+        f.repo.stage(Op::AddToBucket { bucket: spend, ledger }).unwrap();
+    }
+    let l = f.repo.working();
+    let p = goals::bucket_paces(l, spend, RollUp::Sum, Period::Month, d("2024-03-08")).unwrap();
+    assert_eq!((p.members, p.lines.len(), p.bound), (2, 1, Some(Bound::AtMost)));
+    assert_eq!((p.start, p.end), (d("2024-03-01"), d("2024-04-01")));
+    assert_eq!(p.amount, Money(108_703), "250 a week is 1,087.03 a month");
+    assert_eq!(p.flow, m(460), "all of March's food");
+    // A pace is no balance to draw a line at, nor to add into a bucket's.
+    assert!(goals::bucket_targets(l, spend, RollUp::Sum).unwrap().lines.is_empty());
 }

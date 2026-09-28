@@ -295,11 +295,19 @@ zero produces no entry that time; the issuer still advances.
 
 ## Targets and alerts
 
-`SetLedgerGoals { uid, target, alerts }` replaces a ledger's target balance
-and its alerts (below/above a level, with a message). Both are about the
-balance as displayed, so a loan's target of 0 means "paid off". A target has
-no direction: it is reached going whichever way the balance has to travel
-from where it stands.
+`SetLedgerGoals { uid, target, alerts }` replaces a ledger's target and its
+alerts (below/above a level, with a message). Both are about the balance as
+displayed, so a loan's target of 0 means "paid off".
+
+A `Target` is a `Balance` or a `Pace { amount, per, bound }`. A balance
+target has no direction: it is reached going whichever way the balance has
+to travel from where it stands. A pace is a target with a time dimension -
+"250 a week at most" on groceries, "500 a month at least" into savings - and
+so needs a `Bound`, because nothing about either ledger says which way is
+good. It is judged per *calendar* period (`Period::start_of`), never a
+rolling window. `Target` is `#[serde(untagged)]` and a balance encodes as the
+bare amount, exactly as `target` did before paces existed, so every earlier
+commit decodes and hashes unchanged.
 
 They are read, never stored as results: `goals::fired` for the alert list,
 `goals::newly_fired(base, after)` for "this commit sets off...", the view
@@ -307,7 +315,16 @@ series (`target`, `target_reached`, `alerts_ahead`) for the simulation, and
 `goals::bucket_targets` for a bucket's combined target - over only the
 members that have one, on both sides, so progress is never mixed with money
 nobody set a goal for. A view's total or bucket line gets a target only when
-every ledger in it has one.
+every ledger in it has one. Paces never enter those balance sums.
+
+Paces have their own readings: `goals::pace_status` / `goals::paces` for the
+period today falls in (with the pace's pro-rata share of the days gone, so a
+budget can be "ahead of pace" before it is over), `goals::pace_history` for
+the periods before it, `goals::newly_broken(base, after, touched)` for "this
+commit breaks..." - judged only in the periods the staged entries land in -
+and `goals::bucket_paces`, which converts members' paces to one unit by
+average lengths (`period::convert`) and compares them with the calendar
+period.
 
 Comparing a view with an earlier commit (`view::compare`) evaluates the same
 spec against `Repo::budget_at(commit)` over the same window and the same

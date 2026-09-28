@@ -82,6 +82,10 @@ pub struct ChangeReport {
     /// Alerts the staged changes set off: past their level afterwards, and
     /// not before. Ledger rows index the working budget.
     pub alerts: Vec<crate::goals::FiredAlert>,
+    /// Paces the staged entries break: periods that kept to their ledger's
+    /// pace before and do not afterwards. Ledger rows index the working
+    /// budget.
+    pub paces: Vec<crate::goals::PaceBreach>,
 }
 
 /// A staged op that no longer applies - say a transaction whose staged
@@ -115,6 +119,16 @@ pub fn build(base: &Budget, staged: &[Op]) -> Result<ChangeReport> {
         lines: staged.iter().map(|o| o.summary()).collect(),
         balanced: after.is_balanced(),
         alerts: crate::goals::newly_fired(base, &after),
+        paces: crate::goals::newly_broken(
+            base,
+            &after,
+            staged.iter().flat_map(|op| match op {
+                Op::PostTransaction { legs, date, .. } => {
+                    legs.iter().map(|g| (g.ledger, *date)).collect()
+                }
+                _ => Vec::new(),
+            }),
+        ),
         ..Default::default()
     };
 

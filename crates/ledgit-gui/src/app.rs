@@ -96,6 +96,8 @@ pub struct Session {
     pub bucket_roll: RollUp,
     /// Show the selected bucket's members' targets added up.
     pub bucket_targets: bool,
+    /// The unit a bucket's members' paces are added up in.
+    pub bucket_pace_per: Period,
     /// Buckets being totalled together on the Buckets screen, in the order
     /// picked so the formula reads the way it was built. Empty means the
     /// screen is showing a single bucket instead.
@@ -187,6 +189,7 @@ impl Session {
             collapsed: Default::default(),
             bucket_roll: RollUp::ByNormality,
             bucket_targets: false,
+            bucket_pace_per: Period::Month,
             bucket_combo: Vec::new(),
             tx_from: String::new(),
             tx_to: String::new(),

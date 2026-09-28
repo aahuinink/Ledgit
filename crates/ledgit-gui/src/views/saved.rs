@@ -1108,7 +1108,7 @@ fn timeline(ui: &mut Ui, r: &ViewReport) {
         });
 }
 
-fn period_label(p: Period, start: Date) -> String {
+pub(crate) fn period_label(p: Period, start: Date) -> String {
     match p {
         Period::Month => date_label(start),
         Period::Year => start.year().to_string(),

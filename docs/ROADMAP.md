@@ -30,7 +30,7 @@ Context you would otherwise have to rediscover:
   `Op` - plain, serialisable data. If a fix tempts you to add a closure, a
   delete operation for a ledger/transaction/issuer, or a derived table in
   SQLite, it is the wrong fix. `docs/ARCHITECTURE.md` says why.
-- **Keep it green.** 195 tests and `cargo clippy --all-targets` clean, and
+- **Keep it green.** 200 tests and `cargo clippy --all-targets` clean, and
   `cargo fmt` applied. A GUI fix that needs a new behaviour usually wants a
   case added to `smoke.rs`.
 
@@ -233,6 +233,15 @@ broken staged entry.
    lines draw dotted under the current ones, and a table shows each line
    then and now, including how much sooner or later it reaches its target.
    CLI: `ledgit view show NAME --compare REV`.
+7. **Paces: targets with a time dimension.** The target editor's unit picks
+   "balance" or "per day/week/month/year", with "at most" (a budget) or "at
+   least" (a habit). The ledger page shows the current period against it
+   with a progress bar and whether it is ahead of or behind pace, how often
+   it was kept, and a table of past periods. The Dashboard lists every pace
+   ("PACES THIS PERIOD"), the Commit screen lists the ones the staged entries
+   break, and Buckets' "Aggregate targets" adds members' paces up in a unit
+   you pick. CLI: `ledgit ledger goals X --target 250 --per week
+   [--at-least]`; `ledgit status` shows both.
 
 ### Worth knowing
 
@@ -245,6 +254,10 @@ broken staged entry.
   daily-average-balance interest, which is what some banks charge.
 - A bucket or view total gets a target line only when every ledger in it has
   a target; the Buckets screen's aggregate uses just the members that do.
+- A ledger has one target: a balance *or* a pace, not both. A pace is judged
+  on calendar periods (weeks from Monday), and a bucket's combined pace
+  converts weekly budgets to months by average length (about 4.35 weeks), so
+  it will not match a month that happens to hold five Mondays.
 
 ## Done
 

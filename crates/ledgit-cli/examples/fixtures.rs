@@ -308,17 +308,24 @@ fn household(repo: &mut Budget, today: Date) -> R {
 
     // Targets and alerts. Every debt has a target, so the Debt bucket and
     // the Debt payoff view's total get one too; chequing's alert fires now
-    // and then as the card is paid.
+    // and then as the card is paid. Food has paces: groceries a weekly
+    // budget the bigger shops break, restaurants a monthly one.
     let alert = |when, level: i64, message: &str| Alert {
         when,
         level: Money::from_major(level),
         message: message.into(),
     };
+    let balance = |n: i64| Some(Target::Balance(Money::from_major(n)));
+    let at_most = |n: i64, per| {
+        Some(Target::Pace { amount: Money::from_major(n), per, bound: Bound::AtMost })
+    };
     for (uid, target, alerts) in [
-        (b.car_loan, Some(0), vec![]),
-        (b.mortgage, Some(0), vec![]),
-        (b.card, Some(0), vec![alert(AlertWhen::Above, 3_000, "Pay the card down")]),
-        (b.emergency, Some(15_000), vec![]),
+        (b.car_loan, balance(0), vec![]),
+        (b.mortgage, balance(0), vec![]),
+        (b.card, balance(0), vec![alert(AlertWhen::Above, 3_000, "Pay the card down")]),
+        (b.emergency, balance(15_000), vec![]),
+        (b.groceries, at_most(180, Period::Week), vec![]),
+        (b.restaurants, at_most(150, Period::Month), vec![]),
         (
             b.chequing,
             None,
@@ -328,7 +335,7 @@ fn household(repo: &mut Budget, today: Date) -> R {
             ],
         ),
     ] {
-        repo.stage(Op::SetLedgerGoals { uid, target: target.map(Money::from_major), alerts })?;
+        repo.stage(Op::SetLedgerGoals { uid, target, alerts })?;
     }
 
     let bills = repo.add_cohort("Bills", "the ones that must be paid")?;

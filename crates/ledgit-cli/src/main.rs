@@ -180,15 +180,25 @@ enum LedgerCmd {
     /// `ledgit ledger move Wedding Events:Wedding`. Buckets that include the
     /// subtree follow it. Only names change; no money moves.
     Move { from: String, to: String },
-    /// Set a ledger's target balance and alerts, replacing what it had.
+    /// Set a ledger's target - a balance, or a pace per week, month, ... -
+    /// and alerts, replacing what it had.
     ///
     ///   ledgit ledger goals "Car Loan" --target 0
+    ///   ledgit ledger goals Expenses:Food --target 250 --per week
+    ///   ledgit ledger goals Savings --target 500 --per month --at-least
     ///   ledgit ledger goals Chequing --below "500:Top up from savings" --above 20000
     Goals {
         ledger: String,
-        /// The balance you are aiming for, as displayed.
+        /// The balance you are aiming for, as displayed - or with --per, how
+        /// far it may move in each calendar period.
         #[arg(long, conflicts_with = "no_target")]
         target: Option<String>,
+        /// Make the target a pace: day, week (from Monday), month or year.
+        #[arg(long, requires = "target")]
+        per: Option<String>,
+        /// A pace to reach rather than stay under: savings, not spending.
+        #[arg(long, requires = "per")]
+        at_least: bool,
         #[arg(long)]
         no_target: bool,
         /// Alert when the balance drops below AMOUNT[:MESSAGE]. Repeatable.
@@ -674,12 +684,22 @@ fn run(cli: Cli) -> Result<()> {
 
 fn ledger_cmd(repo: &mut Repo<SqliteStore>, cmd: LedgerCmd) -> Result<()> {
     match cmd {
-        LedgerCmd::Goals { ledger, target, no_target, below, above } => {
+        LedgerCmd::Goals { ledger, target, per, at_least, no_target, below, above } => {
             let l = repo.working();
             let uid = resolve::ledger(l, &ledger)?;
             let ix = l.ledgers.ix(uid).expect("just resolved");
             let target = match (target, no_target) {
-                (Some(t), _) => Some(resolve::amount(l, &t)?),
+                (Some(t), _) => {
+                    let amount = resolve::amount(l, &t)?;
+                    Some(match per {
+                        None => Target::Balance(amount),
+                        Some(p) => Target::Pace {
+                            amount,
+                            per: resolve::period(&p)?,
+                            bound: if at_least { Bound::AtLeast } else { Bound::AtMost },
+                        },
+                    })
+                }
                 (None, true) => None,
                 (None, false) => l.ledgers.target[ix.get()],
             };

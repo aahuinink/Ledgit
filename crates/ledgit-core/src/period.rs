@@ -139,7 +139,17 @@ pub fn per_period(amount: Money, schedule: Schedule, period: Period) -> Option<M
     Some(Money(div_round(num, den) as i64))
 }
 
-fn div_round(num: i128, den: i128) -> i128 {
+/// `amount` a `from`, as an average amount a `to`: $250 a week is
+/// $1,087.04 a month. Same exact arithmetic as [`per_period`].
+pub fn convert(amount: Money, from: Period, to: Period) -> Money {
+    let (f_num, f_den) = from.days();
+    let (t_num, t_den) = to.days();
+    let num = amount.0 as i128 * f_den as i128 * t_num as i128;
+    let den = f_num as i128 * t_den as i128;
+    Money(div_round(num, den) as i64)
+}
+
+pub(crate) fn div_round(num: i128, den: i128) -> i128 {
     let q = num / den;
     let r = num % den;
     if 2 * r.abs() >= den.abs() {
@@ -292,6 +302,18 @@ mod tests {
     #[test]
     fn once_has_no_rate() {
         assert_eq!(per_period(Money::from_major(5), Schedule::Once, Period::Month), None);
+    }
+
+    #[test]
+    fn converting_a_pace_between_units_uses_the_same_averages() {
+        let food = Money::from_major(250);
+        assert_eq!(convert(food, Period::Week, Period::Week), food);
+        assert_eq!(convert(food, Period::Week, Period::Day), Money(3_571));
+        // 250 * 30.436875 / 7 = 1087.0313 -> $1,087.03
+        assert_eq!(convert(food, Period::Week, Period::Month), Money(108_703));
+        let rent = Money::from_major(1_450);
+        assert_eq!(convert(rent, Period::Month, Period::Year), Money::from_major(17_400));
+        assert_eq!(convert(Money::from_major(17_400), Period::Year, Period::Month), rent);
     }
 
     #[test]

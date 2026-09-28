@@ -42,6 +42,12 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
             ui.add_space(4.0);
             super::goals::fired_list(ui, s, &report.alerts);
         }
+        if !report.paces.is_empty() {
+            ui.add_space(14.0);
+            ui.label(RichText::new("PACES THIS BREAKS").small().color(fmt::dim()));
+            ui.add_space(4.0);
+            super::goals::breach_list(ui, s, &report.paces);
+        }
         ui.add_space(18.0);
         commit_box(ui, s, &report);
     });

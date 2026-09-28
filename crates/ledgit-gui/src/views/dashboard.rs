@@ -26,6 +26,7 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         pending_banner(ui, s);
         alerts(ui, s);
+        paces(ui, s);
         bucket_tiles(ui, s);
         ui.add_space(16.0);
         ui.columns(2, |cols| {
@@ -44,6 +45,19 @@ fn alerts(ui: &mut Ui, s: &mut Session) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.label(RichText::new("ALERTS").small().color(fmt::dim()));
         super::goals::fired_list(ui, s, &fired);
+    });
+    ui.add_space(12.0);
+}
+
+/// Every pace and how its week, month, ... is going.
+fn paces(ui: &mut Ui, s: &mut Session) {
+    let paces = ledgit_core::goals::paces(s.budget(), Date::today_utc());
+    if paces.is_empty() {
+        return;
+    }
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.label(RichText::new("PACES THIS PERIOD").small().color(fmt::dim()));
+        super::goals::pace_list(ui, s, &paces);
     });
     ui.add_space(12.0);
 }
