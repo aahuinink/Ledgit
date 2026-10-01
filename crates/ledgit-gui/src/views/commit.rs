@@ -76,14 +76,11 @@ fn summary(ui: &mut Ui, r: &ChangeReport) {
                 &format!("+{} / -{}", r.new_buckets, r.deleted_buckets),
                 "views only",
             );
-            if r.new_cohorts + r.deleted_cohorts + r.new_views + r.deleted_views > 0 {
+            if r.new_views + r.deleted_views > 0 {
                 tile(
                     ui,
-                    "cohorts / views",
-                    &format!(
-                        "+{} / -{}  \u{b7}  +{} / -{}",
-                        r.new_cohorts, r.deleted_cohorts, r.new_views, r.deleted_views
-                    ),
+                    "views",
+                    &format!("+{} / -{}", r.new_views, r.deleted_views),
                     "readings only",
                 );
             }
@@ -198,7 +195,6 @@ fn editable(op: &Op) -> bool {
             | Op::PostTransaction { .. }
             | Op::CreateIssuer { .. }
             | Op::CreateBucket { .. }
-            | Op::CreateCohort { .. }
             | Op::CreateView { .. }
     )
 }

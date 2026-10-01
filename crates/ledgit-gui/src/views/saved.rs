@@ -14,6 +14,7 @@ use crate::picker::{Pick, Picker};
 use crate::table::{figures, text, Height, Table};
 use egui::{Color32, ComboBox, RichText, Ui};
 use egui_plot::{GridInput, GridMark, HLine, Line, LineStyle, Plot, VLine};
+use ledgit_core::id::IssuerIx;
 use ledgit_core::prelude::*;
 use ledgit_core::view;
 use ledgit_plot::{date_ticks, money_short, MAX_SERIES, SERIES_DARK, SERIES_LIGHT};
@@ -196,6 +197,17 @@ fn detail(ui: &mut Ui, s: &mut Session) {
         .show(ui, |ui| timeline(ui, &report));
     notes(ui, l, &report);
 
+    // When the issuers in the flow table fall due. A view with no flows has
+    // nothing to put on a calendar.
+    let issuers: Vec<IssuerIx> = report.flows.iter().map(|f| f.issuer).collect();
+    if !issuers.is_empty() {
+        ui.add_space(10.0);
+        egui::CollapsingHeader::new("Calendar")
+            .id_salt(("view_calendar", uid))
+            .default_open(false)
+            .show(ui, |ui| super::calendar::calendar(ui, s, "view", &issuers));
+    }
+
     s.view_draft = Some((uid, spec));
     for a in actions {
         match a {
@@ -348,24 +360,6 @@ fn editor(ui: &mut Ui, l: &Budget, spec: &mut ViewSpec) {
         });
     });
 
-    field(ui, "Cohorts", "", |ui| {
-        let live: Vec<_> = l.cohorts.live().collect();
-        if live.is_empty() {
-            ui.label(RichText::new("none yet").color(fmt::dim()));
-            return;
-        }
-        chips(ui, "cohorts", |ui| {
-            for c in live {
-                toggle_chip(
-                    ui,
-                    &mut spec.cohorts,
-                    l.cohorts.uid[c.get()],
-                    &l.cohorts.name[c.get()],
-                );
-            }
-        });
-    });
-
     field(
         ui,
         "Past transactions",
@@ -421,12 +415,8 @@ fn editor(ui: &mut Ui, l: &Budget, spec: &mut ViewSpec) {
         ui.horizontal_wrapped(|ui| {
             ui.radio_value(&mut spec.only_selected_issuers, false, "every running issuer")
                 .on_hover_text("What will actually happen.");
-            ui.radio_value(
-                &mut spec.only_selected_issuers,
-                true,
-                "only this view's issuers and cohorts",
-            )
-            .on_hover_text("What if these were all that happened?");
+            ui.radio_value(&mut spec.only_selected_issuers, true, "only this view's issuers")
+                .on_hover_text("What if these were all that happened?");
         });
     });
 }
@@ -1041,9 +1031,6 @@ fn flows(ui: &mut Ui, r: &ViewReport) {
             if f.effect.is_some_and(|e| e.is_zero()) {
                 notes.push("does not move this view's money".to_string());
             }
-            if !f.via.is_empty() {
-                notes.push(format!("via {}", f.via.join(", ")));
-            }
             ui.label(RichText::new(notes.join("; ")).small().color(fmt::dim()));
         });
     });
@@ -1130,11 +1117,10 @@ fn notes(ui: &mut Ui, l: &Budget, r: &ViewReport) {
             l.ledgers.name[ix.get()]
         ));
     }
-    if !r.missing_buckets.is_empty() || !r.missing_cohorts.is_empty() {
+    if !r.missing_buckets.is_empty() {
         notes.push(format!(
-            "{} bucket(s) and {} cohort(s) this view names no longer exist on this branch.",
-            r.missing_buckets.len(),
-            r.missing_cohorts.len()
+            "{} bucket(s) this view names no longer exist on this branch.",
+            r.missing_buckets.len()
         ));
     }
     if !notes.is_empty() {

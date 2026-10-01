@@ -654,10 +654,12 @@ impl CommitIfNeeded for Repo<MemStore> {
     }
 }
 
-/// `combine` is the answer to "can buckets contain other buckets": they cannot,
-/// but several can be totalled together at read time.
-mod combining_buckets {
+/// A view's buckets are the answer to "can buckets contain other buckets":
+/// they cannot, but a view can total several of them, adding some and
+/// subtracting others.
+mod views_over_buckets {
     use super::*;
+    use ledgit_core::view::{self, ViewReport};
 
     struct Combo {
         repo: Repo<MemStore>,
@@ -692,8 +694,14 @@ mod combining_buckets {
         Combo { repo, cash, owed, chequing, savings, receivable }
     }
 
+    fn eval(c: &Combo, terms: &[Term], roll: RollUp) -> ViewReport {
+        let spec = ViewSpec { buckets: terms.to_vec(), roll, ..ViewSpec::default() };
+        view::evaluate(c.repo.working(), &spec, d("2024-06-01"))
+    }
+
+    /// The view's total today.
     fn total(c: &Combo, terms: &[Term]) -> Money {
-        combine(c.repo.working(), terms, RollUp::ByNormality, LedgerSort::Name, Order::Asc).total
+        eval(c, terms, RollUp::ByNormality).series[0].now
     }
 
     #[test]
@@ -715,18 +723,11 @@ mod combining_buckets {
         }
         c.repo.commit("overlap").unwrap();
 
-        let combined = combine(
-            c.repo.working(),
-            &[Term::plus(c.cash), Term::plus(liquid)],
-            RollUp::ByNormality,
-            LedgerSort::Name,
-            Order::Asc,
-        );
         // Chequing 3,000 + Savings 7,000 + Receivable 2,000, with Chequing
         // counted once despite being in both buckets.
-        assert_eq!(combined.total, Money::from_major(12_000));
-        assert_eq!(combined.lines.len(), 3);
-        assert!(combined.cancelled.is_empty());
+        let r = eval(&c, &[Term::plus(c.cash), Term::plus(liquid)], RollUp::ByNormality);
+        assert_eq!(r.series[0].now, Money::from_major(12_000));
+        assert!(r.cancelled.is_empty());
     }
 
     #[test]
@@ -736,20 +737,12 @@ mod combining_buckets {
         c.repo.stage(Op::AddToBucket { bucket: c.owed, ledger: c.savings }).unwrap();
         c.repo.commit("overlap both ways").unwrap();
 
-        let combined = combine(
-            c.repo.working(),
-            &[Term::plus(c.cash), Term::minus(c.owed)],
-            RollUp::ByNormality,
-            LedgerSort::Name,
-            Order::Asc,
-        );
         // Chequing 3,000 - Receivable 2,000. Savings appears on both sides and
         // contributes nothing rather than being counted twice.
-        assert_eq!(combined.total, Money::from_major(1_000));
-        assert_eq!(combined.cancelled.len(), 1);
-        assert_eq!(combined.cancelled[0].name, "Savings");
-        assert_eq!(combined.cancelled[0].contribution, Money(0));
-        assert!(combined.lines.iter().all(|l| l.name != "Savings"));
+        let r = eval(&c, &[Term::plus(c.cash), Term::minus(c.owed)], RollUp::ByNormality);
+        assert_eq!(r.series[0].now, Money::from_major(1_000));
+        let l = c.repo.working();
+        assert_eq!(r.cancelled, vec![l.ledgers.ix(c.savings).unwrap()]);
     }
 
     #[test]
@@ -758,9 +751,8 @@ mod combining_buckets {
         let l = c.repo.working();
         for roll in [RollUp::ByNormality, RollUp::Sum] {
             let rolled = roll_up(l, c.cash, roll, LedgerSort::Name, Order::Asc).unwrap();
-            let combined = combine(l, &[Term::plus(c.cash)], roll, LedgerSort::Name, Order::Asc);
-            assert_eq!(rolled.total, combined.total, "{roll:?}");
-            assert_eq!(rolled.lines, combined.lines, "{roll:?}");
+            let r = eval(&c, &[Term::plus(c.cash)], roll);
+            assert_eq!(rolled.total, r.series[0].now, "{roll:?}");
         }
     }
 
@@ -771,28 +763,26 @@ mod combining_buckets {
         c.repo.stage(Op::DeleteBucket { uid: c.owed }).unwrap();
         c.repo.commit("drop receivables").unwrap();
 
-        let combined =
-            combine(c.repo.working(), &terms, RollUp::ByNormality, LedgerSort::Name, Order::Asc);
         // The surviving term still totals, but the caller can say why the
         // number moved instead of quietly showing cash as the whole answer.
-        assert_eq!(combined.total, Money::from_major(10_000));
-        assert_eq!(combined.missing, vec![c.owed]);
+        let r = eval(&c, &terms, RollUp::ByNormality);
+        assert_eq!(r.series[0].now, Money::from_major(10_000));
+        assert_eq!(r.missing_buckets, vec![c.owed]);
     }
 
     #[test]
-    fn no_terms_is_an_empty_total_not_a_panic() {
+    fn no_buckets_is_an_empty_view_not_a_panic() {
         let c = combo();
-        let combined =
-            combine(c.repo.working(), &[], RollUp::ByNormality, LedgerSort::Name, Order::Asc);
-        assert_eq!(combined.total, Money(0));
-        assert!(combined.lines.is_empty());
+        let r = eval(&c, &[], RollUp::ByNormality);
+        assert!(!r.directed);
+        assert!(r.series.is_empty());
     }
 }
 
-// ------------------------------------------------------- cohorts and views
+// ------------------------------------------------------------------- views
 
 #[test]
-fn cohorts_and_views_are_versioned_like_buckets() {
+fn views_are_versioned_like_buckets() {
     let mut f = fixture();
     let open = d("2024-01-01");
     let loan_pay = f
@@ -807,8 +797,6 @@ fn cohorts_and_views_are_versioned_like_buckets() {
             open,
         )
         .unwrap();
-    let debts = f.repo.add_cohort("Debts", "").unwrap();
-    f.repo.stage(Op::AddToCohort { cohort: debts, issuer: loan_pay }).unwrap();
     let net = f.repo.add_bucket("Net Worth", "").unwrap();
     f.repo.stage(Op::AddToBucket { bucket: net, ledger: f.cash }).unwrap();
     let view = f
@@ -818,14 +806,14 @@ fn cohorts_and_views_are_versioned_like_buckets() {
             "",
             ViewSpec {
                 buckets: vec![Term::plus(net)],
-                cohorts: vec![debts],
+                issuers: vec![loan_pay],
                 ..ViewSpec::default()
             },
         )
         .unwrap();
 
     let report = f.repo.report().unwrap();
-    assert_eq!((report.new_cohorts, report.new_views), (1, 1));
+    assert_eq!((report.new_buckets, report.new_views), (1, 1));
     f.repo.commit("track the car loan").unwrap();
 
     // A branch where the view looks further ahead does not change trunk's.
@@ -839,18 +827,18 @@ fn cohorts_and_views_are_versioned_like_buckets() {
     f.repo.checkout(DEFAULT_BRANCH).unwrap();
     assert_eq!(f.repo.working().views.get(ix_of(&f, view)).spec.horizon, Span::Months(12));
 
-    // Deleting the cohort and the view, then reverting, brings both back whole.
-    f.repo.stage(Op::DeleteCohort { uid: debts }).unwrap();
+    // Deleting the bucket and the view, then reverting, brings both back whole.
+    f.repo.stage(Op::DeleteBucket { uid: net }).unwrap();
     f.repo.stage(Op::DeleteView { uid: view }).unwrap();
     f.repo.commit("tidy up").unwrap();
-    assert!(f.repo.working().cohorts.is_empty());
+    assert!(f.repo.working().buckets.is_empty());
     assert!(f.repo.working().views.is_empty());
     f.repo.revert("HEAD").unwrap();
     f.repo.commit("undo tidy up").unwrap();
     let w = f.repo.working();
-    let c = w.cohorts.ix(debts).expect("cohort restored");
-    assert_eq!(w.cohorts.get(c, &w.issuers).members, vec![loan_pay]);
-    assert_eq!(w.views.get(ix_of(&f, view)).spec.cohorts, vec![debts]);
+    let b = w.buckets.ix(net).expect("bucket restored");
+    assert_eq!(w.buckets.members[b.get()], vec![w.ledgers.ix(f.cash).unwrap()]);
+    assert_eq!(w.views.get(ix_of(&f, view)).spec.issuers, vec![loan_pay]);
 }
 
 fn ix_of(f: &Fixture, view: ViewUid) -> ledgit_core::id::ViewIx {

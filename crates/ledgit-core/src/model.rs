@@ -2,7 +2,7 @@
 //! bucket *are*, independent of how they are stored or versioned.
 
 use crate::date::{days_in_month, Date};
-use crate::id::{BucketUid, CohortUid, IssuerUid, LedgerUid, TxUid, ViewUid};
+use crate::id::{BucketUid, IssuerUid, LedgerUid, TxUid, ViewUid};
 use crate::money::Money;
 use crate::period::{Period, Span};
 use crate::query::{RollUp, Term, TxFilter};
@@ -363,15 +363,6 @@ pub struct Bucket {
     pub subtrees: Vec<String>,
 }
 
-/// A read-only snapshot of one cohort: a bucket, but of issuers.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Cohort {
-    pub uid: CohortUid,
-    pub name: String,
-    pub description: String,
-    pub members: Vec<IssuerUid>,
-}
-
 /// What a saved view looks at, and over how much time.
 ///
 /// Plain data, like every other thing in an op. A view names entities by uid,
@@ -379,9 +370,8 @@ pub struct Cohort {
 /// same saved view keeps meaning "the last six months and the next year"
 /// whenever it is opened.
 ///
-/// Buckets and cohorts can be deleted after a view names them; evaluating the
-/// view then reports them as missing rather than failing, exactly as
-/// `query::combine` does for a combination.
+/// Buckets can be deleted after a view names them; evaluating the view then
+/// reports them as missing rather than failing.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ViewSpec {
@@ -394,8 +384,6 @@ pub struct ViewSpec {
     pub ledgers: Vec<LedgerUid>,
     /// Issuers whose flow the view breaks down.
     pub issuers: Vec<IssuerUid>,
-    /// Cohorts whose members' flow the view breaks down.
-    pub cohorts: Vec<CohortUid>,
     /// Which past transactions count as the view's actual history. Empty
     /// means every transaction that moves the scope.
     pub transactions: Vec<TxFilter>,
@@ -406,7 +394,7 @@ pub struct ViewSpec {
     pub lookback: Span,
     /// How far ahead to simulate.
     pub horizon: Span,
-    /// Simulate only the view's own issuers and cohorts rather than every
+    /// Simulate only the view's own issuers rather than every
     /// active issuer. Off, the projected balances are what will actually
     /// happen; on, they answer "what if these were all that happened?"
     pub only_selected_issuers: bool,
@@ -418,7 +406,6 @@ impl Default for ViewSpec {
             buckets: Vec::new(),
             ledgers: Vec::new(),
             issuers: Vec::new(),
-            cohorts: Vec::new(),
             transactions: Vec::new(),
             roll: RollUp::ByNormality,
             period: Period::Month,

@@ -1,19 +1,15 @@
-//! Cohorts: buckets for issuers.
+//! Dues: what the issuers cost, and when they land.
 //!
-//! A bucket answers "how much is in these ledgers?"; a cohort answers "what
-//! do these recurring payments cost, and when do they land?". Two reads cover
-//! that, and both work on any list of issuers, so a saved view can ask them
-//! of its own selection without a cohort existing:
+//! Two reads, both over any list of issuers - every issuer in the budget, or
+//! the ones a saved view breaks down:
 //!
 //! * [`rate_lines`] - each issuer's cost per day, week, month or year, and
-//!   [`CohortBreakdown`] to total them;
+//!   [`total`] / [`paused_total`] to add them up;
 //! * [`calendar`] - every date each issuer falls due in a window, marked as
 //!   already posted, overdue, upcoming or paused.
-//!
-//! Like buckets, cohorts are flat: they hold issuers, never other cohorts.
 
 use crate::date::Date;
-use crate::id::{CohortUid, IssuerIx};
+use crate::id::IssuerIx;
 use crate::model::Schedule;
 use crate::money::Money;
 use crate::period::{per_period, Period};
@@ -66,34 +62,15 @@ pub fn rate_lines(l: &Budget, issuers: &[IssuerIx]) -> Vec<RateLine> {
     lines
 }
 
-/// A cohort's members and what they add up to.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct CohortBreakdown {
-    pub uid: CohortUid,
-    pub name: String,
-    pub lines: Vec<RateLine>,
+/// The combined rate of the lines that are actually paying: paused issuers
+/// post nothing, and a one-off has no rate to add.
+pub fn total(lines: &[RateLine], period: Period) -> Money {
+    lines.iter().filter(|l| l.is_active()).filter_map(|l| l.rate(period)).sum()
 }
 
-impl CohortBreakdown {
-    /// The combined rate of the members that are actually paying: paused
-    /// issuers post nothing, and a one-off has no rate to add.
-    pub fn total(&self, period: Period) -> Money {
-        self.lines.iter().filter(|l| l.is_active()).filter_map(|l| l.rate(period)).sum()
-    }
-
-    /// What the paused members would add if they were resumed.
-    pub fn paused_total(&self, period: Period) -> Money {
-        self.lines.iter().filter(|l| l.paused).filter_map(|l| l.rate(period)).sum()
-    }
-}
-
-pub fn breakdown(l: &Budget, cohort: CohortUid) -> Option<CohortBreakdown> {
-    let cix = l.cohorts.ix(cohort)?;
-    Some(CohortBreakdown {
-        uid: cohort,
-        name: l.cohorts.name[cix.get()].clone(),
-        lines: rate_lines(l, &l.cohorts.members[cix.get()]),
-    })
+/// What the paused lines would add if they were resumed.
+pub fn paused_total(lines: &[RateLine], period: Period) -> Money {
+    lines.iter().filter(|l| l.paused).filter_map(|l| l.rate(period)).sum()
 }
 
 /// Where one occurrence stands relative to what has been posted and today.
@@ -186,11 +163,10 @@ mod tests {
     }
 
     /// Cash, Rent and Groceries, plus a monthly rent issuer and a weekly
-    /// groceries issuer, both in one cohort.
-    fn fixture() -> (Budget, CohortUid, IssuerUid, IssuerUid) {
+    /// groceries issuer.
+    fn fixture() -> (Budget, IssuerUid, IssuerUid) {
         let (cash, rent_l, food_l) = (LedgerUid::new(), LedgerUid::new(), LedgerUid::new());
         let (rent, food) = (IssuerUid::new(), IssuerUid::new());
-        let cohort = CohortUid::new();
         let mk = |uid, name: &str, n| Op::CreateLedger {
             uid,
             name: name.into(),
@@ -220,39 +196,36 @@ mod tests {
                 start: d(2024, 1, 6),
                 rule: None,
             },
-            Op::CreateCohort { uid: cohort, name: "Living".into(), description: String::new() },
-            Op::AddToCohort { cohort, issuer: rent },
-            Op::AddToCohort { cohort, issuer: food },
         ])
         .unwrap();
-        (l, cohort, rent, food)
+        (l, rent, food)
     }
 
     #[test]
-    fn a_cohort_totals_its_members_per_period() {
-        let (l, cohort, _, _) = fixture();
-        let b = breakdown(&l, cohort).unwrap();
-        assert_eq!(b.lines.len(), 2);
-        assert_eq!(b.lines[0].name, "Groceries", "sorted by name");
-        assert_eq!(b.lines[0].rate(Period::Day), Some(Money::from_major(10)));
+    fn rate_lines_total_per_period() {
+        let (l, _, _) = fixture();
+        let lines = rate_lines(&l, &l.issuers.indices().collect::<Vec<_>>());
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].name, "Groceries", "sorted by name");
+        assert_eq!(lines[0].rate(Period::Day), Some(Money::from_major(10)));
         // $1,500 + $70/week * 52.1775 weeks / 12 months = 1500 + 304.37
-        assert_eq!(b.total(Period::Month), Money(150_000 + 30_437));
+        assert_eq!(total(&lines, Period::Month), Money(150_000 + 30_437));
     }
 
     #[test]
     fn paused_members_leave_the_total_but_are_still_counted_aside() {
-        let (mut l, cohort, rent, _) = fixture();
+        let (mut l, rent, _) = fixture();
         l.apply(&Op::SetIssuerPaused { uid: rent, paused: true }).unwrap();
-        let b = breakdown(&l, cohort).unwrap();
-        assert_eq!(b.total(Period::Week), Money::from_major(70));
-        assert_eq!(b.paused_total(Period::Month), Money::from_major(1_500));
+        let lines = rate_lines(&l, &l.issuers.indices().collect::<Vec<_>>());
+        assert_eq!(total(&lines, Period::Week), Money::from_major(70));
+        assert_eq!(paused_total(&lines, Period::Month), Money::from_major(1_500));
     }
 
     #[test]
     fn a_calendar_marks_what_is_posted_overdue_and_upcoming() {
-        let (mut l, cohort, rent, _) = fixture();
+        let (mut l, rent, _) = fixture();
         l.apply(&Op::AdvanceIssuer { uid: rent, through: d(2024, 2, 1) }).unwrap();
-        let members = l.cohorts.members[l.cohorts.ix(cohort).unwrap().get()].clone();
+        let members: Vec<IssuerIx> = l.issuers.indices().collect();
         let cal = calendar(&l, &members, d(2024, 2, 1), d(2024, 2, 29), d(2024, 2, 15));
 
         let rent_ix = l.issuers.ix(rent).unwrap();
@@ -277,7 +250,7 @@ mod tests {
 
     #[test]
     fn caught_up_through_is_the_day_before_the_oldest_debt() {
-        let (mut l, _, rent, food) = fixture();
+        let (mut l, rent, food) = fixture();
         // Food never ran: it is owed from 2024-01-06.
         assert_eq!(caught_up_through(&l), Some(d(2023, 12, 31)));
         l.apply(&Op::AdvanceIssuer { uid: rent, through: d(2024, 3, 1) }).unwrap();
@@ -288,14 +261,5 @@ mod tests {
         l.apply(&Op::SetIssuerPaused { uid: food, paused: true }).unwrap();
         assert_eq!(caught_up_through(&l), Some(d(2024, 3, 31)));
         assert_eq!(overdue_issuers(&l, d(2024, 3, 20)), 0);
-    }
-
-    #[test]
-    fn deleting_a_cohort_keeps_its_issuers() {
-        let (mut l, cohort, _, _) = fixture();
-        l.apply(&Op::DeleteCohort { uid: cohort }).unwrap();
-        assert!(breakdown(&l, cohort).is_none());
-        assert_eq!(l.issuers.len(), 2);
-        assert!(l.cohorts.is_empty());
     }
 }

@@ -24,7 +24,7 @@ pub enum Screen {
     Transactions,
     Issuers,
     Buckets,
-    Cohorts,
+    Calendar,
     Views,
     Variables,
     Commit,
@@ -45,7 +45,7 @@ impl Screen {
         (Screen::Transactions, "Transactions"),
         (Screen::Issuers, "Issuers"),
         (Screen::Buckets, "Buckets"),
-        (Screen::Cohorts, "Cohorts"),
+        (Screen::Calendar, "Calendar"),
         (Screen::Views, "Views"),
         (Screen::Variables, "Variables"),
         (Screen::Commit, "Commit"),
@@ -65,7 +65,6 @@ pub struct Session {
     pub search: String,
     pub selected_ledger: Option<LedgerUid>,
     pub selected_bucket: Option<BucketUid>,
-    pub selected_cohort: Option<CohortUid>,
     pub selected_view: Option<ViewUid>,
     pub selected_commit: Option<CommitId>,
     pub commit_message: String,
@@ -98,17 +97,13 @@ pub struct Session {
     pub bucket_targets: bool,
     /// The unit a bucket's members' paces are added up in.
     pub bucket_pace_per: Period,
-    /// Buckets being totalled together on the Buckets screen, in the order
-    /// picked so the formula reads the way it was built. Empty means the
-    /// screen is showing a single bucket instead.
-    pub bucket_combo: Vec<Term>,
     pub tx_from: String,
     pub tx_to: String,
     pub tx_ledger: Option<LedgerUid>,
     pub tx_source: crate::views::transactions::SourceFilter,
-    /// First day of the month the cohort calendar is showing.
+    /// First day of the month the issuer calendar is showing.
     pub calendar_month: Date,
-    /// Show the cohort calendar as a list of payments rather than a month
+    /// Show the issuer calendar as a list of payments rather than a month
     /// grid - the better read for a busy month.
     pub calendar_list: bool,
     /// The selected view's spec as it is being edited. The chart draws from
@@ -170,7 +165,6 @@ impl Session {
             search: String::new(),
             selected_ledger: None,
             selected_bucket: None,
-            selected_cohort: None,
             selected_view: None,
             selected_commit: None,
             commit_message: String::new(),
@@ -190,7 +184,6 @@ impl Session {
             bucket_roll: RollUp::ByNormality,
             bucket_targets: false,
             bucket_pace_per: Period::Month,
-            bucket_combo: Vec::new(),
             tx_from: String::new(),
             tx_to: String::new(),
             tx_ledger: None,
@@ -352,10 +345,6 @@ pub struct LedgitApp {
     /// eframe's storage rather than in the budget - pinning something is not a
     /// fact about your money and has no business in the commit history.
     pins: HashMap<String, Vec<String>>,
-    /// Bucket combinations, per budget file. A combination is a *reading* of
-    /// the budget, not a fact in it, so like pins it lives beside the app and
-    /// never reaches the commit history.
-    combos: HashMap<String, Vec<Term>>,
     recent: Vec<String>,
     /// Last zoom factor, mirrored out of the egui context so `save` can reach
     /// it without a `Context`. Like pins, it is a preference about eyesight,
@@ -386,14 +375,13 @@ impl LedgitApp {
         initial: Option<PathBuf>,
         author: String,
     ) -> LedgitApp {
-        let (pins, combos, recent, zoom) = match cc.storage {
+        let (pins, recent, zoom) = match cc.storage {
             Some(s) => (
                 eframe::get_value(s, "pins").unwrap_or_default(),
-                eframe::get_value(s, "combos").unwrap_or_default(),
                 eframe::get_value(s, "recent").unwrap_or_default(),
                 eframe::get_value(s, "zoom").unwrap_or(1.0),
             ),
-            None => (HashMap::new(), HashMap::new(), Vec::new(), 1.0),
+            None => (HashMap::new(), Vec::new(), 1.0),
         };
         // A stored zoom from an older build could be anything; clamp it rather
         // than trust it, or one bad value leaves the app unreadable on start.
@@ -404,7 +392,6 @@ impl LedgitApp {
             session: None,
             author,
             pins,
-            combos,
             recent,
             zoom,
             startup_error: None,
@@ -446,13 +433,6 @@ impl LedgitApp {
                 // Drop pins for ledgers that are not on this branch.
                 let budget_ledgers: Vec<LedgerUid> = s.budget().ledgers.uid.clone();
                 s.pins.retain(|p| budget_ledgers.contains(p));
-                // Same for a saved combination. `combine` reports a missing
-                // bucket rather than failing, but a term that cannot resolve on
-                // this branch is just noise, so drop it on the way in.
-                let live_buckets: Vec<BucketUid> =
-                    s.budget().buckets.live().map(|ix| s.budget().buckets.uid[ix.get()]).collect();
-                s.bucket_combo = self.combos.get(&key).cloned().unwrap_or_default();
-                s.bucket_combo.retain(|t| live_buckets.contains(&t.bucket));
                 self.recent.retain(|r| *r != key);
                 self.recent.insert(0, key);
                 self.recent.truncate(8);
@@ -523,8 +503,7 @@ impl LedgitApp {
     fn remember_pins(&mut self) {
         if let Some(s) = &self.session {
             let key = s.path.to_string_lossy().to_string();
-            self.pins.insert(key.clone(), s.pins.iter().map(|p| p.to_string()).collect());
-            self.combos.insert(key, s.bucket_combo.clone());
+            self.pins.insert(key, s.pins.iter().map(|p| p.to_string()).collect());
         }
     }
 }
@@ -546,7 +525,6 @@ impl eframe::App for LedgitApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.remember_pins();
         eframe::set_value(storage, "pins", &self.pins);
-        eframe::set_value(storage, "combos", &self.combos);
         eframe::set_value(storage, "recent", &self.recent);
         eframe::set_value(storage, "zoom", &self.zoom);
     }
@@ -623,7 +601,7 @@ impl LedgitApp {
                 Screen::Transactions => views::transactions::show(ui, &mut session),
                 Screen::Issuers => views::issuers::show(ui, &mut session),
                 Screen::Buckets => views::buckets::show(ui, &mut session),
-                Screen::Cohorts => views::cohorts::show(ui, &mut session),
+                Screen::Calendar => views::calendar::show(ui, &mut session),
                 Screen::Views => views::saved::show(ui, &mut session),
                 Screen::Variables => views::variables::show(ui, &mut session),
                 Screen::Commit => views::commit::show(ui, &mut session),
@@ -770,7 +748,6 @@ pub(crate) fn top_bar(
                     (FormKind::Ledger, "Ledger"),
                     (FormKind::Bucket, "Bucket"),
                     (FormKind::Issuer, "Issuer"),
-                    (FormKind::Cohort, "Cohort"),
                     (FormKind::View, "View"),
                 ] {
                     if ui.button(label).clicked() {
@@ -892,8 +869,8 @@ fn file_menu(
 fn freshness(ui: &mut egui::Ui, l: &Budget) {
     let today = Date::today_utc();
     let latest = l.latest_transaction_date();
-    let issuers = ledgit_core::cohort::caught_up_through(l);
-    let overdue = ledgit_core::cohort::overdue_issuers(l, today);
+    let issuers = ledgit_core::dues::caught_up_through(l);
+    let overdue = ledgit_core::dues::overdue_issuers(l, today);
     let mut text = match latest {
         Some(d) => format!("Fresh through {d}"),
         None => "no transactions yet".into(),

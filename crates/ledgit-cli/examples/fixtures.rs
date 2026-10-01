@@ -120,7 +120,7 @@ struct Books {
 }
 
 /// Fifteen months of an ordinary budget: a split paycheque, a mortgage, a car
-/// loan, a credit card, a ledger tree, buckets, cohorts, views, two branches,
+/// loan, a credit card, a ledger tree, buckets, views, two branches,
 /// a reverted mistake, issuers six weeks behind and a few staged edits.
 fn household(repo: &mut Budget, today: Date) -> R {
     use Normality::{Credit as C, Debit as D};
@@ -338,30 +338,11 @@ fn household(repo: &mut Budget, today: Date) -> R {
         repo.stage(Op::SetLedgerGoals { uid, target, alerts })?;
     }
 
-    let bills = repo.add_cohort("Bills", "the ones that must be paid")?;
-    let subs = repo.add_cohort("Subscriptions", "")?;
-    let income = repo.add_cohort("Income", "")?;
-    let saving = repo.add_cohort("Saving", "")?;
-    for (cohort, issuer) in [
-        (bills, mortgage_pay),
-        (bills, car),
-        (bills, hydro_bill),
-        (bills, internet_bill),
-        (bills, prop_tax),
-        (bills, insure),
-        (subs, stream),
-        (subs, gym_fee),
-        (subs, internet_bill),
-        (income, paycheque),
-        (saving, save),
-        (saving, tfsa_contrib),
-        (saving, venue_due),
-        (saving, sweep),
-        (bills, car_apr),
-        (bills, mortgage_apr),
-    ] {
-        repo.stage(Op::AddToCohort { cohort, issuer })?;
-    }
+    // The issuers each view breaks down.
+    let bills =
+        vec![mortgage_pay, car, hydro_bill, internet_bill, prop_tax, insure, car_apr, mortgage_apr];
+    let subs = vec![stream, gym_fee, internet_bill];
+    let saving = vec![save, tfsa_contrib, venue_due, sweep];
 
     let views = [
         (
@@ -380,7 +361,7 @@ fn household(repo: &mut Budget, today: Date) -> R {
             ViewSpec {
                 buckets: vec![Term::plus(debt)],
                 ledgers: vec![b.car_loan, b.mortgage, b.card],
-                cohorts: vec![bills],
+                issuers: bills.clone(),
                 lookback: Span::Months(12),
                 horizon: Span::Years(5),
                 ..ViewSpec::default()
@@ -391,11 +372,33 @@ fn household(repo: &mut Budget, today: Date) -> R {
             "what if only the bills and the paycheque happened",
             ViewSpec {
                 buckets: vec![Term::plus(liquid)],
-                cohorts: vec![bills, income],
+                issuers: [bills.as_slice(), &[paycheque]].concat(),
                 only_selected_issuers: true,
                 period: Period::Week,
                 lookback: Span::Weeks(12),
                 horizon: Span::Weeks(26),
+                ..ViewSpec::default()
+            },
+        ),
+        (
+            "Subscriptions",
+            "what the subscriptions cost, and when they land",
+            ViewSpec {
+                buckets: vec![Term::plus(liquid)],
+                issuers: subs,
+                lookback: Span::Months(6),
+                horizon: Span::Months(6),
+                ..ViewSpec::default()
+            },
+        ),
+        (
+            "Saving",
+            "the savings ledgers, and what feeds or drains them",
+            ViewSpec {
+                ledgers: vec![b.savings, b.emergency, b.tfsa],
+                issuers: saving,
+                lookback: Span::Months(6),
+                horizon: Span::Months(12),
                 ..ViewSpec::default()
             },
         ),
@@ -414,7 +417,7 @@ fn household(repo: &mut Budget, today: Date) -> R {
     for (name, desc, spec) in views {
         repo.add_view(name, desc, spec)?;
     }
-    repo.commit("Buckets, issuers, cohorts and views")?;
+    repo.commit("Buckets, issuers and views")?;
 
     // Month by month, stopping six weeks short of today so the issuers are
     // behind when the file is opened.
@@ -643,7 +646,7 @@ fn stress(repo: &mut Budget, today: Date) -> R {
 
     // A crowded calendar: many issuers due on the 1st and 15th, a daily one,
     // a weekly one, and some paused.
-    let bills = repo.add_cohort("Everything due on the 1st and 15th", "")?;
+    let mut crowded = Vec::new();
     for i in 0..14 {
         let day = if i % 2 == 0 { 1 } else { 15 };
         let uid = repo.add_issuer(
@@ -655,7 +658,7 @@ fn stress(repo: &mut Budget, today: Date) -> R {
             Schedule::MonthlyOn { day, every_n_months: 1 },
             start,
         )?;
-        repo.stage(Op::AddToCohort { cohort: bills, issuer: uid })?;
+        crowded.push(uid);
         if i % 5 == 4 {
             repo.stage(Op::SetIssuerPaused { uid, paused: true })?;
         }
@@ -687,10 +690,7 @@ fn stress(repo: &mut Budget, today: Date) -> R {
         Schedule::MonthlyOn { day: 29, every_n_months: 12 },
         start.add_months(1),
     )?;
-    let all = repo.add_cohort("Daily and weekly", "")?;
-    for issuer in [daily, weekly, big] {
-        repo.stage(Op::AddToCohort { cohort: all, issuer })?;
-    }
+    crowded.extend([daily, weekly, big]);
     let everything = repo.add_bucket("Everything", "every root")?;
     for path in ["Assets", "Expenses", "Deep", "Equity"] {
         repo.stage(Op::AddSubtreeToBucket { bucket: everything, path: path.into() })?;
@@ -703,7 +703,7 @@ fn stress(repo: &mut Budget, today: Date) -> R {
         ViewSpec {
             buckets: vec![Term::plus(everything)],
             ledgers: vec![rich, overdrawn, long, deep, unicode],
-            cohorts: vec![bills, all],
+            issuers: crowded,
             period: Period::Day,
             lookback: Span::Years(2),
             horizon: Span::Years(10),
@@ -711,7 +711,7 @@ fn stress(repo: &mut Budget, today: Date) -> R {
         },
     )?;
     repo.commit(
-        "A commit message long enough to wrap: it lists the issuers, the cohorts, the buckets \
+        "A commit message long enough to wrap: it lists the issuers, the buckets \
          and the view, and then keeps going past the point where any sensible column would \
          have clipped it, just to see what the History screen does with it.",
     )?;

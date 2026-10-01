@@ -412,7 +412,7 @@ fn sort_lines(lines: &mut [BucketLine], a: &LedgerArena, sort: LedgerSort, order
 
 // ------------------------------------------------------ combining buckets
 
-/// Which way a bucket enters a [`Combination`].
+/// Which way a bucket enters a saved view's total.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum Sign {
     #[default]
@@ -420,17 +420,7 @@ pub enum Sign {
     Minus,
 }
 
-impl Sign {
-    /// `-1` or `+1`, for multiplying a contribution.
-    fn apply(self, m: Money) -> Money {
-        match self {
-            Sign::Plus => m,
-            Sign::Minus => -m,
-        }
-    }
-}
-
-/// One bucket's part in a combination: "plus Cash", "minus Receivables".
+/// One bucket's part in a view's total: "plus Cash", "minus Receivables".
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Term {
     pub bucket: BucketUid,
@@ -446,75 +436,6 @@ impl Term {
     }
 }
 
-/// Totals across several buckets at once, e.g. `Cash - Receivables`.
-///
-/// This is a *read*, not an entity: nothing here is stored in the budget and
-/// no operation creates it. Buckets stay flat, which keeps the op log free of
-/// a graph that would have to be checked for cycles on every replay.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub struct Combination {
-    pub total: Money,
-    /// One row per contributing ledger, deduplicated: a ledger in two added
-    /// buckets is counted once, not twice.
-    pub lines: Vec<BucketLine>,
-    /// Ledgers that appeared on both sides and so contribute nothing. Kept
-    /// rather than dropped, because a silently vanishing ledger looks like a
-    /// bug in the totals.
-    pub cancelled: Vec<BucketLine>,
-    /// Terms naming a bucket that is not on this branch. A combination can
-    /// outlive the bucket it names - buckets are deletable - so this is
-    /// reported rather than treated as an error.
-    pub missing: Vec<BucketUid>,
-}
-
-/// Total several buckets together, adding some and subtracting others.
-///
-/// Membership is treated as a set, so the answer does not depend on how many
-/// buckets a ledger happens to belong to:
-///
-/// * in added buckets only - counted once, positive;
-/// * in subtracted buckets only - counted once, negative;
-/// * in both - cancelled, and listed in [`Combination::cancelled`].
-///
-/// `roll` applies per ledger exactly as it does for a single bucket, so a
-/// `ByNormality` combination still nets assets against liabilities within each
-/// term before the term's own sign is applied.
-pub fn combine(
-    l: &Budget,
-    terms: &[Term],
-    roll: RollUp,
-    sort: LedgerSort,
-    order: Order,
-) -> Combination {
-    let Members { plus, minus, missing } = members(l, terms);
-
-    let mut lines = Vec::new();
-    let mut cancelled = Vec::new();
-
-    for ix in &plus {
-        if minus.contains(ix) {
-            cancelled.push(zeroed(bucket_line(l, *ix, roll)));
-        } else {
-            lines.push(bucket_line(l, *ix, roll));
-        }
-    }
-    for ix in &minus {
-        if plus.contains(ix) {
-            continue; // already recorded as cancelled above
-        }
-        let mut line = bucket_line(l, *ix, roll);
-        line.contribution = Sign::Minus.apply(line.contribution);
-        lines.push(line);
-    }
-
-    let a = &l.ledgers;
-    sort_lines(&mut lines, a, sort, order);
-    sort_lines(&mut cancelled, a, sort, order);
-
-    let total = lines.iter().map(|l| l.contribution).sum();
-    Combination { total, lines, cancelled, missing }
-}
-
 /// Which ledgers a combination adds and subtracts, before cancellation.
 pub(crate) struct Members {
     pub plus: Vec<LedgerIx>,
@@ -522,8 +443,11 @@ pub(crate) struct Members {
     pub missing: Vec<BucketUid>,
 }
 
-/// Membership per side, each ledger once. Shared with saved views, whose
-/// scope must agree with `combine` about what a combination contains.
+/// Membership per side, each ledger once: a saved view's scope. A ledger in
+/// two added buckets is counted once, not twice; one on both sides cancels,
+/// which the view reports rather than hides. A term naming a bucket that is
+/// not on this branch - buckets are deletable - is listed in `missing`
+/// rather than treated as an error.
 pub(crate) fn members(l: &Budget, terms: &[Term]) -> Members {
     let mut missing = Vec::new();
     // `LedgerIx` is a u32 row index, so these stay small even for a
@@ -549,12 +473,6 @@ pub(crate) fn members(l: &Budget, terms: &[Term]) -> Members {
         }
     }
     Members { plus, minus, missing }
-}
-
-/// A cancelled row keeps its balance for display but contributes nothing.
-fn zeroed(mut line: BucketLine) -> BucketLine {
-    line.contribution = Money(0);
-    line
 }
 
 /// Balance of one ledger restricted to transactions on or before `as_of`.

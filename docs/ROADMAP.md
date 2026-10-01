@@ -64,7 +64,7 @@ first run's feedback is summarised in italics.
    now panels: drag the lines between them. Their starting widths follow the
    window, the commit list truncates to one line per commit (full text on
    hover), and the detail scrolls. The minimum window size dropped from
-   900x560 to 720x480. Buckets, Cohorts and Views use the same draggable,
+   900x560 to 720x480. Buckets and Views use the same draggable,
    scrolling list on the left.
 5. **The Views editor** (*too much space under Buckets; ledger chips bleeding
    into the rows below*; then, second pass: *the ledger section cuts off
@@ -73,7 +73,7 @@ first run's feedback is summarised in italics.
    (click one to take it off, "clear" for all), and "add a ledger..." is the
    searchable tree picker, which also adds a whole subtree. Chip sections
    grow to four whole lines, then scroll - never cut through a line.
-6. **Busy calendar months.** Cohorts has Month / List beside the month
+6. **Busy calendar months.** The calendar has Month / List beside the month
    arrows. List is one line per payment, the date shown once per day, with
    status. A month with a day over three payments says so under the grid,
    with a button to switch.
@@ -152,7 +152,7 @@ cargo run -p ledgit-gui -- fixtures\household.ledgit
 | File | What is in it | Checklist items |
 |---|---|---|
 | `empty.ledgit` | Nothing. | Every screen's empty state |
-| `household.ledgit` | 15 months of an ordinary budget: a 5-way split paycheque, mortgage, car loan, credit card, a 4-level ledger tree, 6 buckets (subtree and hand-picked), 12 issuers (one paused, one one-off 60 days out), 4 cohorts, 4 views (incl. a weekly what-if). Branches `what-if-new-car` and `emergency-fund-plan` diverge from `main` and rebase cleanly. A mistaken commit and its revert. Issuers are ~6 weeks behind (Run issuers stages a batch); staged edits waiting (so History's switch asks to shelve). | 1-12, History, Commit report, issuer runs since last commit |
+| `household.ledgit` | 15 months of an ordinary budget: a 5-way split paycheque, mortgage, car loan, credit card, a 4-level ledger tree, 6 buckets (subtree and hand-picked), 15 issuers (one paused, one one-off 60 days out), 6 views (incl. a weekly what-if, and one scoped to ledgers rather than buckets). Branches `what-if-new-car` and `emergency-fund-plan` diverge from `main` and rebase cleanly. A mistaken commit and its revert. Issuers are ~6 weeks behind (Run issuers stages a batch); staged edits waiting (so History's switch asks to shelve). | 1-12, History, Commit report, issuer runs since last commit |
 | `stress.ledgit` | Things built to break layouts: a $987,654,321.09 balance, a negative one, an 80-character ledger name, an 8-level tree, a non-ASCII name, 120 expense ledgers, a 13-leg split, 17 issuers with 7 due on the 1st and 7 on the 15th plus a daily one, a 10-year daily view, ~110 commits, 10 long branch names, a commit message that wraps. | 1, 2, 4, 5, 6, 7 (at their worst), 8, 9 |
 
 Pins are an app preference, not part of the file, so pin a few ledgers
@@ -220,7 +220,7 @@ broken staged entry.
    Worked out when the entry is made, so changing a rate later changes no
    posted entry. CLI: `ledgit var`, and formulas in `ledgit post`.
 4. **Edit a staged change.** "edit" beside each staged entry, ledger, issuer,
-   bucket, cohort or view reopens its form filled in; saving replaces it in
+   bucket or view reopens its form filled in; saving replaces it in
    place under the same id, so everything referring to it still does.
 5. **Interest and percentage issuers.** The issuer form's Amount row: Fixed,
    "% of a balance", or "Interest (APR)", with the ledger it reads and the
@@ -278,10 +278,11 @@ broken staged entry.
   a `.ledgit` file association and an optional `PATH` entry for the CLI.
 - **Split entries**: transactions and issuers carry N legs summing to zero,
   stored in one flat posting arena. Paycheques are a single entry.
-- **Cohorts**: groups of issuers as ops, like buckets. Rates per day, week,
-  month and year in exact arithmetic; a due-date calendar marking posted,
-  overdue, upcoming and paused. CLI `ledgit cohort ...`, GUI Cohorts screen.
-- **Saved views**: versioned specs over buckets, ledgers, issuers, cohorts and
+- **Issuer calendar**: rates per day, week, month and year in exact
+  arithmetic; a due-date calendar marking posted, overdue, upcoming and paused.
+  Over every issuer or a view's own. CLI `ledgit issuer rates|calendar
+  [--view NAME]`, GUI Calendar screen and a calendar on each view.
+- **Saved views**: versioned specs over buckets, ledgers, issuers and
   transaction filters, with a lookback and a horizon. Balances across time,
   flows per period, and a forward simulation of the issuers (all running ones,
   or only the view's own for a what-if). CLI `ledgit view ...`, GUI Views
@@ -307,7 +308,7 @@ The app covers every screen you asked for, but these are thin:
 
 1. **Editing.** You can create everything and pause issuers; you cannot yet edit
    a name or description from the GUI, though `EditLedger`, `EditTransaction`,
-   `EditIssuer`, `EditBucket`, `EditCohort` and `EditView` all exist in the core.
+   `EditIssuer`, `EditBucket` and `EditView` all exist in the core.
    (A view's *spec* is editable on the Views screen; its name is not.)
 2. **Graphs outside Views.** Saved views now chart balances across time and
    simulate forward. A one-click "chart this ledger/bucket" from the Ledgers

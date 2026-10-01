@@ -120,11 +120,8 @@ pub fn status(repo: &Repo<SqliteStore>) -> Result<()> {
             r.new_ledgers, r.new_issuers, r.new_buckets, r.deleted_buckets
         );
     }
-    if r.new_cohorts + r.deleted_cohorts + r.new_views + r.deleted_views > 0 {
-        println!(
-            "Readings: {} cohort(s) and {} view(s) new; {} cohort(s) and {} view(s) deleted",
-            r.new_cohorts, r.new_views, r.deleted_cohorts, r.deleted_views
-        );
+    if r.new_views + r.deleted_views > 0 {
+        println!("Views: {} new, {} deleted", r.new_views, r.deleted_views);
     }
 
     if !r.ledger_deltas.is_empty() {
@@ -188,9 +185,9 @@ pub fn freshness(l: &Budget, today: Date) -> String {
         Some(d) => format!("Fresh through {d}"),
         None => "No transactions yet".to_string(),
     };
-    if let Some(d) = ledgit_core::cohort::caught_up_through(l) {
+    if let Some(d) = ledgit_core::dues::caught_up_through(l) {
         s.push_str(&format!(" \u{b7} issuers through {d}"));
-        let behind = ledgit_core::cohort::overdue_issuers(l, today);
+        let behind = ledgit_core::dues::overdue_issuers(l, today);
         if behind > 0 {
             s.push_str(&format!(" ({behind} overdue - `ledgit issuer run`)"));
         }
@@ -403,57 +400,6 @@ pub fn bucket(l: &Budget, uid: BucketUid, roll: RollUp, sort: LedgerSort) -> Res
     };
     println!("\n  {:<50} {:>14}", label, amt(r.total));
     Ok(())
-}
-
-/// Several buckets totalled together, with the formula spelled out.
-pub fn combination(l: &Budget, terms: &[Term], roll: RollUp, sort: LedgerSort) {
-    let c = ledgit_core::query::combine(l, terms, roll, sort, Order::Asc);
-
-    let formula: Vec<String> = terms
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            let name = l
-                .buckets
-                .ix(t.bucket)
-                .map(|bix| l.buckets.name[bix.get()].clone())
-                .unwrap_or_else(|| format!("{} (missing)", t.bucket.short()));
-            match (i, t.sign) {
-                // A leading plus reads as noise; a leading minus does not.
-                (0, Sign::Plus) => name,
-                (_, Sign::Plus) => format!("+ {name}"),
-                (_, Sign::Minus) => format!("- {name}"),
-            }
-        })
-        .collect();
-    println!("{}\n", formula.join(" "));
-
-    println!("  {:<28} {:<7} {:>14} {:>14}", "ledger", "normal", "balance", "contributes");
-    for line in &c.lines {
-        println!(
-            "  {:<28} {:<7} {:>14} {:>14}",
-            truncate(&line.name, 28),
-            &line.normality,
-            amt(line.balance),
-            amt(line.contribution)
-        );
-    }
-
-    let label = match roll {
-        RollUp::ByNormality => "net (assets - liabilities)",
-        RollUp::Sum => "sum of balances",
-    };
-    println!("\n  {:<50} {:>14}", label, amt(c.total));
-
-    if !c.cancelled.is_empty() {
-        println!("\n  on both sides, so contributing nothing:");
-        for line in &c.cancelled {
-            println!("    {:<26} {:>14}", truncate(&line.name, 26), amt(line.balance));
-        }
-    }
-    for uid in &c.missing {
-        println!("\n  warning: bucket {} is not on this branch", uid.short());
-    }
 }
 
 pub fn register(l: &Budget, ledger: LedgerUid, limit: Option<usize>) -> Result<()> {

@@ -12,6 +12,7 @@ mod resolve;
 mod show;
 
 use clap::{Parser, Subcommand};
+use ledgit_core::id::IssuerIx;
 use ledgit_core::issuer;
 use ledgit_core::prelude::*;
 use ledgit_sqlite::SqliteStore;
@@ -126,10 +127,6 @@ enum Command {
     /// Groups of ledgers.
     #[command(subcommand)]
     Bucket(BucketCmd),
-    /// Groups of issuers: what they cost per day, week, month or year, and
-    /// when they fall due.
-    #[command(subcommand)]
-    Cohort(CohortCmd),
     /// Saved views: balances across time, flows per period, and a
     /// simulation of the issuers forward to a date.
     #[command(subcommand)]
@@ -264,6 +261,24 @@ enum IssuerCmd {
     Resume {
         issuer: String,
     },
+    /// Every issuer's rate per day, week, month and year, and the total.
+    Rates {
+        /// Only the issuers this saved view breaks down.
+        #[arg(long)]
+        view: Option<String>,
+    },
+    /// Every date the issuers fall due in a window.
+    Calendar {
+        /// Only the issuers this saved view breaks down.
+        #[arg(long)]
+        view: Option<String>,
+        /// First day to show. Defaults to today.
+        #[arg(long)]
+        from: Option<String>,
+        /// Last day to show. Defaults to a month after --from.
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Stage every transaction the issuers owe up to a date.
     Run {
         #[arg(long)]
@@ -313,66 +328,6 @@ enum BucketCmd {
         #[arg(long, default_value = "name")]
         sort: String,
     },
-    /// Total several buckets at once, adding some and subtracting others.
-    ///
-    /// Buckets cannot contain other buckets; this combines them at read time
-    /// instead. A ledger in more than one bucket is counted once, and one that
-    /// lands on both sides cancels out.
-    ///
-    ///   ledgit bucket combine --plus Cash --minus Receivables
-    Combine {
-        /// A bucket to add. Repeat for several.
-        #[arg(long = "plus", short = 'p', value_name = "BUCKET")]
-        plus: Vec<String>,
-        /// A bucket to subtract. Repeat for several.
-        #[arg(long = "minus", short = 'm', value_name = "BUCKET")]
-        minus: Vec<String>,
-        /// Add every member's balance as shown, instead of netting assets
-        /// against liabilities.
-        #[arg(long)]
-        sum: bool,
-        /// name | balance | normality | opened
-        #[arg(long, default_value = "name")]
-        sort: String,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum CohortCmd {
-    Add {
-        name: String,
-        #[arg(long, default_value = "")]
-        desc: String,
-    },
-    /// Cohorts are views, so deleting one stops no issuer.
-    Remove {
-        cohort: String,
-    },
-    Include {
-        cohort: String,
-        issuer: String,
-    },
-    Exclude {
-        cohort: String,
-        issuer: String,
-    },
-    List,
-    /// Every member's rate per day, week, month and year, and the total.
-    Show {
-        cohort: String,
-    },
-    /// Every date the members fall due in a window.
-    ///
-    /// Leave the cohort off to see every issuer.
-    Calendar {
-        cohort: Option<String>,
-        /// First day to show. Defaults to today.
-        #[arg(long)]
-        from: Option<String>,
-        /// Last day to show. Defaults to a month after --from.
-        #[arg(long)]
-        to: Option<String>,
-    },
 }
 
 /// What a view looks at. Shared by `view add` and `view edit`; on an edit,
@@ -391,9 +346,6 @@ struct SpecArgs {
     /// An issuer whose flow to break down. Repeatable.
     #[arg(long, value_name = "ISSUER")]
     issuer: Vec<String>,
-    /// A cohort whose members' flow to break down. Repeatable.
-    #[arg(long, value_name = "COHORT")]
-    cohort: Vec<String>,
     /// Only count past transactions whose name or description contains this.
     #[arg(long)]
     text: Option<String>,
@@ -406,7 +358,7 @@ struct SpecArgs {
     /// How far ahead to simulate, e.g. 12m, 2y.
     #[arg(long)]
     horizon: Option<String>,
-    /// Simulate only this view's issuers and cohorts ("what if these were
+    /// Simulate only this view's issuers ("what if these were
     /// all that happened?") instead of every running issuer.
     #[arg(long)]
     only_selected: Option<bool>,
@@ -437,7 +389,7 @@ enum ViewCmd {
     /// Save a view.
     ///
     ///   ledgit view add "Net worth" --plus Assets --plus Debts --horizon 2y
-    ///   ledgit view add "Bills" --ledger Chequing --cohort Bills --per week
+    ///   ledgit view add "Bills" --ledger Chequing --issuer Rent --issuer Hydro --per week
     Add {
         name: String,
         #[arg(long, default_value = "")]
@@ -623,7 +575,6 @@ fn run(cli: Cli) -> Result<()> {
         Command::Ledger(cmd) => ledger_cmd(&mut repo, cmd)?,
         Command::Issuer(cmd) => issuer_cmd(&mut repo, cmd)?,
         Command::Bucket(cmd) => bucket_cmd(&mut repo, cmd)?,
-        Command::Cohort(cmd) => cohort_cmd(&mut repo, cmd)?,
         Command::View(cmd) => view_cmd(&mut repo, cmd)?,
         Command::Var(cmd) => match cmd {
             VarCmd::Set { name, value, text } => {
@@ -790,6 +741,19 @@ fn issuer_cmd(repo: &mut Repo<SqliteStore>, cmd: IssuerCmd) -> Result<()> {
             println!("Staged issuer \"{name}\": {total} {} from {start}.", schedule.describe());
         }
         IssuerCmd::List => show::issuers(repo.working()),
+        IssuerCmd::Rates { view } => {
+            let l = repo.working();
+            let issuers = view_issuers(l, view.as_deref(), Date::today_utc())?;
+            analysis::rates(l, &issuers);
+        }
+        IssuerCmd::Calendar { view, from, to } => {
+            let l = repo.working();
+            let today = Date::today_utc();
+            let from = from.as_deref().map(resolve::date).transpose()?.unwrap_or(today);
+            let to = to.as_deref().map(resolve::date).transpose()?.unwrap_or(from.add_months(1));
+            let issuers = view_issuers(l, view.as_deref(), today)?;
+            analysis::calendar(l, &issuers, from, to, today);
+        }
         IssuerCmd::Pause { issuer } => {
             let uid = resolve::issuer(repo.working(), &issuer)?;
             repo.stage(Op::SetIssuerPaused { uid, paused: true })?;
@@ -825,6 +789,14 @@ fn issuer_cmd(repo: &mut Repo<SqliteStore>, cmd: IssuerCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The issuers a saved view breaks down - those it names, or with none named,
+/// those that move its money - or every issuer when no view is given.
+fn view_issuers(l: &Budget, view: Option<&str>, today: Date) -> Result<Vec<IssuerIx>> {
+    let Some(name) = view else { return Ok(l.issuers.indices().collect()) };
+    let v = l.views.get(l.views.ix(resolve::view(l, name)?).expect("resolved"));
+    Ok(ledgit_core::view::evaluate(l, &v.spec, today).flows.iter().map(|f| f.issuer).collect())
 }
 
 fn bucket_cmd(repo: &mut Repo<SqliteStore>, cmd: BucketCmd) -> Result<()> {
@@ -873,69 +845,6 @@ fn bucket_cmd(repo: &mut Repo<SqliteStore>, cmd: BucketCmd) -> Result<()> {
             let roll = if sum { RollUp::Sum } else { RollUp::ByNormality };
             show::bucket(repo.working(), uid, roll, show::ledger_sort(&sort)?)?;
         }
-        BucketCmd::Combine { plus, minus, sum, sort } => {
-            if plus.is_empty() && minus.is_empty() {
-                return Err(Error::Invalid(
-                    "nothing to combine - pass at least one --plus or --minus".into(),
-                ));
-            }
-            let l = repo.working();
-            let mut terms = Vec::with_capacity(plus.len() + minus.len());
-            for name in &plus {
-                terms.push(Term::plus(resolve::bucket(l, name)?));
-            }
-            for name in &minus {
-                terms.push(Term::minus(resolve::bucket(l, name)?));
-            }
-            let roll = if sum { RollUp::Sum } else { RollUp::ByNormality };
-            show::combination(l, &terms, roll, show::ledger_sort(&sort)?);
-        }
-    }
-    Ok(())
-}
-
-fn cohort_cmd(repo: &mut Repo<SqliteStore>, cmd: CohortCmd) -> Result<()> {
-    match cmd {
-        CohortCmd::Add { name, desc } => {
-            let uid = repo.add_cohort(&name, desc)?;
-            println!("Staged cohort \"{name}\", uid {}.", uid.short());
-        }
-        CohortCmd::Remove { cohort } => {
-            let uid = resolve::cohort(repo.working(), &cohort)?;
-            repo.stage(Op::DeleteCohort { uid })?;
-            println!("Staged: delete cohort {}. (Its issuers carry on.)", uid.short());
-        }
-        CohortCmd::Include { cohort, issuer } => {
-            let l = repo.working();
-            let (c, s) = (resolve::cohort(l, &cohort)?, resolve::issuer(l, &issuer)?);
-            repo.stage(Op::AddToCohort { cohort: c, issuer: s })?;
-            println!("Staged: add {issuer} to {cohort}.");
-        }
-        CohortCmd::Exclude { cohort, issuer } => {
-            let l = repo.working();
-            let (c, s) = (resolve::cohort(l, &cohort)?, resolve::issuer(l, &issuer)?);
-            repo.stage(Op::RemoveFromCohort { cohort: c, issuer: s })?;
-            println!("Staged: remove {issuer} from {cohort}.");
-        }
-        CohortCmd::List => analysis::cohorts(repo.working()),
-        CohortCmd::Show { cohort } => {
-            let uid = resolve::cohort(repo.working(), &cohort)?;
-            analysis::cohort(repo.working(), uid)?;
-        }
-        CohortCmd::Calendar { cohort, from, to } => {
-            let l = repo.working();
-            let today = Date::today_utc();
-            let from = from.as_deref().map(resolve::date).transpose()?.unwrap_or(today);
-            let to = to.as_deref().map(resolve::date).transpose()?.unwrap_or(from.add_months(1));
-            let issuers = match cohort {
-                Some(c) => {
-                    let ix = l.cohorts.ix(resolve::cohort(l, &c)?).expect("resolved");
-                    l.cohorts.members[ix.get()].clone()
-                }
-                None => l.issuers.indices().collect(),
-            };
-            analysis::calendar(l, &issuers, from, to, today);
-        }
     }
     Ok(())
 }
@@ -956,9 +865,6 @@ fn build_spec(l: &Budget, mut spec: ViewSpec, a: SpecArgs) -> Result<ViewSpec> {
     }
     if !a.issuer.is_empty() {
         spec.issuers = a.issuer.iter().map(|x| resolve::issuer(l, x)).collect::<Result<_>>()?;
-    }
-    if !a.cohort.is_empty() {
-        spec.cohorts = a.cohort.iter().map(|x| resolve::cohort(l, x)).collect::<Result<_>>()?;
     }
     if let Some(t) = a.text {
         spec.transactions = if t.is_empty() { vec![] } else { vec![TxFilter::Text(t)] };

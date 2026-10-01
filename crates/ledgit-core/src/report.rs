@@ -59,8 +59,6 @@ pub struct ChangeReport {
     pub new_buckets: usize,
     pub deleted_buckets: usize,
     pub new_issuers: usize,
-    pub new_cohorts: usize,
-    pub deleted_cohorts: usize,
     pub new_views: usize,
     pub deleted_views: usize,
     /// Variables set or deleted.
@@ -144,8 +142,6 @@ pub fn build(base: &Budget, staged: &[Op]) -> Result<ChangeReport> {
             Op::CreateBucket { .. } => r.new_buckets += 1,
             Op::DeleteBucket { .. } => r.deleted_buckets += 1,
             Op::CreateIssuer { .. } => r.new_issuers += 1,
-            Op::CreateCohort { .. } => r.new_cohorts += 1,
-            Op::DeleteCohort { .. } => r.deleted_cohorts += 1,
             Op::CreateView { .. } => r.new_views += 1,
             Op::DeleteView { .. } => r.deleted_views += 1,
             Op::SetVariable { .. } | Op::DeleteVariable { .. } => r.variables_changed += 1,

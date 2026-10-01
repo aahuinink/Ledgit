@@ -30,7 +30,7 @@ Everything in the feature list falls out of that:
 | Switch branch with work staged | shelve the stage on the branch it belongs to, beside history |
 | Ledgers/transactions/issuers are never deleted | there is no delete op for them |
 | Split entries (a paycheque) | one op with N legs summing to zero |
-| Cohorts, saved views | ops, like buckets; read by pure functions, results never stored |
+| Saved views | ops, like buckets; read by pure functions, results never stored |
 | A ledger tree (`Wedding:Tuxedo`) | paths in names; the tree is derived, never stored |
 | Undo in the app | put back an earlier `Vec<Op>` as the stage |
 | Edit a staged entry | replace one op in the stage, under the same uid |
@@ -92,16 +92,17 @@ A bucket holds ledgers, never other buckets: `BucketArena.members` is
 would put a graph in the op log, and a graph in the op log has to be checked for
 cycles on *every* replay - admit one cycle once and the file never loads again.
 
-Roll-ups across several buckets are a read instead. `query::combine` takes a
-slice of signed `Term`s and treats membership as a set:
+Roll-ups across several buckets are a saved view instead. A view's scope is a
+slice of signed `Term`s, and `query::members` treats membership as a set:
 
 * in added buckets only - counted once, positive;
 * in subtracted buckets only - counted once, negative;
 * in both - cancelled, and reported separately rather than dropped.
 
-So `Cash - Receivables` is a question you ask, not an entity you create. Nothing
-is stored, nothing needs validating on replay, and a combination naming a
-deleted bucket degrades to a warning instead of an unloadable budget.
+So `Cash - Receivables` is a view over buckets, not a bucket of buckets. The
+view holds bucket uids, not members, so nothing needs validating on replay, and
+a view naming a deleted bucket degrades to a warning instead of an unloadable
+budget.
 
 ## The ledger tree lives in the names
 
@@ -145,24 +146,21 @@ both deliberate:
 `rename_ops` re-points a bucket's subtree along with the ledgers, so moving
 `Wedding` to `Events:Wedding` does not quietly empty the Wedding bucket.
 
-## Cohorts: buckets for issuers
+## Dues: what issuers cost, and when they land
 
-A cohort is a named, flat group of issuers - `CohortArena.members` is
-`Vec<Vec<IssuerIx>>`, built by `CreateCohort`/`AddToCohort`/... ops that
-mirror the bucket ones exactly, deletable because it moves no money. Two
-reads cover what a cohort is for (`ledgit_core::cohort`), and both take any
-slice of issuers, so a view or the "every issuer" calendar uses them with no
-cohort in sight:
+There is no group-of-issuers entity: a saved view names the issuers it breaks
+down, and that is the grouping. Two reads (`ledgit_core::dues`) take any
+slice of issuers - a view's, or every issuer for the Calendar screen:
 
 * **Rates.** `period::per_period(amount, schedule, period)` converts a
   schedule to any unit in exact rational arithmetic, rounded once at the end.
   Month and year are Gregorian averages (146,097 days per 400 years), so
   $10/day is $70/week and $304.37/month, a monthly $100 is exactly $100 a
-  month, and nothing drifts on a round trip. A cohort's total counts only
-  running, recurring members; paused ones are totalled separately.
+  month, and nothing drifts on a round trip. `dues::total` counts only
+  running, recurring issuers; `dues::paused_total` counts the paused ones.
 * **Calendar.** `Schedule::dates_between(start, from, to)` lists every
   occurrence in a window, jumping straight to `from` rather than stepping
-  there. `cohort::calendar` marks each one against `emitted_through` and
+  there. `dues::calendar` marks each one against `emitted_through` and
   today: posted, overdue, upcoming, or paused.
 
 A **rate** and a **calendar period** are kept apart on purpose. "Biweekly
@@ -173,7 +171,7 @@ only the timeline tables use them.
 ## Saved views: a reading across time
 
 A `ViewSpec` is plain data inside `CreateView`/`EditView` ops: signed bucket
-terms, ledgers, issuers, cohorts, `TxFilter`s, a period, and a **lookback and
+terms, ledgers, issuers, `TxFilter`s, a period, and a **lookback and
 horizon as `Span`s** ("6 months back, 1 year ahead"), never as dates - so a
 saved view keeps meaning the same thing whenever it is opened. It is
 versioned, so it travels with the file and can differ per branch, but it
@@ -181,9 +179,8 @@ holds no results: `view::evaluate(budget, spec, today)` recomputes the
 `ViewReport` every time, in well under a millisecond.
 
 **Scope and direction.** "Spent" only means something relative to a pot of
-money, so a view has a scope - its bucket combination (same set rules as
-`query::combine`, shared via `query::members`), or else its ledgers as
-displayed. Scope is one integer weight per ledger, and every effect is
+money, so a view has a scope - its bucket combination (the set rules of
+`query::members`, above), or else its ledgers as displayed. Scope is one integer weight per ledger, and every effect is
 
 ```
 effect of a posting = weight[ledger] * amount     (debit-positive amount)
@@ -201,7 +198,7 @@ ledger row maps to the series it feeds, so one posting is one index plus a
 multiply-add per series. Overdue occurrences are placed on today: they have
 not happened, so they must not move a past balance. By default every running
 issuer is simulated (the honest forecast); `only_selected_issuers` restricts
-it to the view's own issuers and cohorts (the what-if).
+it to the view's own issuers (the what-if).
 
 What comes out: step **series** (scope total, each bucket, each ledger) with
 today, the end, and the lowest point ahead; **flow lines** per selected
@@ -210,9 +207,9 @@ with actual and projected in/out side by side.
 
 **Validation is deliberately partial.** Saving a view checks that its
 ledgers and issuers exist, since those can never disappear. It does not check
-buckets or cohorts: they are deletable, evaluation already reports a missing
-one, and checking would make history order-sensitive - reverting "delete
-cohort, delete view" recreates the view before the cohort.
+buckets: they are deletable, evaluation already reports a missing one, and
+checking would make history order-sensitive - reverting "delete bucket,
+delete view" recreates the view before the bucket.
 
 **Charts.** Balances are drawn as steps (a balance holds until the next
 posting; a slope would invent money between paydays), solid up to today and
@@ -336,7 +333,7 @@ The top bar reads `Fresh through 2026-09-24 · issuers 2026-09-25`:
 
 * the first date is `Budget::latest_transaction_date()` - the newest entry on
   this branch, staged ones included;
-* the second is `cohort::caught_up_through()` - the day before the earliest
+* the second is `dues::caught_up_through()` - the day before the earliest
   occurrence any running issuer still owes, i.e. every recurring payment on
   or before it is in the budget.
 
@@ -486,15 +483,15 @@ rather than rediscovered:
 3. **Replay is deterministic.** Same ops, same order, same budget. The tests
    rely on this and so does rebase.
 4. **Nothing is deleted.** There is no op that removes a ledger, transaction
-   or issuer. Buckets, cohorts and saved views are pure readings, so they may
-   be deleted.
+   or issuer. Buckets and saved views are pure readings, so they may be
+   deleted.
 5. **Every entry's legs sum to zero**, number at least two, contain no zero
    amount, and name no ledger twice. The last one matters: two legs against
    one ledger is always either a typo or a sum the user should have done
    themselves, and netting them silently would hide the typo.
 6. **`AdvanceIssuer` never rewinds.** Replaying an older advance is a no-op, so
    history can be replayed in any valid order without re-posting rent.
-7. **Reading never writes.** Evaluating a view or a cohort, however far
+7. **Reading never writes.** Evaluating a view, however far
    ahead it simulates, stages nothing and stores nothing.
 8. **Nothing broken is committed.** A staged op that does not apply is kept
    and flagged, and `commit` refuses until there are none.

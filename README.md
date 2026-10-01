@@ -140,7 +140,6 @@ ledgit register Chequing            # every posting, with a running balance
 ledgit bucket show "Net Worth"      # totals, netting assets against liabilities
 ledgit bucket show "Spending" --sum # or just add every member up
 ledgit search rent                  # ledgers, transactions, issuers, buckets
-ledgit bucket combine --plus Cash --minus Receivables   # total several at once
 ```
 
 ## The ledger tree
@@ -157,25 +156,28 @@ ledgit bucket include-tree Wedding Wedding   # everything under Wedding, now and
 ledgit ledger move Wedding Events:Wedding    # rename a whole subtree; buckets follow
 ```
 
-## Cohorts and views
+## Views
 
-A cohort groups issuers the way a bucket groups ledgers; a view charts
-buckets and ledgers across time and simulates your issuers forward.
+A view charts buckets and ledgers across time and simulates your issuers
+forward. It is also how you total several buckets at once (`--plus` some,
+`--minus` others) and how you group issuers: name the ones it should break
+down.
 
 ```sh
-ledgit cohort add Bills
-ledgit cohort include Bills Rent
-ledgit cohort show Bills                 # each issuer per day, week, month, year
-ledgit cohort calendar Bills --to 2026-12-31   # every due date, overdue flagged
-
 ledgit view add "Net worth" --plus Liquid --plus Debt --lookback 6m --horizon 2y
+ledgit view add "Bills" --plus Liquid --issuer Rent --issuer Hydro --only-selected true
 ledgit view show "Net worth"             # balances, flows, month by month
 ledgit view show "Net worth" --until 2030-01-01 --chart nw.png --csv nw.csv
+
+ledgit issuer rates --view Bills         # each issuer per day, week, month, year
+ledgit issuer calendar --view Bills --to 2026-12-31   # every due date, overdue flagged
 ```
 
-Views and cohorts are staged and committed like everything else, so they
-travel with the file and can differ between branches. Showing one is a read:
-the simulation never stages a thing.
+Leave `--view` off `issuer rates` and `issuer calendar` to see every issuer.
+
+Views are staged and committed like everything else, so they travel with the
+file and can differ between branches. Showing one is a read: the simulation
+never stages a thing.
 
 ## The desktop app
 
@@ -194,9 +196,13 @@ cargo run -p ledgit-gui -- ~/budget.ledgit    # or pick a file from the welcome 
   whole book.
 - **Issuers** - schedules, next due dates, pause and resume, and the button that
   stages what is owed.
-- **Buckets** - totals over a group of ledgers, and **Combine buckets**, which
-  adds and subtracts several at once (`Cash - Receivables`). Buckets do not
-  nest; this is the read-time answer instead.
+- **Buckets** - totals, targets and paces over a group of ledgers. Buckets do
+  not nest; to total several at once (`Cash - Receivables`), add them to a
+  view.
+- **Calendar** - what every issuer costs per day, week, month and year, and a
+  month of due dates marked posted, overdue, upcoming or paused.
+- **Views** - balances across time with the issuers simulated forward, flows
+  per period, and a calendar of the issuers the view breaks down.
 - **Commit** - the report: every staged change, every ledger it moves, and
   every bucket that might be affected. Nothing is permanent until you press it.
 - **History** - the commit log, branches, revert, and rebase.
@@ -211,9 +217,9 @@ permanent.
 you are off 100% the current setting shows in the status bar and clicking it
 resets. On a trackpad, pinch works too.
 
-Zoom, pinning and the current bucket combination are UI preferences, stored
-beside the app rather than in the budget - none of them is a fact about your
-money, so none has any business in the commit history.
+Zoom and pinning are UI preferences, stored beside the app rather than in the
+budget - neither is a fact about your money, so neither has any business in the
+commit history.
 
 ## Status
 

@@ -90,11 +90,12 @@ fn session() -> Session {
     s.repo.add_ledger("Wedding:Gifts", "", Normality::Credit, open).unwrap();
     s.repo.stage(Op::AddSubtreeToBucket { bucket, path: "Wedding".into() }).unwrap();
 
-    // A cohort and a saved view, so their screens have something to draw.
+    // Saved views, so their screen has something to draw: one over every
+    // bucket, and one that breaks down a single issuer.
     let pay = s.repo.working().issuers.uid[0];
-    let bills = s.repo.add_cohort("Bills", "").unwrap();
-    s.repo.stage(Op::AddToCohort { cohort: bills, issuer: pay }).unwrap();
     let net = s.repo.add_view("Net worth", "", ViewSpec::all_buckets(s.repo.working())).unwrap();
+    let pay_only = ViewSpec { issuers: vec![pay], ..ViewSpec::all_buckets(s.repo.working()) };
+    s.repo.add_view("Pay", "", pay_only).unwrap();
 
     s.repo
         .stage(Op::SetVariable { name: "Car_Km_Rate".into(), value: VarValue::guess("0.68") })
@@ -130,7 +131,6 @@ fn session() -> Session {
 
     s.selected_ledger = Some(cash);
     s.selected_bucket = Some(bucket);
-    s.selected_cohort = Some(bills);
     s.selected_view = Some(net);
     s.pins = vec![cash];
     s
@@ -154,7 +154,7 @@ fn draw(s: &mut Session, view: Screen) {
         Screen::Transactions => views::transactions::show(ui, s),
         Screen::Issuers => views::issuers::show(ui, s),
         Screen::Buckets => views::buckets::show(ui, s),
-        Screen::Cohorts => views::cohorts::show(ui, s),
+        Screen::Calendar => views::calendar::show(ui, s),
         Screen::Views => views::saved::show(ui, s),
         Screen::Variables => views::variables::show(ui, s),
         Screen::Commit => views::commit::show(ui, s),
@@ -169,7 +169,7 @@ const EVERY_VIEW: [Screen; 11] = [
     Screen::Transactions,
     Screen::Issuers,
     Screen::Buckets,
-    Screen::Cohorts,
+    Screen::Calendar,
     Screen::Views,
     Screen::Variables,
     Screen::Commit,
@@ -204,7 +204,6 @@ fn every_view_survives_a_dangling_selection() {
     let mut s = session();
     s.selected_ledger = Some(LedgerUid::new());
     s.selected_bucket = Some(BucketUid::new());
-    s.selected_cohort = Some(CohortUid::new());
     s.selected_view = Some(ViewUid::new());
     s.view_draft = Some((ViewUid::new(), ViewSpec::default()));
     s.pins = vec![LedgerUid::new()];
@@ -230,7 +229,6 @@ fn every_form_opens_and_draws() {
         FormKind::Transaction,
         FormKind::Bucket,
         FormKind::Issuer,
-        FormKind::Cohort,
         FormKind::View,
         FormKind::Move,
     ] {
@@ -282,45 +280,35 @@ fn transaction_filters_narrow_the_list() {
     draw(&mut s, Screen::Transactions);
 }
 
-/// The combining branch of the Buckets screen is a whole second layout that the
-/// "draw every view" tests never reach, because it only runs with terms set.
+/// The Calendar screen: every issuer's rates, and a calendar month holding
+/// posted, overdue and upcoming payments at once.
 #[test]
-fn the_buckets_screen_draws_a_combination() {
-    let mut s = session();
-    let net = s.selected_bucket.expect("fixture selects a bucket");
-    let spending = s.repo.add_bucket("Spending", "").unwrap();
-    let cash = s.repo.working().ledgers.uid[0];
-    s.repo.stage(Op::AddToBucket { bucket: spending, ledger: cash }).unwrap();
-
-    // One added, one subtracted, and the subtracted one overlaps the added one
-    // so the cancelled section draws too.
-    s.bucket_combo = vec![Term::plus(net), Term::minus(spending)];
-    draw(&mut s, Screen::Buckets);
-
-    let c = combine(s.budget(), &s.bucket_combo, s.bucket_roll, s.ledger_sort, Order::Asc);
-    assert_eq!(c.cancelled.len(), 1, "cash is in both buckets");
-
-    // A term naming a bucket that is not on this branch must render, not panic.
-    s.bucket_combo = vec![Term::plus(BucketUid::new())];
-    draw(&mut s, Screen::Buckets);
-
-    // And a leading subtraction is a legitimate, if odd, thing to ask for.
-    s.bucket_combo = vec![Term::minus(net)];
-    draw(&mut s, Screen::Buckets);
-}
-
-/// The cohort screen's two layouts - one cohort, and "every issuer" - and a
-/// calendar month holding posted, overdue and upcoming payments at once.
-#[test]
-fn the_cohorts_screen_draws_rates_and_a_calendar() {
+fn the_calendar_screen_draws_rates_and_a_calendar() {
     let mut s = session();
     s.calendar_month = "2024-01-01".parse().unwrap();
-    draw(&mut s, Screen::Cohorts);
-    s.selected_cohort = None;
-    draw(&mut s, Screen::Cohorts);
+    draw(&mut s, Screen::Calendar);
     // Far from any payment, the calendar is simply empty.
     s.calendar_month = "1990-06-01".parse().unwrap();
-    draw(&mut s, Screen::Cohorts);
+    draw(&mut s, Screen::Calendar);
+}
+
+/// A view draws the same calendar for the issuers in its flow table.
+#[test]
+fn a_view_draws_a_calendar_of_its_issuers() {
+    let mut s = session();
+    let l = s.repo.working();
+    let ix = l.view_by_name("Pay").expect("fixture has a Pay view");
+    let (uid, spec) = (l.views.uid[ix.get()], l.views.spec[ix.get()].clone());
+    let flows = ledgit_core::view::evaluate(l, &spec, Date::today_utc()).flows;
+    assert_eq!(flows.len(), 1, "the view breaks down one issuer");
+    let issuers: Vec<_> = flows.iter().map(|f| f.issuer).collect();
+    s.calendar_month = "2024-01-01".parse().unwrap();
+    for list in [false, true] {
+        s.calendar_list = list;
+        run_ui(|ui| views::calendar::calendar(ui, &mut s, "view", &issuers));
+    }
+    s.selected_view = Some(uid);
+    draw(&mut s, Screen::Views);
 }
 
 /// The Views screen keeps an edited draft apart from the stored spec, and
@@ -565,7 +553,7 @@ fn every_symbol_in_the_source_has_a_glyph() {
         include_str!("textbox.rs"),
         include_str!("views/graph.rs"),
         include_str!("views/buckets.rs"),
-        include_str!("views/cohorts.rs"),
+        include_str!("views/calendar.rs"),
         include_str!("views/commit.rs"),
         include_str!("views/dashboard.rs"),
         include_str!("views/goals.rs"),
@@ -671,7 +659,6 @@ fn draws_a_real_file() {
         .find(|ix| l.ledgers.target[ix.get()].is_some())
         .map(|ix| l.ledgers.uid[ix.get()]);
     s.selected_bucket = l.buckets.live().next().map(|b| l.buckets.uid[b.get()]);
-    s.selected_cohort = l.cohorts.live().next().map(|c| l.cohorts.uid[c.get()]);
     s.selected_view = l.views.live().nth(1).map(|v| l.views.uid[v.get()]);
     s.bucket_targets = true;
     let first = s.repo.log(None).unwrap().last().map(|c| c.id);
@@ -901,15 +888,13 @@ fn switching_branch_with_staged_work_asks_and_can_shelve_it() {
 
 /// A busy month reads better as a list; the calendar offers one.
 #[test]
-fn the_cohort_calendar_draws_as_a_list() {
+fn the_calendar_draws_as_a_list() {
     let mut s = session();
     s.calendar_month = "2024-01-01".parse().unwrap();
     s.calendar_list = true;
-    draw(&mut s, Screen::Cohorts);
-    s.selected_cohort = None;
-    draw(&mut s, Screen::Cohorts);
+    draw(&mut s, Screen::Calendar);
     s.calendar_month = "1990-06-01".parse().unwrap();
-    draw(&mut s, Screen::Cohorts);
+    draw(&mut s, Screen::Calendar);
 }
 
 /// A session with a bucket holding `n` ledgers, one with a very long name.

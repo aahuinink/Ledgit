@@ -50,9 +50,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
-pub mod cohort;
 pub mod commit;
 pub mod date;
+pub mod dues;
 pub mod error;
 pub mod expr;
 pub mod goals;
@@ -74,23 +74,23 @@ pub use error::{Error, Result};
 
 /// Everything a front end normally needs, in one `use`.
 pub mod prelude {
-    pub use crate::cohort::{CalendarEntry, CohortBreakdown, DueStatus, RateLine};
     pub use crate::commit::{Commit, CommitId, Head};
     pub use crate::date::Date;
+    pub use crate::dues::{CalendarEntry, DueStatus, RateLine};
     pub use crate::error::{Error, Result};
-    pub use crate::id::{BucketUid, CohortUid, IssuerUid, LedgerUid, TxUid, ViewUid};
+    pub use crate::id::{BucketUid, IssuerUid, LedgerUid, TxUid, ViewUid};
     pub use crate::model::{
-        magnitude, simple_legs, validate_legs, Alert, AlertWhen, AmountRule, Bound, Bucket, Cohort,
-        Issuer, Ledger, Leg, Normality, Parent, Rate, SavedView, Schedule, Target, Transaction,
-        VarValue, ViewSpec,
+        magnitude, simple_legs, validate_legs, Alert, AlertWhen, AmountRule, Bound, Bucket, Issuer,
+        Ledger, Leg, Normality, Parent, Rate, SavedView, Schedule, Target, Transaction, VarValue,
+        ViewSpec,
     };
     pub use crate::money::Money;
     pub use crate::op::Op;
     pub use crate::period::{per_period, Period, Span};
     pub use crate::query::{
-        balance_as_of, combine, register, roll_up, search, BucketLine, BucketRollUp, Combination,
-        IssuerFilter, IssuerQuery, LedgerFilter, LedgerQuery, LedgerSort, Order, RegisterLine,
-        RollUp, Sign, Term, TxFilter, TxQuery, TxSort,
+        balance_as_of, register, roll_up, search, BucketLine, BucketRollUp, IssuerFilter,
+        IssuerQuery, LedgerFilter, LedgerQuery, LedgerSort, Order, RegisterLine, RollUp, Sign,
+        Term, TxFilter, TxQuery, TxSort,
     };
     pub use crate::repo::{Repo, StagedWork};
     pub use crate::report::{Broken, ChangeReport};

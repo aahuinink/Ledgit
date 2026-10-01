@@ -1,6 +1,6 @@
 //! Saved views: readings of the budget across time.
 //!
-//! A [`ViewSpec`] names some buckets, ledgers, issuers, cohorts and a filter
+//! A [`ViewSpec`] names some buckets, ledgers, issuers and a filter
 //! over transactions. [`evaluate`] turns it into a [`ViewReport`]:
 //!
 //! * **series** - the balance of the view's scope, of each bucket and of each
@@ -40,7 +40,7 @@
 //! past balance, but it will land as soon as the issuers are run.
 
 use crate::date::Date;
-use crate::id::{BucketUid, CohortUid, IssuerIx, LedgerIx, TxIx};
+use crate::id::{BucketUid, IssuerIx, LedgerIx, TxIx};
 use crate::model::{magnitude, Alert, Leg, Schedule, ViewSpec};
 use crate::money::Money;
 use crate::period::{per_period, Period};
@@ -101,9 +101,6 @@ fn value_at(points: &[(Date, Money)], date: Date) -> Money {
 pub struct FlowLine {
     pub issuer: IssuerIx,
     pub name: String,
-    /// Names of the view's cohorts this issuer was selected through. Empty if
-    /// it was picked directly.
-    pub via: Vec<String>,
     pub schedule: Schedule,
     /// The size of each entry.
     pub amount: Money,
@@ -175,10 +172,9 @@ pub struct ViewReport {
     /// Occurrences already due that the simulation placed on today.
     pub overdue_occurrences: usize,
     /// Ledgers that fell on both sides of the bucket combination and so count
-    /// for nothing. Reported, as `query::combine` does, rather than hidden.
+    /// for nothing. Reported rather than hidden.
     pub cancelled: Vec<LedgerIx>,
     pub missing_buckets: Vec<BucketUid>,
-    pub missing_cohorts: Vec<CohortUid>,
 }
 
 impl ViewReport {
@@ -306,29 +302,15 @@ pub fn evaluate_between(
     }
 
     // ----------------------------------------------------------- issuers
-    let mut flow_set: Vec<(IssuerIx, Vec<String>)> = Vec::new();
-    let mut missing_cohorts = Vec::new();
+    let mut flow_set: Vec<IssuerIx> = Vec::new();
     for uid in &spec.issuers {
         if let Some(ix) = l.issuers.ix(*uid) {
-            if !flow_set.iter().any(|(s, _)| *s == ix) {
-                flow_set.push((ix, Vec::new()));
+            if !flow_set.contains(&ix) {
+                flow_set.push(ix);
             }
         }
     }
-    for uid in &spec.cohorts {
-        let Some(cix) = l.cohorts.ix(*uid) else {
-            missing_cohorts.push(*uid);
-            continue;
-        };
-        let cname = &l.cohorts.name[cix.get()];
-        for ix in &l.cohorts.members[cix.get()] {
-            match flow_set.iter_mut().find(|(s, _)| s == ix) {
-                Some((_, via)) => via.push(cname.clone()),
-                None => flow_set.push((*ix, vec![cname.clone()])),
-            }
-        }
-    }
-    let selected: Vec<IssuerIx> = flow_set.iter().map(|(s, _)| *s).collect();
+    let selected: Vec<IssuerIx> = flow_set.clone();
 
     // The effect of one entry on the scope, and of an issuer's next one. An
     // issuer with a rule has no fixed entry; its flow line shows what it
@@ -351,20 +333,15 @@ pub fn evaluate_between(
 
     // With nothing selected, the flow table shows whatever moves the scope.
     if flow_set.is_empty() && directed {
-        flow_set = simulated
-            .iter()
-            .filter(|ix| !issuer_effect(**ix).is_zero())
-            .map(|ix| (*ix, Vec::new()))
-            .collect();
+        flow_set = simulated.iter().filter(|ix| !issuer_effect(**ix).is_zero()).copied().collect();
     }
     let mut flows: Vec<FlowLine> = flow_set
         .into_iter()
-        .map(|(ix, via)| {
+        .map(|ix| {
             let i = ix.get();
             FlowLine {
                 issuer: ix,
                 name: l.issuers.name[i].clone(),
-                via,
                 schedule: l.issuers.schedule[i],
                 amount: crate::issuer::estimate(l, ix),
                 effect: directed.then(|| issuer_effect(ix)),
@@ -554,7 +531,6 @@ pub fn evaluate_between(
         overdue_occurrences,
         cancelled,
         missing_buckets,
-        missing_cohorts,
     }
 }
 
@@ -679,7 +655,7 @@ impl ViewSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::id::{BucketUid, CohortUid, IssuerUid, LedgerUid, TxUid};
+    use crate::id::{BucketUid, IssuerUid, LedgerUid, TxUid};
     use crate::model::{simple_legs, Normality, Parent};
     use crate::op::Op;
     use crate::period::Span;
@@ -703,7 +679,6 @@ mod tests {
         pay: IssuerUid,
         rent: IssuerUid,
         sweep: IssuerUid,
-        bills: CohortUid,
     }
 
     /// Chequing and savings (bucket "Liquid"), a Visa (bucket "Debt"), and
@@ -714,7 +689,6 @@ mod tests {
             std::array::from_fn(|_| LedgerUid::new());
         let (liquid, debt) = (BucketUid::new(), BucketUid::new());
         let (pay, rent, sweep) = (IssuerUid::new(), IssuerUid::new(), IssuerUid::new());
-        let bills = CohortUid::new();
         let ledger = |uid, name: &str, n| Op::CreateLedger {
             uid,
             name: name.into(),
@@ -766,11 +740,9 @@ mod tests {
             Op::AdvanceIssuer { uid: pay, through: d(2024, 3, 1) },
             Op::AdvanceIssuer { uid: rent, through: d(2024, 3, 1) },
             Op::AdvanceIssuer { uid: sweep, through: d(2024, 2, 15) },
-            Op::CreateCohort { uid: bills, name: "Bills".into(), description: String::new() },
-            Op::AddToCohort { cohort: bills, issuer: rent },
         ])
         .unwrap();
-        Fx { l, cash, savings, visa, liquid, debt, pay, rent, sweep, bills }
+        Fx { l, cash, savings, visa, liquid, debt, pay, rent, sweep }
     }
 
     /// "Net worth": everything liquid, minus what is owed.
@@ -845,11 +817,11 @@ mod tests {
     fn restricting_the_simulation_answers_what_if() {
         let fx = fixture();
         let spec =
-            ViewSpec { cohorts: vec![fx.bills], only_selected_issuers: true, ..net_worth(&fx) };
+            ViewSpec { issuers: vec![fx.rent], only_selected_issuers: true, ..net_worth(&fx) };
         let r = evaluate(&fx.l, &spec, today());
         assert_eq!(r.simulated_issuers, 1);
         assert_eq!(r.flows.len(), 1);
-        assert_eq!(r.flows[0].via, vec!["Bills".to_string()]);
+        assert_eq!(r.flows[0].name, "Rent");
         assert_eq!(r.flows[0].effect, Some(major(-1_500)));
         // Rent alone, three times: 1700 - 4500.
         let total = &r.series[0];

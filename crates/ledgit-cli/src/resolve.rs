@@ -243,23 +243,6 @@ pub fn legs(
     }
 }
 
-pub fn cohort(l: &Budget, s: &str) -> Result<CohortUid> {
-    if let Some(ix) = l.cohort_by_name(s) {
-        return Ok(l.cohorts.uid[ix.get()]);
-    }
-    let hits: Vec<CohortUid> = l
-        .cohorts
-        .live()
-        .map(|ix| l.cohorts.uid[ix.get()])
-        .filter(|u| u.to_string().starts_with(&s.to_lowercase()))
-        .collect();
-    match hits.len() {
-        1 => Ok(hits[0]),
-        0 => Err(Error::Invalid(format!("no cohort called \"{s}\""))),
-        n => Err(Error::Invalid(format!("\"{s}\" matches {n} cohorts"))),
-    }
-}
-
 pub fn view(l: &Budget, s: &str) -> Result<ViewUid> {
     if let Some(ix) = l.view_by_name(s) {
         return Ok(l.views.uid[ix.get()]);

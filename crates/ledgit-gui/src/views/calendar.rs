@@ -1,12 +1,14 @@
-//! Cohorts: groups of issuers, read for what they cost and when they land.
+//! The calendar: what the issuers cost per period, and when each falls due.
+//!
+//! This screen reads every issuer; a saved view draws the same calendar for
+//! the issuers it breaks down.
 
 use super::{empty, heading, num};
 use crate::app::Session;
 use crate::fmt;
-use crate::forms::FormKind;
 use crate::table::{figures, text, Table};
 use egui::{RichText, Ui};
-use ledgit_core::cohort::{self, CalendarEntry, DueStatus};
+use ledgit_core::dues::{self, CalendarEntry, DueStatus, RateLine};
 use ledgit_core::id::IssuerIx;
 use ledgit_core::prelude::*;
 
@@ -29,197 +31,82 @@ const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 pub fn show(ui: &mut Ui, s: &mut Session) {
     heading(
         ui,
-        "Cohorts",
-        "A cohort groups issuers the way a bucket groups ledgers. Creating or deleting one changes no payment.",
+        "Calendar",
+        "What every issuer costs per day, week, month and year, and the dates each falls due. To see a few on their own, pick them in a view.",
     );
-    if ui.button("New cohort").clicked() {
-        s.forms.open(FormKind::Cohort, s.repo.working());
-    }
-    ui.add_space(8.0);
-
     if s.budget().issuers.is_empty() {
-        empty(ui, "No issuers yet. A cohort groups issuers, so make one of those first.");
+        empty(ui, "No issuers yet.");
         return;
     }
-
-    let live: Vec<CohortUid> =
-        s.budget().cohorts.live().map(|ix| s.budget().cohorts.uid[ix.get()]).collect();
-    if s.selected_cohort.is_some_and(|c| !live.contains(&c)) {
-        s.selected_cohort = None;
-    }
-
-    super::split(
-        ui,
-        "cohorts",
-        200.0,
-        s,
-        |ui, s| {
-            // "Every issuer" is not a cohort, but it is the calendar you most
-            // often want, so it sits at the top of the list.
-            if ui.selectable_label(s.selected_cohort.is_none(), "Every issuer").clicked() {
-                s.selected_cohort = None;
-            }
-            ui.separator();
-            for uid in &live {
-                let Some(ix) = s.budget().cohorts.ix(*uid) else { continue };
-                let name = s.budget().cohorts.name[ix.get()].clone();
-                if ui.selectable_label(s.selected_cohort == Some(*uid), name).clicked() {
-                    s.selected_cohort = Some(*uid);
-                }
-            }
-            if live.is_empty() {
-                ui.label(RichText::new("No cohorts yet.").color(fmt::dim()));
-            }
-        },
-        |ui, s| {
-            egui::ScrollArea::vertical().id_salt("cohort_detail").show(ui, |ui| detail(ui, s));
-        },
-    );
+    let every: Vec<IssuerIx> = s.budget().issuers.indices().collect();
+    egui::ScrollArea::vertical().id_salt("calendar_screen").show(ui, |ui| {
+        rates(ui, &dues::rate_lines(s.budget(), &every));
+        ui.add_space(16.0);
+        calendar(ui, s, "every", &every);
+    });
 }
 
-fn detail(ui: &mut Ui, s: &mut Session) {
-    let l = s.budget();
-    let (title, members, uid) =
-        match s.selected_cohort.and_then(|u| l.cohorts.ix(u).map(|ix| (u, ix))) {
-            Some((uid, ix)) => {
-                (l.cohorts.name[ix.get()].clone(), l.cohorts.members[ix.get()].clone(), Some(uid))
-            }
-            None => ("Every issuer".to_string(), l.issuers.indices().collect::<Vec<_>>(), None),
-        };
-    let lines = cohort::rate_lines(l, &members);
-    let breakdown = CohortBreakdown { uid: uid.unwrap_or_default(), name: title.clone(), lines };
-
-    let mut ops: Vec<(Op, &'static str)> = Vec::new();
-
-    ui.horizontal(|ui| {
-        ui.heading(&title);
-        if let Some(uid) = uid {
-            if ui.small_button("Delete cohort").on_hover_text("Its issuers carry on.").clicked() {
-                ops.push((Op::DeleteCohort { uid }, "deleting a cohort"));
-            }
-        }
-    });
-    if let Some(ix) = uid.and_then(|u| l.cohorts.ix(u)) {
-        let d = &l.cohorts.description[ix.get()];
-        if !d.is_empty() {
-            ui.label(RichText::new(d).color(fmt::dim()));
-        }
-    }
-    ui.add_space(6.0);
-
-    // --- rates
-    if breakdown.lines.is_empty() {
-        ui.label(RichText::new("No issuers in this cohort yet.").color(fmt::dim()));
-    } else {
-        let mut cols =
-            vec![text("issuer").max(280.0), text("schedule").max(240.0), figures("each")];
-        cols.extend(Period::ALL.iter().map(|p| figures(format!("per {p}"))));
-        cols.push(text("").narrow());
-        let n = breakdown.lines.len();
-        Table::new(("cohort_rates", uid), cols).show(ui, n + 1, |row| {
-            let Some(line) = breakdown.lines.get(row.index()) else {
-                // The total, as the last row.
-                row.col(|ui| {
-                    ui.label(RichText::new("total").strong());
-                });
-                row.col(|ui| {
-                    ui.label(RichText::new("running issuers").small().color(fmt::dim()));
-                });
-                row.col(|_| {});
-                for p in Period::ALL {
-                    row.col(|ui| {
-                        num(ui, fmt::mono(fmt::amount(breakdown.total(p))).strong());
-                    });
-                }
-                row.col(|_| {});
-                return;
-            };
+/// Each issuer's rate in every unit, and what the running ones total.
+fn rates(ui: &mut Ui, lines: &[RateLine]) {
+    let mut cols = vec![text("issuer").max(280.0), text("schedule").max(240.0), figures("each")];
+    cols.extend(Period::ALL.iter().map(|p| figures(format!("per {p}"))));
+    Table::new("issuer_rates", cols).show(ui, lines.len() + 1, |row| {
+        let Some(line) = lines.get(row.index()) else {
+            // The total, as the last row.
             row.col(|ui| {
-                let name = RichText::new(&line.name);
-                let r = ui.label(if line.paused {
-                    name.color(fmt::dim()).strikethrough()
-                } else {
-                    name
-                });
-                if line.paused {
-                    r.on_hover_text("paused: not in the total");
-                }
+                ui.label(RichText::new("total").strong());
             });
             row.col(|ui| {
-                ui.label(RichText::new(line.schedule.describe()).color(fmt::dim()));
+                ui.label(RichText::new("running issuers").small().color(fmt::dim()));
             });
-            row.col(|ui| {
-                num(ui, fmt::mono(fmt::amount(line.amount)));
-            });
+            row.col(|_| {});
             for p in Period::ALL {
                 row.col(|ui| {
-                    let text = match line.rate(p) {
-                        Some(m) => fmt::mono(fmt::amount(m)),
-                        None => RichText::new("one-off").color(fmt::dim()),
-                    };
-                    num(ui, text);
+                    num(ui, fmt::mono(fmt::amount(dues::total(lines, p))).strong());
                 });
             }
-            row.col(|ui| {
-                if let Some(cohort) = uid {
-                    if ui.small_button("Remove").clicked() {
-                        let issuer = l.issuers.uid[line.issuer.get()];
-                        ops.push((
-                            Op::RemoveFromCohort { cohort, issuer },
-                            "removing an issuer from a cohort",
-                        ));
-                    }
-                }
-            });
+            return;
+        };
+        row.col(|ui| {
+            let name = RichText::new(&line.name);
+            let r =
+                ui.label(if line.paused { name.color(fmt::dim()).strikethrough() } else { name });
+            if line.paused {
+                r.on_hover_text("paused: not in the total");
+            }
         });
-        let paused = breakdown.paused_total(Period::Month);
-        if !paused.is_zero() {
-            ui.label(
-                RichText::new(format!("Paused issuers would add {} a month.", fmt::amount(paused)))
-                    .color(fmt::dim()),
-            );
+        row.col(|ui| {
+            ui.label(RichText::new(line.schedule.describe()).color(fmt::dim()));
+        });
+        row.col(|ui| {
+            num(ui, fmt::mono(fmt::amount(line.amount)));
+        });
+        for p in Period::ALL {
+            row.col(|ui| {
+                let text = match line.rate(p) {
+                    Some(m) => fmt::mono(fmt::amount(m)),
+                    None => RichText::new("one-off").color(fmt::dim()),
+                };
+                num(ui, text);
+            });
         }
+    });
+    let paused = dues::paused_total(lines, Period::Month);
+    if !paused.is_zero() {
         ui.label(
-            RichText::new("Rates are averages: a month is 30.44 days, a year 365.24.")
-                .small()
+            RichText::new(format!("Paused issuers would add {} a month.", fmt::amount(paused)))
                 .color(fmt::dim()),
         );
     }
-
-    // --- add a member
-    if let Some(cohort) = uid {
-        let outside: Vec<IssuerIx> =
-            l.issuers.indices().filter(|ix| !members.contains(ix)).collect();
-        if !outside.is_empty() {
-            ui.add_space(6.0);
-            egui::ComboBox::from_id_salt("cohort_add")
-                .selected_text("Add an issuer...")
-                .width(240.0)
-                .show_ui(ui, |ui| {
-                    for ix in outside {
-                        if ui.selectable_label(false, &l.issuers.name[ix.get()]).clicked() {
-                            let issuer = l.issuers.uid[ix.get()];
-                            ops.push((
-                                Op::AddToCohort { cohort, issuer },
-                                "adding an issuer to a cohort",
-                            ));
-                        }
-                    }
-                });
-        }
-    }
-
-    // --- calendar
-    ui.add_space(16.0);
-    calendar(ui, s, &members);
-
-    for (op, what) in ops {
-        s.stage(vec![op], what);
-    }
+    ui.label(
+        RichText::new("Rates are averages: a month is 30.44 days, a year 365.24.")
+            .small()
+            .color(fmt::dim()),
+    );
 }
 
 /// A month grid of every date the issuers fall due.
-fn calendar(ui: &mut Ui, s: &mut Session, members: &[IssuerIx]) {
+pub fn calendar(ui: &mut Ui, s: &mut Session, id: &str, members: &[IssuerIx]) {
     let month = s.calendar_month;
     let today = Date::today_utc();
     ui.horizontal(|ui| {
@@ -245,18 +132,18 @@ fn calendar(ui: &mut Ui, s: &mut Session, members: &[IssuerIx]) {
 
     let l = s.budget();
     let last = month.add_months(1).add_days(-1);
-    let entries = cohort::calendar(l, members, month, last, today);
+    let entries = dues::calendar(l, members, month, last, today);
 
     ui.add_space(4.0);
     if s.calendar_list {
-        payment_list(ui, l, &entries, today);
+        payment_list(ui, l, id, &entries, today);
     } else {
         let busiest = (0..=last.0 - month.0)
             .map(|d| entries.iter().filter(|e| e.date.0 == month.0 + d).count())
             .max()
             .unwrap_or(0);
         let cell = egui::vec2(118.0, 72.0);
-        egui::Grid::new("cohort_calendar").num_columns(7).spacing([4.0, 4.0]).show(ui, |ui| {
+        egui::Grid::new(("calendar_grid", id)).num_columns(7).spacing([4.0, 4.0]).show(ui, |ui| {
             for w in WEEKDAYS {
                 ui.label(RichText::new(w).small().color(fmt::dim()));
             }
@@ -320,13 +207,13 @@ fn calendar(ui: &mut Ui, s: &mut Session, members: &[IssuerIx]) {
 
 /// The month as a list: one line per payment, days grouped, so a busy
 /// month reads top to bottom instead of through "+3 more".
-fn payment_list(ui: &mut Ui, l: &Budget, entries: &[CalendarEntry], today: Date) {
+fn payment_list(ui: &mut Ui, l: &Budget, id: &str, entries: &[CalendarEntry], today: Date) {
     if entries.is_empty() {
         ui.label(RichText::new("Nothing falls due this month.").color(fmt::dim()));
         return;
     }
     Table::new(
-        "cohort_payments",
+        ("calendar_payments", id),
         vec![text("date"), text("day"), text("issuer").max(320.0), figures("amount"), text("")],
     )
     .height(crate::table::Height::Max(460.0))

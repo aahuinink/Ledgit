@@ -3,7 +3,7 @@
 //! there is exactly one copy of the truth.
 
 pub mod buckets;
-pub mod cohorts;
+pub mod calendar;
 pub mod commit;
 pub mod dashboard;
 pub mod goals;

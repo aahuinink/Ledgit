@@ -1,7 +1,7 @@
-//! Printing cohorts and saved views: rates, calendars, projections.
+//! Printing issuer rates, calendars and saved views.
 
 use crate::show::{amt, truncate};
-use ledgit_core::cohort::{self, DueStatus};
+use ledgit_core::dues::{self, DueStatus};
 use ledgit_core::id::IssuerIx;
 use ledgit_core::prelude::*;
 use ledgit_core::view;
@@ -9,36 +9,19 @@ use std::path::Path;
 
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-pub fn cohorts(l: &Budget) {
-    let live: Vec<_> = l.cohorts.live().collect();
-    if live.is_empty() {
-        println!("No cohorts.");
+/// Every listed issuer's rate in every unit, and what the running ones total.
+pub fn rates(l: &Budget, issuers: &[IssuerIx]) {
+    let lines = dues::rate_lines(l, issuers);
+    if lines.is_empty() {
+        println!("No issuers.");
         return;
     }
-    println!("{:<10} {:<28} {:>8} {:>16}", "uid", "name", "issuers", "per month");
-    for ix in live {
-        let uid = l.cohorts.uid[ix.get()];
-        let b = cohort::breakdown(l, uid).expect("live cohort");
-        println!(
-            "{:<10} {:<28} {:>8} {:>16}",
-            uid.short(),
-            truncate(&b.name, 28),
-            b.lines.len(),
-            amt(b.total(Period::Month))
-        );
-    }
-}
-
-/// One cohort, with every member's rate in every unit.
-pub fn cohort(l: &Budget, uid: CohortUid) -> Result<()> {
-    let b = cohort::breakdown(l, uid).ok_or_else(|| Error::Invalid("no such cohort".into()))?;
-    println!("{} ({} issuer(s))\n", b.name, b.lines.len());
     print!("  {:<24} {:>12} {:<20}", "issuer", "amount", "schedule");
     for p in Period::ALL {
         print!(" {:>12}", format!("per {p}"));
     }
     println!();
-    for line in &b.lines {
+    for line in &lines {
         print!(
             "  {:<24} {:>12} {:<20}",
             truncate(&line.name, 24),
@@ -52,19 +35,21 @@ pub fn cohort(l: &Budget, uid: CohortUid) -> Result<()> {
     }
     print!("\n  {:<58}", "total, running issuers");
     for p in Period::ALL {
-        print!(" {:>12}", amt(b.total(p)));
+        print!(" {:>12}", amt(dues::total(&lines, p)));
     }
     println!();
-    if b.lines.iter().any(|l| l.paused) {
-        println!("  paused issuers would add {} a month", amt(b.paused_total(Period::Month)));
+    if lines.iter().any(|l| l.paused) {
+        println!(
+            "  paused issuers would add {} a month",
+            amt(dues::paused_total(&lines, Period::Month))
+        );
     }
     println!("\n  Rates are averages: a month is 30.44 days and a year 365.24.");
-    Ok(())
 }
 
 /// Every due date of `issuers` in a window, grouped by day.
 pub fn calendar(l: &Budget, issuers: &[IssuerIx], from: Date, to: Date, today: Date) {
-    let entries = cohort::calendar(l, issuers, from, to, today);
+    let entries = dues::calendar(l, issuers, from, to, today);
     if entries.is_empty() {
         println!("Nothing falls due between {from} and {to}.");
         return;
@@ -110,14 +95,13 @@ pub fn views(l: &Budget) {
     }
 }
 
-/// "2 bucket(s), 1 cohort(s); -6 months .. +1 year".
+/// "2 bucket(s), 1 issuer(s); 6 months back, 1 year ahead, per month".
 pub fn describe(spec: &ViewSpec) -> String {
     let mut parts = Vec::new();
     let names = |n: usize, what: &str| (n > 0).then(|| format!("{n} {what}"));
     parts.extend(names(spec.buckets.len(), "bucket(s)"));
     parts.extend(names(spec.ledgers.len(), "ledger(s)"));
     parts.extend(names(spec.issuers.len(), "issuer(s)"));
-    parts.extend(names(spec.cohorts.len(), "cohort(s)"));
     parts.extend(names(spec.transactions.len(), "filter(s)"));
     if parts.is_empty() {
         parts.push("nothing yet".into());
@@ -172,9 +156,6 @@ pub fn view(l: &Budget, name: &str, r: &ViewReport) {
             }
             if f.effect.is_some_and(|e| e.is_zero()) {
                 notes.push("does not move this view's money".to_string());
-            }
-            if !f.via.is_empty() {
-                notes.push(format!("via {}", f.via.join(", ")));
             }
             println!(
                 "  {:<24} {:<20} {:>12} {:>14}  {}",
@@ -242,9 +223,6 @@ pub fn view(l: &Budget, name: &str, r: &ViewReport) {
     }
     for b in &r.missing_buckets {
         notes.push(format!("bucket {} no longer exists on this branch.", b.short()));
-    }
-    for c in &r.missing_cohorts {
-        notes.push(format!("cohort {} no longer exists on this branch.", c.short()));
     }
     if !notes.is_empty() {
         println!();

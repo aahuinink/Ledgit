@@ -19,7 +19,6 @@ pub enum FormKind {
     Transaction,
     Bucket,
     Issuer,
-    Cohort,
     View,
     Move,
 }
@@ -31,11 +30,7 @@ impl FormKind {
     /// form wants.
     pub fn width(self) -> f32 {
         match self {
-            FormKind::Ledger
-            | FormKind::Bucket
-            | FormKind::Cohort
-            | FormKind::View
-            | FormKind::Move => 460.0,
+            FormKind::Ledger | FormKind::Bucket | FormKind::View | FormKind::Move => 460.0,
             FormKind::Transaction | FormKind::Issuer => 640.0,
         }
     }
@@ -46,7 +41,6 @@ impl FormKind {
             FormKind::Transaction => "New transaction",
             FormKind::Bucket => "New bucket",
             FormKind::Issuer => "New issuer",
-            FormKind::Cohort => "New cohort",
             FormKind::View => "New view",
             FormKind::Move => "Move ledgers",
         }
@@ -73,7 +67,6 @@ pub struct Forms {
     transaction: TxForm,
     bucket: BucketForm,
     issuer: IssuerForm,
-    cohort: CohortForm,
     view: ViewForm,
     moving: MoveForm,
 }
@@ -91,7 +84,6 @@ impl Forms {
                     TxForm { date: today, legs: LegEditor::seed(budget), ..Default::default() };
             }
             FormKind::Bucket => self.bucket = BucketForm::default(),
-            FormKind::Cohort => self.cohort = CohortForm::default(),
             FormKind::View => self.view = ViewForm { all_buckets: true, ..Default::default() },
             FormKind::Move => self.moving = MoveForm::default(),
             FormKind::Issuer => {
@@ -223,10 +215,6 @@ impl Forms {
                 self.bucket = BucketForm { uid: Some(uid), name, description };
                 FormKind::Bucket
             }
-            Op::CreateCohort { uid, name, description } => {
-                self.cohort = CohortForm { uid: Some(uid), name, description };
-                FormKind::Cohort
-            }
             Op::CreateView { uid, name, description, spec } => {
                 self.view =
                     ViewForm { uid: Some((uid, spec)), name, description, all_buckets: false };
@@ -258,7 +246,6 @@ impl Forms {
             FormKind::Transaction => self.transaction.show(ui, budget),
             FormKind::Bucket => self.bucket.show(ui),
             FormKind::Issuer => self.issuer.show(ui, budget),
-            FormKind::Cohort => self.cohort.show(ui),
             FormKind::View => self.view.show(ui, budget),
             FormKind::Move => self.moving.show(ui, budget),
         };
@@ -712,45 +699,7 @@ impl TxForm {
     }
 }
 
-// ------------------------------------------------------- cohort and view
-
-#[derive(Default)]
-struct CohortForm {
-    uid: Option<CohortUid>,
-    name: String,
-    description: String,
-}
-
-impl CohortForm {
-    fn show(&mut self, ui: &mut Ui) -> Filled {
-        ui.label(
-            egui::RichText::new(
-                "A cohort groups issuers, the way a bucket groups ledgers. It stops or changes no payment.",
-            )
-            .color(fmt::dim()),
-        );
-        ui.add_space(6.0);
-        egui::Grid::new("cohort_form").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            label_row(ui, "Name", &mut self.name, "Bills");
-            label_row(ui, "Description", &mut self.description, "optional");
-        });
-        let (save, cancel) = footer(ui, "Stage cohort");
-        if cancel {
-            return Ok(Outcome::Cancelled);
-        }
-        if !save {
-            return Ok(Outcome::Pending);
-        }
-        if self.name.trim().is_empty() {
-            return Err("A cohort needs a name".into());
-        }
-        Ok(Outcome::Submit(vec![Op::CreateCohort {
-            uid: self.uid.unwrap_or_default(),
-            name: self.name.trim().to_string(),
-            description: self.description.trim().to_string(),
-        }]))
-    }
-}
+// -------------------------------------------------------------------- view
 
 /// Only the name is asked for here. What a view looks at is picked on the
 /// Views screen, where the chart redraws as you pick it.
