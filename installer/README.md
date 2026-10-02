@@ -16,7 +16,9 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 ```
 
 The script builds release binaries, runs the tests, and refuses to package a
-build whose tests fail. Output lands in `target\installer\`.
+build whose tests fail. It then rewrites the test budgets in `fixtures\`
+(`empty`, `household` and `stress`, dated from today) for checking the app by
+hand; they are not packaged. Output lands in `target\installer\`.
 
 ## Update an installed copy
 

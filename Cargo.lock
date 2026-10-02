@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "ledgit-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "ledgit-core",
@@ -1994,7 +1994,7 @@ dependencies = [
 
 [[package]]
 name = "ledgit-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2003,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "ledgit-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui",
@@ -2020,7 +2020,7 @@ dependencies = [
 
 [[package]]
 name = "ledgit-plot"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "epaint_default_fonts",
  "ledgit-core",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "ledgit-sqlite"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ledgit-core",
  "rusqlite",

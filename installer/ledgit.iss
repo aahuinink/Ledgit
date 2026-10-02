@@ -10,7 +10,7 @@
 ; here and an afternoon of XML there.
 
 #define AppName        "Ledgit"
-#define AppVersion     "0.1.0"
+#define AppVersion     "0.2.0"
 #define AppPublisher   "Ledgit"
 #define AppExeName     "ledgit-gui.exe"
 #define CliExeName     "ledgit.exe"

@@ -16,6 +16,13 @@ try {
 
     cargo test --release
     if ($LASTEXITCODE -ne 0) { throw 'tests failed - not packaging a broken build' }
+
+    # The test budgets in .\fixtures date everything from today, so stale
+    # copies drift; rebuild them with every installer. They are for checking
+    # the app by hand and are not packaged.
+    Write-Host 'Writing test fixtures...' -ForegroundColor Cyan
+    cargo run --release -p ledgit-cli --example fixtures -- (Join-Path $root 'fixtures')
+    if ($LASTEXITCODE -ne 0) { throw 'writing the test fixtures failed' }
 }
 finally {
     Pop-Location
