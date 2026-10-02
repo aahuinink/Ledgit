@@ -107,6 +107,7 @@ fn bucket_tiles(ui: &mut Ui, s: &mut Session) {
 
     let tile_width = 220.0;
     let per_row = ((ui.available_width() / (tile_width + 12.0)).floor() as usize).max(1);
+    let avail = s.availability();
     for chunk in buckets.chunks(per_row) {
         ui.horizontal(|ui| {
             for uid in chunk {
@@ -120,6 +121,16 @@ fn bucket_tiles(ui: &mut Ui, s: &mut Session) {
                     ui.vertical(|ui| {
                         ui.label(RichText::new(&roll.name).strong());
                         ui.label(fmt::money_text(roll.total).size(22.0));
+                        let available = avail.bucket(s.budget(), *uid, RollUp::ByNormality);
+                        if let Some(a) = available.filter(|a| *a != roll.total) {
+                            ui.label(
+                                RichText::new(format!("{} available", fmt::amount(a)))
+                                    .color(fmt::dim()),
+                            )
+                            .on_hover_text(
+                                "Less the payments already decided: see each ledger's page.",
+                            );
+                        }
                         ui.label(
                             RichText::new(format!("{} ledger(s)", roll.lines.len()))
                                 .color(fmt::dim())
@@ -149,24 +160,30 @@ fn pinned(ui: &mut Ui, s: &mut Session) {
         return;
     }
     let mut open: Option<LedgerUid> = None;
+    let avail = s.availability();
     let l = s.budget();
     let pins: Vec<(LedgerUid, ledgit_core::id::LedgerIx)> =
         s.pins.iter().filter_map(|uid| l.ledgers.ix(*uid).map(|ix| (*uid, ix))).collect();
-    Table::new("dash_pins", vec![text("ledger").max(300.0), figures("balance")]).show(
-        ui,
-        pins.len(),
-        |row| {
-            let (uid, ix) = pins[row.index()];
-            row.col(|ui| {
-                if ui.link(&l.ledgers.name[ix.get()]).clicked() {
-                    open = Some(uid);
-                }
-            });
-            row.col(|ui| {
-                num(ui, fmt::money_text(l.ledgers.balance(ix)));
-            });
-        },
-    );
+    Table::new(
+        "dash_pins",
+        vec![text("ledger").max(300.0), figures("posted"), figures("available")],
+    )
+    .show(ui, pins.len(), |row| {
+        let (uid, ix) = pins[row.index()];
+        row.col(|ui| {
+            if ui.link(&l.ledgers.name[ix.get()]).clicked() {
+                open = Some(uid);
+            }
+        });
+        row.col(|ui| {
+            num(ui, fmt::money_text(l.ledgers.balance(ix)));
+        });
+        row.col(|ui| {
+            if !avail.held_raw(ix).is_zero() {
+                num(ui, fmt::money_text(avail.available(l, ix)).strong());
+            }
+        });
+    });
     if let Some(uid) = open {
         s.selected_ledger = Some(uid);
         s.goto = Some(Screen::Register);

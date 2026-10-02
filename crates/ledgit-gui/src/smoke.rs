@@ -136,6 +136,68 @@ fn session() -> Session {
     s
 }
 
+/// [`session`], plus a card paid by statement, a vet bill on it paid off
+/// later, a couch that posts later, and one month's payment set ahead - so
+/// Available, "spoken for" and the Issuers screen's upcoming list all have
+/// rows.
+fn card_session() -> Session {
+    let mut s = session();
+    let open: Date = "2024-01-01".parse().unwrap();
+    let l = s.repo.working();
+    let cash = l.ledgers.uid[l.ledger_by_name("Chequing").unwrap().get()];
+    let bucket = l.buckets.uid[l.bucket_by_name("Net Worth").unwrap().get()];
+    let today = Date::today_utc();
+    let visa = s.repo.add_ledger("Visa", "", Normality::Credit, open).unwrap();
+    let vet_l = s.repo.add_ledger("Expenses:Vet", "", Normality::Debit, open).unwrap();
+    s.repo.stage(Op::AddToBucket { bucket, ledger: visa }).unwrap();
+    s.repo.post("Fuel", "", today.add_days(-40), Money::from_major(80), vet_l, visa).unwrap();
+    let card = s
+        .repo
+        .add_rule_issuer(
+            "Visa payment",
+            "",
+            visa,
+            cash,
+            AmountRule::Statement {
+                of: visa,
+                close_day: 25,
+                min: Money::from_major(10),
+                min_rate: Rate(20_000),
+            },
+            Schedule::MonthlyOn { day: 10, every_n_months: 1 },
+            today.add_days(-5),
+        )
+        .unwrap();
+    let vet = s.repo.post("Vet", "", today, Money::from_major(1_200), vet_l, visa).unwrap();
+    s.repo.pay_later(vet, visa, cash, Money::from_major(1_200), today.add_days(12)).unwrap();
+    s.repo
+        .add_issuer(
+            "Couch",
+            "",
+            vet_l,
+            cash,
+            Money::from_major(900),
+            Schedule::Once,
+            today.add_days(30),
+        )
+        .unwrap();
+    let card_ix = s.repo.working().issuers.ix(card).unwrap();
+    let second = ledgit_core::issuer::upcoming(s.repo.working(), card_ix, 2)[1].date;
+    s.repo
+        .stage(Op::SetIssuerOverride {
+            uid: card,
+            date: second,
+            amount: Some(Money::from_major(5)),
+        })
+        .unwrap();
+    let mut spec = ViewSpec::all_buckets(s.repo.working());
+    spec.show_available = true;
+    s.repo.add_view("Available", "", spec).unwrap();
+
+    s.selected_issuer = Some(card);
+    s
+}
+
 /// Run one headless egui pass over `f`.
 ///
 /// `egui::__run_test_ui` only takes `Fn`, and every view needs `&mut Session`,
@@ -147,7 +209,11 @@ fn run_ui(mut f: impl FnMut(&mut egui::Ui)) {
 }
 
 fn draw(s: &mut Session, view: Screen) {
-    run_ui(|ui| match view {
+    run_ui(|ui| draw_in(ui, s, view));
+}
+
+fn draw_in(ui: &mut egui::Ui, s: &mut Session, view: Screen) {
+    match view {
         Screen::Dashboard => views::dashboard::show(ui, s),
         Screen::Ledgers => views::ledgers::show(ui, s),
         Screen::Register => views::ledgers::register(ui, s),
@@ -159,7 +225,7 @@ fn draw(s: &mut Session, view: Screen) {
         Screen::Variables => views::variables::show(ui, s),
         Screen::Commit => views::commit::show(ui, s),
         Screen::History => views::history::show(ui, s),
-    });
+    }
 }
 
 const EVERY_VIEW: [Screen; 11] = [
@@ -715,8 +781,7 @@ fn figures_sit_under_their_header_not_at_the_window_edge() {
     let texts = painted_text(egui::vec2(1600.0, 900.0), |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| views::ledgers::show(ui, &mut s));
     });
-    // The sort control says "balance" too; the column header is below it.
-    let header = *find(&texts, "balance").last().expect("a balance header");
+    let header = *find(&texts, "posted").last().expect("a posted header");
     let cash = s.budget().ledgers.ix(s.selected_ledger.unwrap()).unwrap();
     let amount = crate::fmt::amount(s.budget().ledgers.balance(cash));
     let figure = find(&texts, &amount)[0];
@@ -724,7 +789,84 @@ fn figures_sit_under_their_header_not_at_the_window_edge() {
         (figure.right() - header.right()).abs() < 1.5,
         "figure {figure:?} is not right-aligned with its header {header:?}"
     );
-    assert!(header.right() < 900.0, "the balance column ran to the window edge: {header:?}");
+    assert!(header.right() < 900.0, "the posted column ran to the window edge: {header:?}");
+}
+
+// ----------------------------------------------------- paying, available
+
+fn texts_of(s: &mut Session, screen: Screen) -> Vec<String> {
+    painted_text(egui::vec2(1600.0, 1400.0), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| draw_in(ui, s, screen));
+    })
+    .into_iter()
+    .map(|(t, _)| t)
+    .collect()
+}
+
+#[test]
+fn every_screen_draws_scheduled_payments_and_statements() {
+    let mut s = card_session();
+    for view in EVERY_VIEW {
+        draw(&mut s, view);
+    }
+    // Mid-way through setting a payment ahead, too.
+    let next = s.selected_issuer.unwrap();
+    let ix = s.budget().issuers.ix(next).unwrap();
+    let date = ledgit_core::issuer::upcoming(s.budget(), ix, 1)[0].date;
+    s.issuer_override = Some((date, "123".into()));
+    draw(&mut s, Screen::Issuers);
+    assert_eq!(s.issuer_override, Some((date, "123".into())), "drawing keeps the draft");
+}
+
+/// Chequing pays the vet in twelve days, the couch in thirty, and the card's
+/// closed statement on the 10th: its page says what is posted, what is
+/// available, and why.
+#[test]
+fn a_ledger_page_shows_what_is_spoken_for() {
+    let mut s = card_session();
+    let texts = texts_of(&mut s, Screen::Register);
+    for want in ["posted", "available", "SPOKEN FOR", "Pay off Vet", "Couch"] {
+        assert!(texts.iter().any(|t| t == want), "{want:?} not in {texts:?}");
+    }
+    let l = s.budget();
+    let cash = l.ledgers.ix(s.selected_ledger.unwrap()).unwrap();
+    let a = s.availability();
+    // The vet, the couch, and the $80 of fuel on the card statement that
+    // has already closed.
+    assert_eq!(l.ledgers.balance(cash) - a.available(l, cash), Money::from_major(2_180));
+    let shown = crate::fmt::amount(a.available(l, cash));
+    assert!(texts.contains(&shown), "{shown} not in {texts:?}");
+}
+
+#[test]
+fn the_commit_screen_lists_money_spoken_for() {
+    let mut s = card_session();
+    let texts = texts_of(&mut s, Screen::Commit);
+    for want in ["MONEY SPOKEN FOR", "Pay off Vet", "Couch"] {
+        assert!(texts.iter().any(|t| t == want), "{want:?} not in {texts:?}");
+    }
+}
+
+/// The selected statement issuer lists its next payments with their
+/// statements, and the one set ahead under the minimum shows it raised.
+#[test]
+fn the_issuers_screen_lists_upcoming_statements() {
+    let mut s = card_session();
+    let texts = texts_of(&mut s, Screen::Issuers);
+    for want in ["Visa payment", "closed", "minimum", "Clear", "Set amount"] {
+        assert!(texts.iter().any(|t| t == want), "{want:?} not in {texts:?}");
+    }
+    assert!(texts.iter().any(|t| t == "5.00"), "the amount set ahead: {texts:?}");
+}
+
+#[test]
+fn a_view_shows_available_beside_today() {
+    let mut s = card_session();
+    let l = s.budget();
+    s.selected_view = l.view_by_name("Available").map(|ix| l.views.uid[ix.get()]);
+    s.view_draft = None;
+    let texts = texts_of(&mut s, Screen::Views);
+    assert!(texts.iter().any(|t| t == "available"), "{texts:?}");
 }
 
 /// A headless window to click and type in, reporting what it painted.

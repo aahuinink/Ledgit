@@ -120,6 +120,31 @@ enum Command {
         date: Option<String>,
         #[arg(long, default_value = "")]
         desc: String,
+        /// Post nothing now: schedule the whole entry for --date, which must
+        /// be after today. It posts when issuers are run on or after then,
+        /// and until it does, the money it takes is held back.
+        #[arg(long)]
+        later: bool,
+        /// Post now and schedule paying it off from this ledger, e.g.
+        /// `--pay-from Chequing --pay-on 2026-10-15`.
+        #[arg(long, value_name = "LEDGER", requires = "pay_on", conflicts_with = "later")]
+        pay_from: Option<String>,
+        /// The day the payment falls due.
+        #[arg(long, value_name = "DATE", requires = "pay_from")]
+        pay_on: Option<String>,
+        /// The ledger the payment pays down. Defaults to the entry's only
+        /// credit side: the card or payable it was put on.
+        #[arg(long, value_name = "LEDGER", requires = "pay_from")]
+        settle: Option<String>,
+        /// How much to pay. Defaults to everything the entry put on --settle.
+        #[arg(long, value_name = "AMOUNT", requires = "pay_from")]
+        pay_amount: Option<String>,
+    },
+    /// What is spoken for: payments already decided but not yet posted, and
+    /// the ledgers they hold money back on.
+    Committed {
+        /// Only those holding money back on this ledger.
+        ledger: Option<String>,
     },
     /// Recurring transactions.
     #[command(subcommand)]
@@ -246,6 +271,23 @@ enum IssuerCmd {
         /// Whose balance --apr or --share reads. Defaults to the --credit side.
         #[arg(long)]
         of: Option<String>,
+        /// Pay off this ledger's statement each time: what it stood at when
+        /// the statement closed, less anything paid since. A card paid on
+        /// the 10th that closes on the 25th:
+        ///
+        ///   ledgit issuer add "Visa" --debit Visa --credit Chequing --statement Visa --close 25 --every monthly:10 --min 10 --min-percent 2
+        #[arg(long, value_name = "LEDGER", conflicts_with_all = ["apr", "share", "amount"], requires = "close")]
+        statement: Option<String>,
+        /// The day of the month the statement closes.
+        #[arg(long, value_name = "DAY")]
+        close: Option<u32>,
+        /// The least that may be paid, in dollars. An amount set ahead is
+        /// never allowed below the greater of this and --min-percent.
+        #[arg(long, requires = "statement", default_value = "0")]
+        min: String,
+        /// The least that may be paid, as a percentage of the statement.
+        #[arg(long, requires = "statement", default_value = "0")]
+        min_percent: String,
         /// 14d, weekly, biweekly, monthly, monthly:15, quarterly:1, yearly, once
         #[arg(long)]
         every: String,
@@ -278,6 +320,24 @@ enum IssuerCmd {
         /// Last day to show. Defaults to a month after --from.
         #[arg(long)]
         to: Option<String>,
+    },
+    /// Set how much one occurrence pays, ahead of time: `ledgit issuer
+    /// override Visa 2026-11-10 300`. A statement never pays less than its
+    /// minimum. Leave the amount off with --clear to put it back.
+    Override {
+        issuer: String,
+        date: String,
+        #[arg(required_unless_present = "clear")]
+        amount: Option<String>,
+        #[arg(long, conflicts_with = "amount")]
+        clear: bool,
+    },
+    /// The next occurrences an issuer owes, priced: for a statement, what it
+    /// closed at, what has been paid since, and the minimum.
+    Upcoming {
+        issuer: String,
+        #[arg(short = 'n', long, default_value_t = 6)]
+        count: usize,
     },
     /// Stage every transaction the issuers owe up to a date.
     Run {
@@ -366,6 +426,9 @@ struct SpecArgs {
     /// liabilities.
     #[arg(long)]
     sum: Option<bool>,
+    /// Also show each line as available: less the payments already decided.
+    #[arg(long)]
+    available: Option<bool>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -600,18 +663,72 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
 
-        Command::Post { name, amount, debit, credit, date, desc } => {
+        Command::Post {
+            name,
+            amount,
+            debit,
+            credit,
+            date,
+            desc,
+            later,
+            pay_from,
+            pay_on,
+            settle,
+            pay_amount,
+        } => {
             let legs = resolve::legs(repo.working(), &debit, &credit, amount.as_deref())?;
+            let today = Date::today_utc();
             let when = match date {
                 Some(s) => resolve::date(&s)?,
-                None => Date::today_utc(),
+                None => today,
             };
             let total = ledgit_core::model::magnitude(&legs);
             let vars = &repo.working().variables;
             let name = vars.substitute(&name).map_err(Error::Invalid)?;
             let desc = vars.substitute(&desc).map_err(Error::Invalid)?;
-            repo.post_split(&name, desc, when, legs.clone())?;
+            if later {
+                if when <= today {
+                    return Err(Error::Invalid(
+                        "--later needs a --date after today; otherwise just post it".into(),
+                    ));
+                }
+                repo.add_issuer_split(&name, desc, legs, Schedule::Once, when)?;
+                println!("Scheduled: {total} to post on {when}. Held back until then.");
+                return Ok(());
+            }
+            let tx = repo.post_split(&name, desc, when, legs.clone())?;
             println!("Staged: {total} on {when}, {} sides.", legs.len());
+            if let (Some(from), Some(on)) = (pay_from, pay_on) {
+                let l = repo.working();
+                let from = resolve::ledger(l, &from)?;
+                let on = resolve::date(&on)?;
+                let owed_on = match settle {
+                    Some(s) => resolve::ledger(l, &s)?,
+                    None => match legs.iter().filter(|g| !g.is_debit()).collect::<Vec<_>>()[..] {
+                        [only] => only.ledger,
+                        _ => {
+                            return Err(Error::Invalid(
+                                "the entry has several credit sides: say which with --settle"
+                                    .into(),
+                            ))
+                        }
+                    },
+                };
+                let pay = match pay_amount {
+                    Some(a) => resolve::amount(l, &a)?,
+                    None => -legs
+                        .iter()
+                        .filter(|g| g.ledger == owed_on && !g.is_debit())
+                        .map(|g| g.amount)
+                        .sum::<Money>(),
+                };
+                repo.pay_later(tx, owed_on, from, pay, on)?;
+                println!(
+                    "Scheduled: pay {} from {} on {on}. Held back until then.",
+                    pay,
+                    l_name(&repo, from)
+                );
+            }
             for leg in &legs {
                 let ix = repo.working().ledgers.ix(leg.ledger).expect("just staged");
                 println!(
@@ -629,6 +746,12 @@ fn run(cli: Cli) -> Result<()> {
         }
 
         Command::Search { text } => show::search(repo.working(), &text),
+
+        Command::Committed { ledger } => {
+            let l = repo.working();
+            let only = ledger.map(|x| resolve::ledger(l, &x)).transpose()?;
+            show::committed(l, only.and_then(|u| l.ledgers.ix(u)), Date::today_utc());
+        }
     }
     Ok(())
 }
@@ -701,13 +824,28 @@ fn ledger_cmd(repo: &mut Repo<SqliteStore>, cmd: LedgerCmd) -> Result<()> {
 
 fn issuer_cmd(repo: &mut Repo<SqliteStore>, cmd: IssuerCmd) -> Result<()> {
     match cmd {
-        IssuerCmd::Add { name, amount, debit, credit, apr, share, of, every, start, desc } => {
+        IssuerCmd::Add {
+            name,
+            amount,
+            debit,
+            credit,
+            apr,
+            share,
+            of,
+            statement,
+            close,
+            min,
+            min_percent,
+            every,
+            start,
+            desc,
+        } => {
             let schedule = resolve::schedule(&every)?;
             let start = match start {
                 Some(s) => resolve::date(&s)?,
                 None => Date::today_utc(),
             };
-            if apr.is_some() || share.is_some() {
+            if apr.is_some() || share.is_some() || statement.is_some() {
                 let l = repo.working();
                 let [d] = debit.as_slice() else {
                     return Err(Error::Invalid("a rate needs exactly one --debit".into()));
@@ -721,11 +859,18 @@ fn issuer_cmd(repo: &mut Repo<SqliteStore>, cmd: IssuerCmd) -> Result<()> {
                     None => c,
                 };
                 let pct = |s: &str| Rate::parse_percent(s).map_err(Error::Invalid);
-                let rule = match (apr, share) {
-                    (Some(a), _) => AmountRule::Interest { of, apr: pct(&a)? },
-                    (None, Some(s)) => AmountRule::ShareOfBalance { of, rate: pct(&s)? },
-                    (None, None) => unreachable!("checked above"),
+                let rule = match (apr, share, statement) {
+                    (Some(a), _, _) => AmountRule::Interest { of, apr: pct(&a)? },
+                    (None, Some(s), _) => AmountRule::ShareOfBalance { of, rate: pct(&s)? },
+                    (None, None, Some(st)) => AmountRule::Statement {
+                        of: resolve::ledger(l, &st)?,
+                        close_day: close.expect("clap requires --close"),
+                        min: resolve::amount(l, &min)?,
+                        min_rate: pct(&min_percent)?,
+                    },
+                    (None, None, None) => unreachable!("checked above"),
                 };
+                let of = rule.of();
                 repo.add_rule_issuer(&name, desc, d, c, rule, schedule, start)?;
                 println!(
                     "Staged issuer \"{name}\": {} {} {} from {start}.",
@@ -753,6 +898,38 @@ fn issuer_cmd(repo: &mut Repo<SqliteStore>, cmd: IssuerCmd) -> Result<()> {
             let to = to.as_deref().map(resolve::date).transpose()?.unwrap_or(from.add_months(1));
             let issuers = view_issuers(l, view.as_deref(), today)?;
             analysis::calendar(l, &issuers, from, to, today);
+        }
+        IssuerCmd::Override { issuer, date, amount, clear } => {
+            let l = repo.working();
+            let uid = resolve::issuer(l, &issuer)?;
+            let date = resolve::date(&date)?;
+            let amount = match (amount, clear) {
+                (_, true) | (None, _) => None,
+                (Some(a), false) => Some(resolve::amount(l, &a)?),
+            };
+            repo.stage(Op::SetIssuerOverride { uid, date, amount })?;
+            let l = repo.working();
+            let ix = l.issuers.ix(uid).expect("resolved");
+            match amount {
+                Some(m) => {
+                    let o = issuer::project(l, &running(l), date)
+                        .into_iter()
+                        .find(|o| o.issuer == ix && o.date == date);
+                    let paid = o.as_ref().map_or(m, |o| o.amount());
+                    let note = if paid > m {
+                        format!(" (raised to the minimum, {paid})")
+                    } else {
+                        String::new()
+                    };
+                    println!("Staged: {} pays {m} on {date}{note}.", l.issuers.name[ix.get()]);
+                }
+                None => println!("Staged: {} works out {date} as usual.", l.issuers.name[ix.get()]),
+            }
+        }
+        IssuerCmd::Upcoming { issuer, count } => {
+            let l = repo.working();
+            let ix = l.issuers.ix(resolve::issuer(l, &issuer)?).expect("resolved");
+            show::upcoming(l, ix, count);
         }
         IssuerCmd::Pause { issuer } => {
             let uid = resolve::issuer(repo.working(), &issuer)?;
@@ -789,6 +966,11 @@ fn issuer_cmd(repo: &mut Repo<SqliteStore>, cmd: IssuerCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Every issuer that is not paused.
+fn running(l: &Budget) -> Vec<IssuerIx> {
+    l.issuers.indices().filter(|ix| !l.issuers.paused[ix.get()]).collect()
 }
 
 /// The issuers a saved view breaks down - those it names, or with none named,
@@ -884,6 +1066,9 @@ fn build_spec(l: &Budget, mut spec: ViewSpec, a: SpecArgs) -> Result<ViewSpec> {
     if let Some(b) = a.sum {
         spec.roll = if b { RollUp::Sum } else { RollUp::ByNormality };
     }
+    if let Some(b) = a.available {
+        spec.show_available = b;
+    }
     Ok(spec)
 }
 
@@ -917,7 +1102,7 @@ fn view_cmd(repo: &mut Repo<SqliteStore>, cmd: ViewCmd) -> Result<()> {
                 today.as_deref().map(resolve::date).transpose()?.unwrap_or_else(Date::today_utc);
             let until = until.as_deref().map(resolve::date).transpose()?;
             let r = analysis::evaluate(l, &v.spec, today, until);
-            analysis::view(l, &v.name, &r);
+            analysis::view(l, &v.name, &r, v.spec.show_available);
             if let Some(rev) = compare {
                 let id = repo.resolve(&rev)?;
                 let then_budget = repo.budget_at(id)?;

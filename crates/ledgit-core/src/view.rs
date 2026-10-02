@@ -80,6 +80,12 @@ pub struct Series {
     /// For a ledger's line: each of its alerts that is not firing today, and
     /// the first day the projection sets it off.
     pub alerts_ahead: Vec<(Alert, Date)>,
+    /// The line as *available*, from today on: the balance with every
+    /// payment already decided taken off until it lands. It meets the
+    /// balance once the last one has posted. See `crate::available`.
+    pub available: Vec<(Date, Money)>,
+    /// Today's available value.
+    pub available_now: Money,
 }
 
 impl Series {
@@ -404,6 +410,27 @@ pub fn evaluate_between(
         }
     }
 
+    // ------------------------------------------------------- commitments
+    // What each series has held back by payments already decided, and the
+    // day each lands in the projection - `None` if the projection does not
+    // run its issuer, so it never lands.
+    let mut held: Vec<Vec<(Option<Date>, Money)>> = vec![Vec::new(); defs.len()];
+    for c in crate::available::commitments(l, today) {
+        let lands = simulated.contains(&c.issuer).then(|| c.date.max(today));
+        let mut effect = vec![Money::ZERO; defs.len()];
+        for leg in c.legs.iter().filter(|g| !g.is_debit()) {
+            let Some(a) = l.ledgers.ix(leg.ledger) else { continue };
+            for (si, w) in &feeds[a.get()] {
+                effect[*si as usize] += Money(w * leg.amount.0);
+            }
+        }
+        for (si, e) in effect.into_iter().enumerate() {
+            if !e.is_zero() {
+                held[si].push((lands, e));
+            }
+        }
+    }
+
     // ------------------------------------------------------------- sweep
     let mut order: Vec<u32> = (0..ev_date.len() as u32).collect();
     order.sort_by_key(|e| ev_date[*e as usize]);
@@ -432,7 +459,8 @@ pub fn evaluate_between(
     let series = defs
         .into_iter()
         .zip(points)
-        .map(|((label, kind, weights), mut pts)| {
+        .zip(held)
+        .map(|(((label, kind, weights), mut pts), held)| {
             // Pin today and the last day, so every line reaches both.
             for d in [today, end] {
                 let v = value_at(&pts, d);
@@ -464,9 +492,12 @@ pub fn evaluate_between(
                     .collect(),
                 _ => Vec::new(),
             };
+            let available = available_line(&pts, &held, today, end);
             Series {
                 label,
                 kind,
+                available_now: value_at(&available, today),
+                available,
                 now: value_at(&pts, today),
                 at_end: value_at(&pts, end),
                 lowest_ahead,
@@ -532,6 +563,28 @@ pub fn evaluate_between(
         cancelled,
         missing_buckets,
     }
+}
+
+/// A series as available from `today` to `end`: its value at each date, less
+/// what is held back by commitments that have not landed by then.
+fn available_line(
+    pts: &[(Date, Money)],
+    held: &[(Option<Date>, Money)],
+    today: Date,
+    end: Date,
+) -> Vec<(Date, Money)> {
+    let mut dates: Vec<Date> = pts.iter().map(|(d, _)| *d).filter(|d| *d >= today).collect();
+    dates.extend(held.iter().filter_map(|(lands, _)| *lands).filter(|d| *d >= today && *d <= end));
+    dates.push(today);
+    dates.sort();
+    dates.dedup();
+    let mut out: Vec<(Date, Money)> = Vec::with_capacity(dates.len());
+    for d in dates {
+        let pending: Money =
+            held.iter().filter(|(lands, _)| lands.is_none_or(|l| l > d)).map(|(_, e)| *e).sum();
+        push_point(&mut out, d, value_at(pts, d) + pending);
+    }
+    out
 }
 
 /// A name for what a series tracks that is the same in any budget: a
@@ -704,6 +757,7 @@ mod tests {
             schedule: Schedule::MonthlyOn { day, every_n_months: 1 },
             start: d(2024, 1, 1),
             rule: None,
+            settles: None,
         };
         let post = |legs, date| Op::PostTransaction {
             uid: TxUid::new(),
@@ -813,6 +867,41 @@ mod tests {
         assert_eq!(t.net(), major(1_500));
     }
 
+    /// A payment set up for March 20 is held back from today and lands on
+    /// its day; until then available sits below the balance by its amount.
+    #[test]
+    fn available_holds_back_a_scheduled_payment_until_it_lands() {
+        let mut fx = fixture();
+        fx.l.apply(&Op::CreateIssuer {
+            uid: IssuerUid::new(),
+            name: "Pay the Visa".into(),
+            description: String::new(),
+            legs: simple_legs(fx.visa, fx.cash, major(100)),
+            schedule: Schedule::Once,
+            start: d(2024, 3, 20),
+            rule: None,
+            settles: None,
+        })
+        .unwrap();
+        let r = evaluate(&fx.l, &net_worth(&fx), today());
+        let total = &r.series[0];
+        assert_eq!(total.now, major(1_700));
+        // Chequing's $100 is spoken for; the Visa going down waits.
+        assert_eq!(total.available_now, major(1_600));
+        assert_eq!(value_at(&total.available, d(2024, 3, 19)), major(1_600));
+        for day in [20, 25] {
+            let date = d(2024, 3, day);
+            assert_eq!(value_at(&total.available, date), total.value_at(date), "landed by {date}");
+        }
+
+        // Left out of a what-if simulation, it never lands: held throughout.
+        let spec =
+            ViewSpec { issuers: vec![fx.pay], only_selected_issuers: true, ..net_worth(&fx) };
+        let r = evaluate(&fx.l, &spec, today());
+        let total = &r.series[0];
+        assert_eq!(value_at(&total.available, r.end), total.at_end - major(100));
+    }
+
     #[test]
     fn restricting_the_simulation_answers_what_if() {
         let fx = fixture();
@@ -897,6 +986,7 @@ mod tests {
                 schedule: x.schedule,
                 start: x.start,
                 rule: x.rule,
+                settles: None,
             });
         }
         ops

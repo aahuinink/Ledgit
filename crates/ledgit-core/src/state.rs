@@ -165,6 +165,10 @@ pub struct IssuerArena {
     /// With a rule, `legs` are proportions and the amount is worked out
     /// each time; see [`AmountRule`].
     pub rule: Vec<Option<AmountRule>>,
+    /// The transaction each issuer pays off, if it was scheduled from one.
+    pub settles: Vec<Option<TxUid>>,
+    /// Amounts set ahead for particular occurrences, sorted by date.
+    pub overrides: Vec<Vec<(Date, Money)>>,
     by_uid: HashMap<IssuerUid, u32>,
 }
 
@@ -193,7 +197,15 @@ impl IssuerArena {
             emitted_through: self.emitted_through[i],
             paused: self.paused[i],
             rule: self.rule[i],
+            settles: self.settles[i],
+            overrides: self.overrides[i].clone(),
         }
+    }
+
+    /// The amount set ahead for the occurrence on `date`, if any.
+    pub fn override_on(&self, ix: IssuerIx, date: Date) -> Option<Money> {
+        let o = &self.overrides[ix.get()];
+        o.binary_search_by_key(&date, |(d, _)| *d).ok().map(|k| o[k].1)
     }
 
     /// The size of the entry this issuer posts.
@@ -567,7 +579,7 @@ impl Budget {
                     self.transactions.description[ix] = d;
                 }
             }
-            Op::CreateIssuer { uid, name, description, legs, schedule, start, rule } => {
+            Op::CreateIssuer { uid, name, description, legs, schedule, start, rule, settles } => {
                 if self.issuers.ix(uid).is_some() {
                     return Err(Error::Duplicate { kind: "issuer", uid: uid.0 });
                 }
@@ -581,6 +593,11 @@ impl Budget {
                     r.validate(&schedule).map_err(invalid)?;
                     self.ledger_ix(r.of())?;
                 }
+                if let Some(tx) = settles {
+                    self.transactions
+                        .ix(tx)
+                        .ok_or(Error::NoSuchEntity { kind: "transaction", uid: tx.0 })?;
+                }
                 let s = &mut self.issuers;
                 s.by_uid.insert(uid, s.uid.len() as u32);
                 s.uid.push(uid);
@@ -592,6 +609,8 @@ impl Budget {
                 s.emitted_through.push(None);
                 s.paused.push(false);
                 s.rule.push(rule);
+                s.settles.push(settles);
+                s.overrides.push(Vec::new());
             }
             Op::EditIssuer { uid, name, description } => {
                 let ix = self.issuer_ix(uid)?.get();
@@ -605,6 +624,29 @@ impl Budget {
             Op::SetIssuerPaused { uid, paused } => {
                 let ix = self.issuer_ix(uid)?.get();
                 self.issuers.paused[ix] = paused;
+            }
+            Op::SetIssuerOverride { uid, date, amount } => {
+                let ix = self.issuer_ix(uid)?.get();
+                let s = &self.issuers;
+                if !s.schedule[ix].dates_between(s.start[ix], date, date).contains(&date) {
+                    return Err(invalid(format!("{} does not fall due on {date}", s.name[ix])));
+                }
+                if s.emitted_through[ix].is_some_and(|done| date <= done) {
+                    return Err(invalid(format!("{} has already posted {date}", s.name[ix])));
+                }
+                let o = &mut self.issuers.overrides[ix];
+                let at = o.binary_search_by_key(&date, |(d, _)| *d);
+                match (amount, at) {
+                    (Some(m), _) if m.cents() <= 0 => {
+                        return Err(invalid("an amount set ahead must be above zero"));
+                    }
+                    (Some(m), Ok(k)) => o[k].1 = m,
+                    (Some(m), Err(k)) => o.insert(k, (date, m)),
+                    (None, Ok(k)) => {
+                        o.remove(k);
+                    }
+                    (None, Err(_)) => {}
+                }
             }
             Op::AdvanceIssuer { uid, through } => {
                 let ix = self.issuer_ix(uid)?.get();
@@ -1042,6 +1084,7 @@ mod tests {
                 schedule: Schedule::EveryNDays { n: 14 },
                 start: Date::from_ymd(2024, 1, 1).unwrap(),
                 rule: None,
+                settles: None,
             },
         ])
         .unwrap();

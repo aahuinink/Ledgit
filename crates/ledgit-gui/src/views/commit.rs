@@ -36,6 +36,7 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
         ledgers_table(ui, &report);
         ui.add_space(14.0);
         buckets_table(ui, &report);
+        commitments_table(ui, s.budget(), &report);
         if !report.alerts.is_empty() {
             ui.add_space(14.0);
             ui.label(RichText::new("ALERTS THIS SETS OFF").small().color(fmt::dim()));
@@ -281,6 +282,62 @@ fn buckets_table(ui: &mut Ui, r: &ChangeReport) {
             if b.membership_changed {
                 ui.label(RichText::new("membership changed").small().color(fmt::dim()));
             }
+        });
+    });
+}
+
+/// Money the staged changes speak for, release, or resize: scheduled
+/// payments, and statement payments once their statement has closed.
+fn commitments_table(ui: &mut Ui, l: &Budget, r: &ChangeReport) {
+    if r.commitments.is_empty() {
+        return;
+    }
+    ui.add_space(14.0);
+    ui.label(RichText::new("MONEY SPOKEN FOR").small().color(fmt::dim()));
+    ui.label(
+        RichText::new(
+            "Payments already decided come off the available balance of the ledger they \
+             are paid from, until they post.",
+        )
+        .small()
+        .color(fmt::dim()),
+    );
+    ui.add_space(4.0);
+    Table::new(
+        "report_commitments",
+        vec![
+            text("due"),
+            text("payment").max(320.0),
+            figures("before"),
+            figures("after"),
+            text("held on").max(320.0),
+        ],
+    )
+    .show(ui, r.commitments.len(), |row| {
+        let c = &r.commitments[row.index()];
+        row.col(|ui| {
+            ui.label(fmt::mono(c.date.to_string()));
+        });
+        row.col(|ui| {
+            ui.label(&l.issuers.name[c.issuer.get()]);
+        });
+        for m in [c.before, c.after] {
+            row.col(|ui| {
+                let t = match m {
+                    Some(m) => fmt::mono(fmt::amount(m)),
+                    None => RichText::new("-").color(fmt::dim()),
+                };
+                num(ui, t);
+            });
+        }
+        row.col(|ui| {
+            let names: Vec<&str> =
+                c.ledgers.iter().map(|ix| l.ledgers.name[ix.get()].as_str()).collect();
+            let note = match (c.before, c.after) {
+                (Some(_), None) => "paid: no longer held".to_string(),
+                _ => names.join(", "),
+            };
+            ui.label(RichText::new(note).small().color(fmt::dim()));
         });
     });
 }

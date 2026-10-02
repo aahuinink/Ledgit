@@ -1260,11 +1260,94 @@ fn an_issuer_without_a_rule_encodes_as_it_always_did() {
         schedule: Schedule::Once,
         start: d("2024-01-01"),
         rule: None,
+        settles: None,
     };
     let json = serde_json::to_string(&op).unwrap();
     assert!(!json.contains("rule"), "{json}");
+    assert!(!json.contains("settles"), "{json}");
     let back: Op = serde_json::from_str(&json).unwrap();
     assert_eq!(back, op);
+}
+
+// --------------------------------------------------------- paying later
+
+/// Bought on the loan ledger today, paid from cash on a date ahead: nothing
+/// moves until issuers are run on or after that date, and the payment knows
+/// what it paid off.
+#[test]
+fn a_payment_scheduled_from_a_transaction_posts_on_its_date() {
+    let mut f = fixture();
+    let bought = f
+        .repo
+        .post("Vet", "", d("2024-03-01"), Money::from_major(1_200), f.salary, f.loan)
+        .unwrap();
+    let pay = f
+        .repo
+        .pay_later(bought, f.loan, f.cash, Money::from_major(1_200), d("2024-03-15"))
+        .unwrap();
+    f.repo.commit("vet, paid on the 15th").unwrap();
+
+    let l = f.repo.working();
+    let ix = l.issuers.ix(pay).unwrap();
+    assert_eq!(l.issuers.settles[ix.get()], Some(bought));
+    assert_eq!(l.issuers.name[ix.get()], "Pay off Vet");
+
+    assert!(f.repo.run_issuers(d("2024-03-14")).unwrap().is_empty(), "not due yet");
+    let runs = f.repo.run_issuers(d("2024-03-31")).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].dates, vec![d("2024-03-15")]);
+    f.repo.commit("run").unwrap();
+    let l = f.repo.working();
+    assert_eq!(l.ledgers.balance(l.ledgers.ix(f.loan).unwrap()), Money::ZERO, "paid off");
+    // A one-off: running again posts nothing more.
+    assert!(f.repo.run_issuers(d("2025-01-01")).unwrap().is_empty());
+}
+
+#[test]
+fn a_payment_must_settle_a_transaction_that_exists() {
+    let mut f = fixture();
+    let err = f.repo.pay_later(TxUid::new(), f.loan, f.cash, Money::from_major(5), d("2024-03-15"));
+    assert!(err.is_err());
+}
+
+/// An amount set ahead is a versioned fact like any other: committed,
+/// reverted, and gone again.
+#[test]
+fn an_amount_set_ahead_reverts() {
+    let mut f = fixture();
+    let rent = f
+        .repo
+        .add_issuer(
+            "Rent",
+            "",
+            f.salary,
+            f.cash,
+            Money::from_major(1_500),
+            Schedule::MonthlyOn { day: 1, every_n_months: 1 },
+            d("2024-01-01"),
+        )
+        .unwrap();
+    f.repo.commit("rent").unwrap();
+    let set = Op::SetIssuerOverride {
+        uid: rent,
+        date: d("2024-02-01"),
+        amount: Some(Money::from_major(1_550)),
+    };
+    f.repo.stage(set).unwrap();
+    f.repo.commit("rent goes up in February").unwrap();
+    let ix = f.repo.working().issuers.ix(rent).unwrap();
+    assert_eq!(
+        f.repo.working().issuers.override_on(ix, d("2024-02-01")),
+        Some(Money::from_major(1_550))
+    );
+    assert_eq!(
+        issuer::project(f.repo.working(), &[ix], d("2024-02-01"))[1].amount(),
+        Money::from_major(1_550)
+    );
+
+    f.repo.revert("HEAD").unwrap();
+    f.repo.commit("no it does not").unwrap();
+    assert_eq!(f.repo.working().issuers.override_on(ix, d("2024-02-01")), None);
 }
 
 #[test]

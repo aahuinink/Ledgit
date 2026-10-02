@@ -112,26 +112,35 @@ pub fn describe(spec: &ViewSpec) -> String {
         spec.lookback,
         spec.horizon,
         spec.period,
-        if spec.only_selected_issuers { "; simulates its own issuers only" } else { "" }
-    )
+        if spec.only_selected_issuers { "; simulates its own issuers only" } else { "" },
+    ) + if spec.show_available { "; shows available" } else { "" }
 }
 
 /// Print a whole evaluated view.
-pub fn view(l: &Budget, name: &str, r: &ViewReport) {
+pub fn view(l: &Budget, name: &str, r: &ViewReport, show_available: bool) {
     println!("{name}: {} to {}, today {}\n", r.start, r.end, r.today);
 
     if !r.series.is_empty() {
+        // Available beside today only when something is held back, or the
+        // view asks for it.
+        let avail = show_available || r.series.iter().any(|s| s.available_now != s.now);
         println!("Balances");
         println!(
-            "  {:<24} {:>14} {:>14} {:>14}  {:<26} trend",
-            "", "today", "at end", "change", "lowest ahead"
+            "  {:<24} {:>14} {:>14} {:>14} {:>14}  {:<26} trend",
+            "",
+            "today",
+            if avail { "available" } else { "" },
+            "at end",
+            "change",
+            "lowest ahead"
         );
         for s in &r.series {
             let (low_d, low) = s.lowest_ahead;
             println!(
-                "  {:<24} {:>14} {:>14} {:>14}  {:<26} {}",
+                "  {:<24} {:>14} {:>14} {:>14} {:>14}  {:<26} {}",
                 truncate(&s.label, 24),
                 amt(s.now),
+                if avail { amt(s.available_now) } else { String::new() },
                 amt(s.at_end),
                 amt(s.at_end - s.now),
                 format!("{} on {low_d}", amt(low)),

@@ -288,7 +288,59 @@ zero produces no entry that time; the issuer still advances.
 
 `CreateIssuer.rule` is left out of the encoding when absent (not written as
 `null`), so every issuer committed before rules existed encodes - and hashes
-- exactly as it did.
+- exactly as it did. `CreateIssuer.settles` and `ViewSpec.show_available` are
+left out the same way.
+
+### Statements
+
+`AmountRule::Statement { of, close_day, min, min_rate }` reads history, not
+one balance: for an occurrence due on D, the statement closed on the last
+`close_day` before D (`AmountRule::closes_before`); it pays `of`'s balance at
+the end of that day, less everything that brought the balance down after the
+close and before D. Unpaid remainder is simply still in the balance at the
+next close, so there is no carry-over state to keep. `project` keeps a dated
+list of everything it has already moved so a projected statement counts the
+charges and payments other issuers make first.
+
+### Amounts set ahead
+
+`Op::SetIssuerOverride { uid, date, amount }` fixes one occurrence's amount
+(or with `None` clears it). It must name a real due date not yet posted, and
+is stored per issuer as a sorted `Vec<(Date, Money)>`. Pricing goes through
+one function, `issuer::price`: the override replaces what the issuer would
+work out, raised to a statement's minimum. Posting, projections, the
+calendar and views all see the same number. Reverting puts back the date's
+previous amount.
+
+### Scheduled from an entry
+
+"Post now, pay later" stages the entry and a one-off issuer
+(`issuer::settlement`) with `settles: Some(tx)`. "Post on its date" stages
+only a one-off issuer with the entry's legs. Both post when issuers are run on
+or after their date, like any other issuer.
+
+## Posted and available
+
+`available::Availability::of(budget, today)` lists the **commitments** -
+payments already decided but not posted - and holds back their credit legs:
+
+* every one-off issuer not yet run (scheduled payments and entries);
+* a statement issuer's occurrence once its statement has closed
+  (`closed <= today`).
+
+Recurring issuers are not commitments. Only the credit side is held: money
+leaving chequing counts now, the card going down counts when the payment
+posts. A ledger's available balance is its raw balance plus what is held,
+presented for its normality; a bucket's uses the same roll-up as its total.
+Commitments are priced by `project` over every running issuer, so they agree
+with what will post.
+
+A view with `show_available` draws each series as available from today: the
+series' value at t plus every held amount whose occurrence has not landed in
+the simulation by t (or never will, if the view does not simulate its
+issuer). It meets the posted line as the last commitment posts.
+`available::changes(base, working, today)` gives the pre-commit report its
+"money spoken for": commitments made, paid, or resized by what is staged.
 
 ## Targets and alerts
 

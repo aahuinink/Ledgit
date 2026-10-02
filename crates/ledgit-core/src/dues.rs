@@ -105,11 +105,22 @@ pub fn calendar(
     today: Date,
 ) -> Vec<CalendarEntry> {
     let s = &l.issuers;
+    // What is still owed is priced the way it will post: in date order with
+    // every running issuer, so a statement or an amount set ahead shows on
+    // its own date. Anything else - posted, or paused - at its estimate.
+    let running: Vec<IssuerIx> = s.indices().filter(|ix| !s.paused[ix.get()]).collect();
+    let priced: std::collections::HashMap<(u32, Date), Money> =
+        crate::issuer::project(l, &running, to)
+            .into_iter()
+            .filter(|o| o.date >= from && issuers.contains(&o.issuer))
+            .map(|o| ((o.issuer.0, o.date), o.amount()))
+            .collect();
     let mut out: Vec<CalendarEntry> = Vec::new();
     for ix in issuers {
         let i = ix.get();
-        let amount = crate::issuer::estimate(l, *ix);
+        let estimate = crate::issuer::estimate(l, *ix);
         for date in s.schedule[i].dates_between(s.start[i], from, to) {
+            let amount = priced.get(&(ix.0, date)).copied().unwrap_or(estimate);
             let status = if s.emitted_through[i].is_some_and(|done| date <= done) {
                 DueStatus::Posted
             } else if s.paused[i] {
@@ -186,6 +197,7 @@ mod tests {
                 schedule: Schedule::MonthlyOn { day: 1, every_n_months: 1 },
                 start: d(2024, 1, 1),
                 rule: None,
+                settles: None,
             },
             Op::CreateIssuer {
                 uid: food,
@@ -195,6 +207,7 @@ mod tests {
                 schedule: Schedule::EveryNDays { n: 7 },
                 start: d(2024, 1, 6),
                 rule: None,
+                settles: None,
             },
         ])
         .unwrap();

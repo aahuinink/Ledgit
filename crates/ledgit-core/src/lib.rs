@@ -50,6 +50,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+pub mod available;
 pub mod commit;
 pub mod date;
 pub mod dues;
@@ -74,6 +75,7 @@ pub use error::{Error, Result};
 
 /// Everything a front end normally needs, in one `use`.
 pub mod prelude {
+    pub use crate::available::{Availability, Commitment};
     pub use crate::commit::{Commit, CommitId, Head};
     pub use crate::date::Date;
     pub use crate::dues::{CalendarEntry, DueStatus, RateLine};

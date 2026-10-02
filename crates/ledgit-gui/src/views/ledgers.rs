@@ -6,6 +6,7 @@ use crate::fmt;
 use crate::forms::FormKind;
 use crate::table::{figures, text, Height, Table};
 use egui::{RichText, Ui};
+use ledgit_core::id::LedgerIx;
 use ledgit_core::prelude::*;
 
 pub fn show(ui: &mut Ui, s: &mut Session) {
@@ -57,6 +58,7 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
     let rows = LedgerQuery::new().sort_by(s.ledger_sort, Order::Asc).run(s.budget());
     let mut pin: Option<LedgerUid> = None;
     let mut open: Option<LedgerUid> = None;
+    let avail = s.availability();
     let l = s.budget();
     Table::new(
         "ledgers",
@@ -66,7 +68,8 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
             text("normal"),
             text("opened"),
             figures("postings"),
-            figures("balance"),
+            figures("posted"),
+            figures("available"),
         ],
     )
     .height(Height::Fill)
@@ -101,6 +104,14 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
         row.col(|ui| {
             num(ui, fmt::money_text(l.ledgers.balance(ix)));
         });
+        row.col(|ui| {
+            // Blank where nothing is held, so the ones with money spoken
+            // for stand out.
+            if !avail.held_raw(ix).is_zero() {
+                num(ui, fmt::money_text(avail.available(l, ix)))
+                    .on_hover_text(held_hover(l, &avail, ix));
+            }
+        });
     });
     if let Some(uid) = pin {
         s.toggle_pin(uid);
@@ -109,6 +120,16 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
         s.selected_ledger = Some(uid);
         s.goto = Some(Screen::Register);
     }
+}
+
+/// "1,200.00 spoken for: Pay off Vet on 2026-10-15, ..."
+fn held_hover(l: &Budget, a: &Availability, ix: LedgerIx) -> String {
+    let what: Vec<String> = a
+        .against(l, ix)
+        .iter()
+        .map(|c| format!("{} on {}", l.issuers.name[c.issuer.get()], c.date))
+        .collect();
+    format!("{} spoken for: {}", fmt::amount(a.held(l, ix).abs()), what.join(", "))
 }
 
 /// The ledgers as their path tree: a subtotal on every level with children,
@@ -131,6 +152,7 @@ fn tree(ui: &mut Ui, s: &mut Session) {
         n = if folded { node.end as usize } else { n + 1 };
     }
 
+    let avail = s.availability();
     let l = s.budget();
     Table::new(
         "ledger_tree",
@@ -213,7 +235,14 @@ fn tree(ui: &mut Ui, s: &mut Session) {
                     num(ui, RichText::new(l.ledgers.postings[i].len().to_string()).color(fmt::dim()));
                 });
                 row.col(|ui| {
-                    num(ui, fmt::money_text(l.ledgers.balance(ix)));
+                    let r = num(ui, fmt::money_text(l.ledgers.balance(ix)));
+                    if !avail.held_raw(ix).is_zero() {
+                        r.on_hover_text(format!(
+                            "Available {}. {}",
+                            fmt::amount(avail.available(l, ix)),
+                            held_hover(l, &avail, ix)
+                        ));
+                    }
                 });
             }
             None => {
@@ -284,12 +313,22 @@ pub fn register(ui: &mut Ui, s: &mut Session) {
     let normality = l.ledgers.normality[i];
     let description = l.ledgers.description[i].clone();
     let balance = l.ledgers.balance(ix);
+    let avail = s.availability();
+    let held = !avail.held_raw(ix).is_zero();
+    let available = avail.available(l, ix);
 
     heading(ui, &name, &description);
     ui.horizontal(|ui| {
         ui.label(RichText::new(format!("{normality}-normal")).color(fmt::dim()));
         ui.separator();
+        if held {
+            ui.label(RichText::new("posted").color(fmt::dim()));
+        }
         ui.label(fmt::money_text(balance).size(20.0));
+        if held {
+            ui.label(RichText::new("available").color(fmt::dim()));
+            ui.label(fmt::money_text(available).size(20.0).strong());
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("New transaction").clicked() {
                 s.forms.open_transaction_on(uid, s.repo.working());
@@ -302,6 +341,9 @@ pub fn register(ui: &mut Ui, s: &mut Session) {
     });
     ui.add_space(4.0);
     super::goals::ledger_section(ui, s, uid);
+    if held {
+        spoken_for(ui, s.budget(), &avail, ix);
+    }
     ui.add_space(8.0);
 
     let rows = ledgit_core::query::register(s.budget(), ix);
@@ -365,6 +407,40 @@ pub fn register(ui: &mut Ui, s: &mut Session) {
         });
         row.col(|ui| {
             num(ui, fmt::mono(fmt::amount(line.balance)));
+        });
+    });
+}
+
+/// The payments already decided that hold money back on this ledger.
+fn spoken_for(ui: &mut Ui, l: &Budget, a: &Availability, ix: LedgerIx) {
+    let list = a.against(l, ix);
+    ui.add_space(6.0);
+    ui.label(RichText::new("SPOKEN FOR").small().color(fmt::dim()));
+    let today = Date::today_utc();
+    Table::new(
+        ("spoken_for", ix.0),
+        vec![text("due"), text("payment").max(360.0), figures("holds back"), text("").max(260.0)],
+    )
+    .height(Height::Max(150.0))
+    .show(ui, list.len(), |row| {
+        let c = list[row.index()];
+        row.col(|ui| {
+            let t = fmt::mono(c.date.to_string());
+            ui.label(if c.date < today { t.color(fmt::bad()) } else { t });
+        });
+        row.col(|ui| {
+            ui.label(&l.issuers.name[c.issuer.get()]);
+        });
+        row.col(|ui| {
+            num(ui, fmt::money_text(l.ledgers.normality[ix.get()].present(c.held_on(l, ix))));
+        });
+        row.col(|ui| {
+            let note = match c.statement {
+                Some(st) => format!("statement of {}", st.closed),
+                None if c.date < today => "overdue - run the issuers".into(),
+                None => String::new(),
+            };
+            ui.label(RichText::new(note).small().color(fmt::dim()));
         });
     });
 }

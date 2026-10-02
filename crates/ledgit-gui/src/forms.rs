@@ -170,12 +170,14 @@ impl Forms {
                     description,
                     date: date.to_string(),
                     legs: LegEditor::from_legs(&legs),
+                    ..Default::default()
                 };
                 FormKind::Transaction
             }
-            Op::CreateIssuer { uid, name, description, legs, schedule, start, rule } => {
+            Op::CreateIssuer { uid, name, description, legs, schedule, start, rule, settles } => {
                 let mut f = IssuerForm {
                     uid: Some(uid),
+                    settles,
                     name,
                     description,
                     legs: LegEditor::from_legs(&legs),
@@ -201,12 +203,23 @@ impl Forms {
                     f.rule_debit = legs.iter().find(|l| l.is_debit()).map(|l| l.ledger);
                     f.rule_credit = legs.iter().find(|l| !l.is_debit()).map(|l| l.ledger);
                     f.rule_of = Some(rule.of());
-                    let (mode, rate) = match rule {
-                        AmountRule::Interest { apr, .. } => (AmountMode::Interest, apr),
-                        AmountRule::ShareOfBalance { rate, .. } => (AmountMode::Share, rate),
-                    };
-                    f.amount = mode;
-                    f.rate = rate.to_string().trim_end_matches('%').to_string();
+                    let pct = |r: Rate| r.to_string().trim_end_matches('%').to_string();
+                    match rule {
+                        AmountRule::Interest { apr, .. } => {
+                            f.amount = AmountMode::Interest;
+                            f.rate = pct(apr);
+                        }
+                        AmountRule::ShareOfBalance { rate, .. } => {
+                            f.amount = AmountMode::Share;
+                            f.rate = pct(rate);
+                        }
+                        AmountRule::Statement { close_day, min, min_rate, .. } => {
+                            f.amount = AmountMode::Statement;
+                            f.close_day = close_day.to_string();
+                            f.min = min.to_string();
+                            f.min_pct = pct(min_rate);
+                        }
+                    }
                 }
                 self.issuer = f;
                 FormKind::Issuer
@@ -643,6 +656,25 @@ struct TxForm {
     description: String,
     date: String,
     legs: LegEditor,
+    when: When,
+    /// For "pay it off later": the ledger it pays down (the card it was put
+    /// on), the one it pays from, the day, and how much - blank for all of
+    /// it.
+    settle: Option<LedgerUid>,
+    pay_from: Option<LedgerUid>,
+    pay_on: String,
+    pay_amount: String,
+}
+
+/// When a new entry happens.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+enum When {
+    #[default]
+    Now,
+    /// Post it now, and schedule paying it off.
+    PayLater,
+    /// Post nothing now; schedule the whole entry for its date.
+    PostLater,
 }
 
 impl TxForm {
@@ -672,13 +704,43 @@ impl TxForm {
         ui.add_space(6.0);
         self.legs.show(ui, budget, "tx_legs");
 
-        let (save, cancel) = footer(ui, "Stage transaction");
+        // A staged issuer payment: say what its statement allows.
+        let statement = self.statement(budget);
+        if let Some((st, _)) = &statement {
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "A statement payment: {} owed on the statement of {}; at least {}.",
+                    fmt::amount(st.owed),
+                    st.closed,
+                    fmt::amount(st.minimum)
+                ))
+                .small()
+                .color(fmt::dim()),
+            );
+        }
+        if self.uid.is_none() {
+            ui.add_space(10.0);
+            self.schedule_editor(ui, budget);
+        }
+
+        let label = match self.when {
+            When::PostLater if self.uid.is_none() => "Schedule transaction",
+            _ => "Stage transaction",
+        };
+        let (save, cancel) = footer(ui, label);
         if cancel {
             return Ok(Outcome::Cancelled);
         }
         if !save {
             return Ok(Outcome::Pending);
         }
+        self.submit(budget)
+    }
+
+    /// What the form stages, as typed.
+    fn submit(&self, budget: &Budget) -> Filled {
+        let statement = self.statement(budget);
         let date: Date = self.date.parse().map_err(|_| "Date must be YYYY-MM-DD".to_string())?;
         let legs = self.legs.finish(&budget.variables)?;
         let name =
@@ -687,15 +749,144 @@ impl TxForm {
             .variables
             .substitute(self.description.trim())
             .map_err(|e| format!("Description: {e}"))?;
+        if let Some((st, paid)) = statement {
+            if paid < st.minimum {
+                return Err(format!(
+                    "A statement payment must be at least its minimum, {}",
+                    fmt::amount(st.minimum)
+                ));
+            }
+        }
         let (uid, parent) = self.uid.unwrap_or_else(|| (TxUid::new(), Parent::Manual));
-        Ok(Outcome::Submit(vec![Op::PostTransaction {
-            uid,
-            name,
-            description,
-            date,
-            legs,
-            parent,
-        }]))
+        let when = if self.uid.is_some() { When::Now } else { self.when };
+        match when {
+            When::Now => Ok(Outcome::Submit(vec![Op::PostTransaction {
+                uid,
+                name,
+                description,
+                date,
+                legs,
+                parent,
+            }])),
+            When::PostLater => {
+                if date <= Date::today_utc() {
+                    return Err("To post it later, give it a date after today".into());
+                }
+                Ok(Outcome::Submit(vec![Op::CreateIssuer {
+                    uid: IssuerUid::new(),
+                    name,
+                    description,
+                    legs,
+                    schedule: Schedule::Once,
+                    start: date,
+                    rule: None,
+                    settles: None,
+                }]))
+            }
+            When::PayLater => {
+                let owed_on = self
+                    .settle
+                    .or_else(|| only_credit(&legs))
+                    .ok_or("Choose which ledger the payment pays down")?;
+                let from = self.pay_from.ok_or("Choose the ledger to pay from")?;
+                if from == owed_on {
+                    return Err("It cannot pay a ledger from itself".into());
+                }
+                let on: Date =
+                    self.pay_on.parse().map_err(|_| "Pay on must be YYYY-MM-DD".to_string())?;
+                let amount = match self.pay_amount.trim() {
+                    "" => -legs
+                        .iter()
+                        .filter(|g| g.ledger == owed_on && !g.is_debit())
+                        .map(|g| g.amount)
+                        .sum::<Money>(),
+                    t => eval_money(t, &budget.variables)
+                        .map_err(|e| format!("Amount to pay: {e}"))?,
+                };
+                if amount.cents() <= 0 {
+                    return Err(
+                        "The entry puts nothing on that ledger: give an amount to pay".into()
+                    );
+                }
+                let pay = ledgit_core::issuer::settlement(uid, &name, owed_on, from, amount, on);
+                Ok(Outcome::Submit(vec![
+                    Op::PostTransaction { uid, name, description, date, legs, parent },
+                    pay,
+                ]))
+            }
+        }
+    }
+
+    /// For a staged statement payment, its statement and what the form
+    /// pays now.
+    fn statement(&self, budget: &Budget) -> Option<(ledgit_core::issuer::Statement, Money)> {
+        let (_, Parent::Issuer(issuer)) = self.uid? else { return None };
+        let ix = budget.issuers.ix(issuer)?;
+        let date: Date = self.date.parse().ok()?;
+        let st = ledgit_core::issuer::statement_on(budget, ix, date)?;
+        let paid = self.legs.finish(&budget.variables).ok().map(|l| magnitude(&l))?;
+        Some((st, paid))
+    }
+
+    fn schedule_editor(&mut self, ui: &mut Ui, budget: &Budget) {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("When").strong());
+            ui.selectable_value(&mut self.when, When::Now, "Post now");
+            ui.selectable_value(&mut self.when, When::PayLater, "Post now, pay later")
+                .on_hover_text("Bought on a card or owed to someone: schedule paying it off.");
+            ui.selectable_value(&mut self.when, When::PostLater, "Post on its date")
+                .on_hover_text("Nothing posts now; the whole entry is scheduled for its date.");
+        });
+        let hint = match self.when {
+            When::Now => return,
+            When::PayLater => {
+                "Posts now. A one-off issuer pays it off on the day you pick; until it posts, \
+                 that money is held back from what is available to spend."
+            }
+            When::PostLater => {
+                "Nothing posts now. It is scheduled for the date above and posts when issuers \
+                 are run on or after it; until then the money it takes is held back."
+            }
+        };
+        ui.label(egui::RichText::new(hint).small().color(fmt::dim()));
+        if self.when != When::PayLater {
+            return;
+        }
+        if self.pay_on.is_empty() {
+            self.pay_on = Date::today_utc().add_months(1).to_string();
+        }
+        let pick = |ui: &mut Ui, id: &str, value: &mut Option<LedgerUid>, unset: &str| {
+            let text = value.map(|u| fmt::ledger_label(budget, u)).unwrap_or_else(|| unset.into());
+            if let Some(Pick::Ledger(uid)) =
+                Picker::new(id, budget).selected_text(text).width(260.0).show(ui)
+            {
+                *value = Some(uid);
+            }
+        };
+        let only = self.legs.finish(&budget.variables).ok().and_then(|l| only_credit(&l));
+        let settle_hint = match only {
+            Some(u) => fmt::ledger_label(budget, u),
+            None => "choose a ledger".into(),
+        };
+        egui::Grid::new("pay_later").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Pays down");
+            pick(ui, "pay_settle", &mut self.settle, &settle_hint);
+            ui.end_row();
+            ui.label("Pay from");
+            pick(ui, "pay_from", &mut self.pay_from, "choose a ledger");
+            ui.end_row();
+            date_row(ui, "Pay on", "pay_on", &mut self.pay_on);
+            label_row(ui, "Amount", &mut self.pay_amount, "all of it");
+        });
+    }
+}
+
+/// The ledger an entry credits, if it credits just one: what a purchase was
+/// put on.
+fn only_credit(legs: &[Leg]) -> Option<LedgerUid> {
+    match legs.iter().filter(|g| !g.is_debit()).collect::<Vec<_>>()[..] {
+        [only] => Some(only.ledger),
+        _ => None,
     }
 }
 
@@ -855,6 +1046,8 @@ enum AmountMode {
     Share,
     /// "6.45% APR on this loan."
     Interest,
+    /// "Pay off the Visa's statement."
+    Statement,
 }
 
 #[derive(Default)]
@@ -870,6 +1063,13 @@ struct IssuerForm {
     rule_credit: Option<LedgerUid>,
     rule_of: Option<LedgerUid>,
     rate: String,
+    /// For a statement: the day it closes, and the minimum payment as
+    /// dollars and as a percentage of the statement.
+    close_day: String,
+    min: String,
+    min_pct: String,
+    /// Kept when editing a staged payment scheduled from a transaction.
+    settles: Option<TxUid>,
     repeat: Repeat,
     every_n_days: String,
     day_of_month: String,
@@ -938,6 +1138,15 @@ impl IssuerForm {
             ui.selectable_value(&mut self.amount, AmountMode::Fixed, "Fixed");
             ui.selectable_value(&mut self.amount, AmountMode::Share, "% of a balance");
             ui.selectable_value(&mut self.amount, AmountMode::Interest, "Interest (APR)");
+            if ui
+                .selectable_value(&mut self.amount, AmountMode::Statement, "Statement")
+                .on_hover_text("Pay off a card or a payable: what its statement closed at")
+                .clicked()
+            {
+                // A statement is paid monthly.
+                self.repeat = Repeat::Monthly;
+                self.every_n_months = 1;
+            }
         });
         ui.add_space(4.0);
         match self.amount {
@@ -1004,10 +1213,14 @@ impl IssuerForm {
             schedule,
             start,
             rule,
+            settles: self.settles,
         }]))
     }
 
     fn rule_editor(&mut self, ui: &mut Ui, budget: &Budget, mode: AmountMode) {
+        if mode == AmountMode::Statement {
+            return self.statement_editor(ui, budget);
+        }
         ui.label(
             egui::RichText::new(match mode {
                 AmountMode::Interest => {
@@ -1085,6 +1298,63 @@ impl IssuerForm {
         });
     }
 
+    /// A statement: who is paid and from where, whose statement, when it
+    /// closes, and the least that may be paid.
+    fn statement_editor(&mut self, ui: &mut Ui, budget: &Budget) {
+        ui.label(
+            egui::RichText::new(
+                "Each due date it pays what the ledger's statement closed at - its balance on \
+                 the closing day before - less anything paid since. Set an amount ahead for \
+                 any month on the Issuers screen; it never goes under the minimum.",
+            )
+            .color(fmt::dim())
+            .small(),
+        );
+        ui.add_space(6.0);
+        let pick = |ui: &mut Ui, id: &str, value: &mut Option<LedgerUid>| {
+            let text = value
+                .map(|u| fmt::ledger_label(budget, u))
+                .unwrap_or_else(|| "choose a ledger".to_string());
+            if let Some(Pick::Ledger(uid)) =
+                Picker::new(id, budget).selected_text(text).width(260.0).show(ui)
+            {
+                *value = Some(uid);
+                true
+            } else {
+                false
+            }
+        };
+        egui::Grid::new("issuer_statement").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Pays down (debit)");
+            if pick(ui, "st_debit", &mut self.rule_debit) && self.rule_of.is_none() {
+                // Paying a card debits the card, and it is the card's statement.
+                self.rule_of = self.rule_debit;
+            }
+            ui.end_row();
+            ui.label("Pays from (credit)");
+            pick(ui, "st_credit", &mut self.rule_credit);
+            ui.end_row();
+            ui.label("Statement of");
+            pick(ui, "st_of", &mut self.rule_of);
+            ui.end_row();
+            label_row(ui, "Closes on day", &mut self.close_day, "25");
+            ui.label("Minimum");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.min).hint_text("10").desired_width(70.0),
+                );
+                ui.label("or");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.min_pct)
+                        .hint_text("2")
+                        .desired_width(50.0),
+                );
+                ui.label("% of the statement, whichever is more");
+            });
+            ui.end_row();
+        });
+    }
+
     fn parse_rate(&self, budget: &Budget) -> std::result::Result<Rate, String> {
         let text = self.rate.trim().trim_end_matches('%');
         Rate::parse_percent(text).or_else(|_| {
@@ -1125,6 +1395,23 @@ impl IssuerForm {
             return Err("It cannot move money from a ledger to itself".into());
         }
         let of = self.rule_of.ok_or("Choose whose balance it is worked out from")?;
+        if mode == AmountMode::Statement {
+            let close_day: u32 = self
+                .close_day
+                .trim()
+                .parse()
+                .map_err(|_| "Closes on day must be a whole number".to_string())?;
+            let min = match self.min.trim() {
+                "" => Money::ZERO,
+                t => eval_money(t, &budget.variables).map_err(|e| format!("Minimum: {e}"))?,
+            };
+            let min_rate = match self.min_pct.trim().trim_end_matches('%') {
+                "" => Rate(0),
+                t => Rate::parse_percent(t).map_err(|e| format!("Minimum %: {e}"))?,
+            };
+            let rule = AmountRule::Statement { of, close_day, min, min_rate };
+            return Ok((simple_legs(debit, credit, Money::from_major(1)), Some(rule)));
+        }
         let rate = self.parse_rate(budget).map_err(|e| format!("Rate: {e}"))?;
         // The legs only say which way it goes; the rule sets the amount.
         Ok((simple_legs(debit, credit, Money::from_major(1)), Some(self.rule(mode, of, rate))))
@@ -1243,6 +1530,7 @@ mod tests {
             schedule: Schedule::MonthlyOn { day: 31, every_n_months: 3 },
             start: Date::from_ymd(2024, 1, 1).unwrap(),
             rule: None,
+            settles: None,
         };
         assert!(forms.edit_staged(1, &issuer));
         assert!(forms.issuer.repeat == Repeat::Monthly);
@@ -1258,6 +1546,7 @@ mod tests {
             schedule: Schedule::MonthlyOn { day: 1, every_n_months: 1 },
             start: Date::from_ymd(2024, 1, 1).unwrap(),
             rule: Some(rule),
+            settles: None,
         };
         assert!(forms.edit_staged(2, &interest));
         assert_eq!(forms.issuer.amount, AmountMode::Interest);
@@ -1273,6 +1562,147 @@ mod tests {
         forms.open(FormKind::Bucket, &b);
         assert_eq!(forms.editing, None);
         assert!(!forms.edit_staged(0, &Op::DeleteBucket { uid: BucketUid::new() }));
+    }
+
+    /// The three ways an entry can happen: now, now and paid off later, or
+    /// all of it later.
+    #[test]
+    fn an_entry_can_be_paid_later_or_posted_later() {
+        let b = budget();
+        let (card, cash, a) = (b.ledgers.uid[1], b.ledgers.uid[2], b.ledgers.uid[3]);
+        let soon = Date::today_utc().add_days(10);
+        let mut f = TxForm {
+            name: "Vet".into(),
+            date: Date::today_utc().to_string(),
+            legs: LegEditor::from_legs(&simple_legs(a, card, Money::from_major(1_200))),
+            ..Default::default()
+        };
+        let Ok(Outcome::Submit(ops)) = f.submit(&b) else { panic!("posts now") };
+        assert!(matches!(ops[..], [Op::PostTransaction { .. }]));
+
+        // Paid off from cash in ten days: the card is the only credit side,
+        // so it is what the payment pays down, all $1,200 of it.
+        f.when = When::PayLater;
+        assert!(matches!(f.submit(&b), Err(e) if e.contains("pay from")));
+        f.pay_from = Some(cash);
+        f.pay_on = soon.to_string();
+        let Ok(Outcome::Submit(ops)) = f.submit(&b) else { panic!("posts and schedules") };
+        let [Op::PostTransaction { uid: tx, .. }, Op::CreateIssuer { legs, schedule, start, settles, name, .. }] =
+            &ops[..]
+        else {
+            panic!("{ops:?}")
+        };
+        assert_eq!(legs, &simple_legs(card, cash, Money::from_major(1_200)));
+        assert_eq!((*schedule, *start, *settles), (Schedule::Once, soon, Some(*tx)));
+        assert_eq!(name, "Pay off Vet");
+        f.pay_amount = "300".into();
+        let Ok(Outcome::Submit(ops)) = f.submit(&b) else { panic!("part of it") };
+        assert!(
+            matches!(&ops[1], Op::CreateIssuer { legs, .. } if magnitude(legs) == Money::from_major(300))
+        );
+
+        // All of it later: an issuer for the entry's own date, which must be
+        // ahead of today.
+        f.when = When::PostLater;
+        assert!(f.submit(&b).is_err(), "today is not later");
+        f.date = soon.to_string();
+        let Ok(Outcome::Submit(ops)) = f.submit(&b) else { panic!("scheduled") };
+        assert!(
+            matches!(&ops[..], [Op::CreateIssuer { schedule: Schedule::Once, start, settles: None, .. }] if *start == soon)
+        );
+
+        // The form draws in each mode.
+        for when in [When::Now, When::PayLater, When::PostLater] {
+            f.when = when;
+            let form = std::cell::RefCell::new(std::mem::take(&mut f));
+            egui::__run_test_ui(|ui| {
+                let _ = form.borrow_mut().show(ui, &b);
+            });
+            f = form.into_inner();
+        }
+    }
+
+    /// A staged statement payment can be edited down, but not under its
+    /// minimum.
+    #[test]
+    fn a_staged_statement_payment_keeps_to_its_minimum() {
+        let mut b = budget();
+        let (card, cash, a) = (b.ledgers.uid[1], b.ledgers.uid[2], b.ledgers.uid[3]);
+        let d = |m, day| Date::from_ymd(2024, m, day).unwrap();
+        b.apply(&Op::PostTransaction {
+            uid: TxUid::new(),
+            name: "Fuel".into(),
+            description: String::new(),
+            date: d(1, 5),
+            legs: simple_legs(a, card, Money::from_major(400)),
+            parent: Parent::Manual,
+        })
+        .unwrap();
+        b.apply(&Op::CreateIssuer {
+            uid: IssuerUid::new(),
+            name: "Card".into(),
+            description: String::new(),
+            legs: simple_legs(card, cash, Money::from_major(1)),
+            schedule: Schedule::MonthlyOn { day: 10, every_n_months: 1 },
+            start: d(2, 1),
+            rule: Some(AmountRule::Statement {
+                of: card,
+                close_day: 25,
+                min: Money::from_major(25),
+                min_rate: Rate(0),
+            }),
+            settles: None,
+        })
+        .unwrap();
+        let run = ledgit_core::issuer::run_all(&b, d(2, 10)).remove(0);
+        for op in &run.ops {
+            b.apply(op).unwrap();
+        }
+        let payment = &run.ops[0];
+        let mut forms = Forms::default();
+        assert!(forms.edit_staged(0, payment));
+        let f = &mut forms.transaction;
+        assert_eq!(
+            f.statement(&b).map(|(st, _)| (st.owed, st.minimum)),
+            Some((Money::from_major(400), Money::from_major(25)))
+        );
+        f.legs = LegEditor::from_legs(&simple_legs(card, cash, Money::from_major(10)));
+        assert!(matches!(f.submit(&b), Err(e) if e.contains("minimum")));
+        f.legs = LegEditor::from_legs(&simple_legs(card, cash, Money::from_major(100)));
+        assert!(matches!(f.submit(&b), Ok(Outcome::Submit(ops)) if ops.len() == 1));
+    }
+
+    /// A statement issuer reopens with its rule and resubmits it intact.
+    #[test]
+    fn a_statement_issuer_round_trips_through_the_form() {
+        let b = budget();
+        let (card, cash) = (b.ledgers.uid[1], b.ledgers.uid[2]);
+        let rule = AmountRule::Statement {
+            of: card,
+            close_day: 25,
+            min: Money::from_major(10),
+            min_rate: Rate(20_000),
+        };
+        let op = Op::CreateIssuer {
+            uid: IssuerUid::new(),
+            name: "Card".into(),
+            description: String::new(),
+            legs: simple_legs(card, cash, Money::from_major(1)),
+            schedule: Schedule::MonthlyOn { day: 10, every_n_months: 1 },
+            start: Date::from_ymd(2024, 1, 1).unwrap(),
+            rule: Some(rule),
+            settles: None,
+        };
+        let mut forms = Forms::default();
+        assert!(forms.edit_staged(0, &op));
+        assert_eq!(forms.issuer.amount, AmountMode::Statement);
+        assert_eq!((forms.issuer.close_day.as_str(), forms.issuer.min_pct.as_str()), ("25", "2"));
+        let (legs, back) = forms.issuer.finish_rule(&b, AmountMode::Statement).unwrap();
+        assert_eq!((legs, back), (simple_legs(card, cash, Money::from_major(1)), Some(rule)));
+        let form = std::cell::RefCell::new(std::mem::take(&mut forms.issuer));
+        egui::__run_test_ui(|ui| {
+            let _ = form.borrow_mut().show(ui, &b);
+        });
     }
 
     #[test]

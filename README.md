@@ -90,6 +90,40 @@ staging area next to your manual entries and wait for you to approve them.
 Schedules: `daily`, `weekly`, `biweekly`, `14d`, `monthly`, `monthly:15`,
 `quarterly:1`, `yearly`, `once`.
 
+### Statements, payments scheduled from an entry, and amounts set ahead
+
+An issuer can stand for someone you owe, or who owes you. A card that closes
+on the 25th and is paid on the 10th pays what the statement closed at, less
+anything paid since; whatever is left stays on the card.
+
+```sh
+ledgit issuer add "Visa" --debit Visa --credit Chequing \
+    --statement Visa --close 25 --every monthly:10 --min 10 --min-percent 2
+ledgit issuer upcoming Visa                     # each statement: closed, owed, minimum
+ledgit issuer override Visa 2026-11-10 300      # pay 300 that month; never under the minimum
+ledgit issuer override Visa 2026-11-10 --clear  # back to the statement
+
+# Bought today, paid off from chequing on the 15th:
+ledgit post "Vet" 1200 --debit Vet --credit Visa --pay-from Chequing --pay-on 2026-10-15
+# Nothing now; the whole entry posts on its date:
+ledgit post "Couch" 900 --debit Furniture --credit Chequing --date 2026-11-02 --later
+```
+
+### Posted and available
+
+Money already spoken for comes off what you can spend. A ledger's *posted*
+balance is its entries; its *available* balance also takes off payments
+already decided - ones scheduled from an entry or for a later date, and a
+statement payment once its statement has closed - until they post.
+Recurring issuers are not counted: next month's rent is a projection, not a
+decision.
+
+```sh
+ledgit ledger list           # posted and available side by side
+ledgit committed Chequing    # what is held back, and why
+ledgit view add Cash --ledger Chequing --available true
+```
+
 ## Variables, targets and alerts
 
 ```sh
@@ -195,7 +229,15 @@ cargo run -p ledgit-gui -- ~/budget.ledgit    # or pick a file from the welcome 
 - **Transactions** - date range, ledger, split and source filters over the
   whole book.
 - **Issuers** - schedules, next due dates, pause and resume, and the button that
-  stages what is owed.
+  stages what is owed. Pick one to see its next payments - for a statement,
+  what it closed at, what was paid since and the minimum - and set any of
+  them ahead.
+- **Entry form** "When": post now, post now and pay it off later, or post the
+  whole entry on its date. A staged statement payment can be edited down,
+  never under its minimum.
+- **Posted / Available** on the Ledgers screen, a ledger's page (with what
+  holds money back), pinned ledgers and bucket tiles, the Commit screen
+  ("money spoken for"), and as a dashed line in any view that asks for it.
 - **Buckets** - totals, targets and paces over a group of ledgers. Buckets do
   not nest; to total several at once (`Cash - Receivables`), add them to a
   view.

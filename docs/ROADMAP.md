@@ -152,7 +152,7 @@ cargo run -p ledgit-gui -- fixtures\household.ledgit
 | File | What is in it | Checklist items |
 |---|---|---|
 | `empty.ledgit` | Nothing. | Every screen's empty state |
-| `household.ledgit` | 15 months of an ordinary budget: a 5-way split paycheque, mortgage, car loan, credit card, a 4-level ledger tree, 6 buckets (subtree and hand-picked), 15 issuers (one paused, one one-off 60 days out), 6 views (incl. a weekly what-if, and one scoped to ledgers rather than buckets). Branches `what-if-new-car` and `emergency-fund-plan` diverge from `main` and rebase cleanly. A mistaken commit and its revert. Issuers are ~6 weeks behind (Run issuers stages a batch); staged edits waiting (so History's switch asks to shelve). | 1-12, History, Commit report, issuer runs since last commit |
+| `household.ledgit` | 15 months of an ordinary budget: a 5-way split paycheque, mortgage, car loan, credit card, a 4-level ledger tree, 6 buckets (subtree and hand-picked), 18 issuers (one paused, one one-off 60 days out, a statement issuer paying the Visa with next month set ahead to $400), 7 views (incl. a weekly what-if, one scoped to ledgers rather than buckets, and one showing available). Staged: a tuxedo fitting paid off later and a photographer deposit posting in 45 days, so Chequing's available sits below its posted balance. Branches `what-if-new-car` and `emergency-fund-plan` diverge from `main` and rebase cleanly. A mistaken commit and its revert. Issuers are ~6 weeks behind (Run issuers stages a batch); staged edits waiting (so History's switch asks to shelve). | 1-12, History, Commit report, issuer runs since last commit |
 | `stress.ledgit` | Things built to break layouts: a $987,654,321.09 balance, a negative one, an 80-character ledger name, an 8-level tree, a non-ASCII name, 120 expense ledgers, a 13-leg split, 17 issuers with 7 due on the 1st and 7 on the 15th plus a daily one, a 10-year daily view, ~110 commits, 10 long branch names, a commit message that wraps. | 1, 2, 4, 5, 6, 7 (at their worst), 8, 9 |
 
 Pins are an app preference, not part of the file, so pin a few ledgers
@@ -288,6 +288,13 @@ broken staged entry.
   or only the view's own for a what-if). CLI `ledgit view ...`, GUI Views
   screen with a live chart; charts export as SVG or PNG (`ledgit-plot`) and
   series as CSV.
+- **Issuers as counterparties**: statement issuers (pay what a card's
+  statement closed at, less what was paid since; minimum the greater of $X and
+  Y%), amounts set ahead per occurrence (versioned, simulated, never under the
+  minimum), payments scheduled from an entry ("post now, pay later") and
+  entries scheduled for their date. **Posted / Available** everywhere: one-offs
+  and closed statements hold money back until they post. CLI `issuer
+  upcoming|override`, `post --pay-from/--pay-on/--later`, `committed`.
 - **"Up to date through"** in the top bar and in `ledgit status`: the newest
   transaction, and how far the issuers have been run.
 - **Ledger tree**: hledger-style paths in ledger names (`Wedding:Tuxedo`), a
@@ -295,7 +302,7 @@ broken staged entry.
   up ledgers created there later), and subtree renames that carry buckets
   along. CLI `ledger tree`, `ledger move`, `bucket include-tree`; GUI tree
   view and a searchable tree picker.
-- **Tests**: 195, covering the money and date edge cases, budget invariants,
+- **Tests**: 221, covering the money and date edge cases, budget invariants,
   recurrence arithmetic, rate conversion, the view simulation, GUI zoom,
   bucket combination, chart rendering, and the version-control behaviours end
   to end.

@@ -182,13 +182,14 @@ fn detail(ui: &mut Ui, s: &mut Session) {
     let l = s.repo.working();
     let compared = then_budget.map(|then| view::compare(then, &spec, l, &report));
 
-    chart(ui, &report, compared.as_ref().map(|(r, p)| (r, p.as_slice())));
+    let available = spec.show_available;
+    chart(ui, &report, compared.as_ref().map(|(r, p)| (r, p.as_slice())), available);
     ui.add_space(10.0);
     if let Some((then, pairs)) = &compared {
         comparison(ui, &report, then, pairs, &compare_label(s));
         ui.add_space(10.0);
     }
-    balances(ui, &report);
+    balances(ui, &report, available);
     ui.add_space(10.0);
     flows(ui, &report);
     ui.add_space(10.0);
@@ -417,6 +418,15 @@ fn editor(ui: &mut Ui, l: &Budget, spec: &mut ViewSpec) {
                 .on_hover_text("What will actually happen.");
             ui.radio_value(&mut spec.only_selected_issuers, true, "only this view's issuers")
                 .on_hover_text("What if these were all that happened?");
+        });
+    });
+    field(ui, "Balances", "", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.radio_value(&mut spec.show_available, false, "posted");
+            ui.radio_value(&mut spec.show_available, true, "posted and available").on_hover_text(
+                "Also draw each line less the payments already decided - scheduled ones, and \
+                 statements that have closed - until they post.",
+            );
         });
     });
 }
@@ -720,7 +730,12 @@ fn span_words(days: i32) -> String {
 /// How tall the chart is, and so how far its legend runs before scrolling.
 const CHART_HEIGHT: f32 = 320.0;
 
-fn chart(ui: &mut Ui, r: &ViewReport, then: Option<(&ViewReport, &[Option<usize>])>) {
+fn chart(
+    ui: &mut Ui,
+    r: &ViewReport,
+    then: Option<(&ViewReport, &[Option<usize>])>,
+    available: bool,
+) {
     if r.series.is_empty() {
         ui.label(
             RichText::new(
@@ -769,6 +784,19 @@ fn chart(ui: &mut Ui, r: &ViewReport, then: Option<(&ViewReport, &[Option<usize>
                             .width(2.0_f32)
                             .style(LineStyle::Dashed { length: 8.0 }),
                     );
+                    // Available runs from today, below the balance by what
+                    // is spoken for, and meets it as each payment posts.
+                    if available
+                        && s.available != s.points[s.points.partition_point(|(d, _)| *d < today)..]
+                    {
+                        let (_, line) = steps(&s.available, today);
+                        plot.line(
+                            Line::new(format!("{} available", s.label), line)
+                                .color(colour.gamma_multiply(0.6))
+                                .width(1.5_f32)
+                                .style(LineStyle::Dashed { length: 3.0 }),
+                        );
+                    }
                     if let Some(j) = then.and_then(|(_, pairs)| pairs[i]) {
                         let earlier = &then.expect("paired").0.series[j];
                         let (past, ahead) = steps(&earlier.points, today);
@@ -894,77 +922,101 @@ fn date_label(d: Date) -> String {
 
 // ------------------------------------------------------------------ tables
 
-fn balances(ui: &mut Ui, r: &ViewReport) {
+fn balances(ui: &mut Ui, r: &ViewReport, show_available: bool) {
     if r.series.is_empty() {
         return;
     }
     let dark = ui.visuals().dark_mode;
+    // Available beside today when the view asks for it, or when something is
+    // spoken for anyway.
+    let available = show_available || r.series.iter().any(|s| s.available_now != s.now);
     ui.label(RichText::new("Balances").strong());
-    Table::new(
-        "view_balances",
-        vec![
-            text("").max(300.0),
-            figures("today"),
-            figures("at end"),
-            figures("change"),
-            figures("lowest ahead"),
-            figures("target").max(300.0),
-        ],
-    )
-    .fit_to((r.start, r.end))
-    .show(ui, r.series.len(), |row| {
-        let i = row.index();
-        let s = &r.series[i];
-        row.col(|ui| {
-            // A line key beside the name: identity is never colour on the
-            // text itself.
-            let colour = if i < MAX_SERIES { series_colour(i, dark) } else { fmt::dim() };
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 10.0), egui::Sense::hover());
-            ui.painter().hline(rect.x_range(), rect.center().y, egui::Stroke::new(3.0_f32, colour));
-            ui.label(&s.label);
-        });
-        row.col(|ui| {
-            num(ui, fmt::money_text(s.now));
-        });
-        row.col(|ui| {
-            num(ui, fmt::money_text(s.at_end));
-        });
-        row.col(|ui| {
-            num(ui, fmt::delta_text(s.at_end - s.now));
-        });
-        row.col(|ui| {
-            let (d, low) = s.lowest_ahead;
-            num(ui, fmt::mono(format!("{} on {d}", fmt::amount(low))).small());
-        });
-        row.col(|ui| {
-            match (s.target, s.target_reached) {
-                (None, _) => {}
-                (Some(t), Some(d)) if d == r.today => {
-                    num(
-                        ui,
-                        RichText::new(format!("{} reached", fmt::amount(t)))
-                            .small()
-                            .color(fmt::good()),
-                    );
-                }
-                (Some(t), Some(d)) => {
-                    num(ui, RichText::new(format!("{} on {d}", fmt::amount(t))).small().strong())
+    let mut cols = vec![text("").max(300.0), figures("today")];
+    if available {
+        cols.push(figures("available"));
+    }
+    cols.extend([
+        figures("at end"),
+        figures("change"),
+        figures("lowest ahead"),
+        figures("target").max(300.0),
+    ]);
+    Table::new(("view_balances", available), cols).fit_to((r.start, r.end)).show(
+        ui,
+        r.series.len(),
+        |row| {
+            let i = row.index();
+            let s = &r.series[i];
+            row.col(|ui| {
+                // A line key beside the name: identity is never colour on the
+                // text itself.
+                let colour = if i < MAX_SERIES { series_colour(i, dark) } else { fmt::dim() };
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(14.0, 10.0), egui::Sense::hover());
+                ui.painter().hline(
+                    rect.x_range(),
+                    rect.center().y,
+                    egui::Stroke::new(3.0_f32, colour),
+                );
+                ui.label(&s.label);
+            });
+            row.col(|ui| {
+                num(ui, fmt::money_text(s.now));
+            });
+            if available {
+                row.col(|ui| {
+                    let r = num(ui, fmt::money_text(s.available_now).strong());
+                    if s.available_now != s.now {
+                        r.on_hover_text(format!(
+                            "{} is spoken for by payments already decided.",
+                            fmt::amount((s.now - s.available_now).abs())
+                        ));
+                    }
+                });
+            }
+            row.col(|ui| {
+                num(ui, fmt::money_text(s.at_end));
+            });
+            row.col(|ui| {
+                num(ui, fmt::delta_text(s.at_end - s.now));
+            });
+            row.col(|ui| {
+                let (d, low) = s.lowest_ahead;
+                num(ui, fmt::mono(format!("{} on {d}", fmt::amount(low))).small());
+            });
+            row.col(|ui| {
+                match (s.target, s.target_reached) {
+                    (None, _) => {}
+                    (Some(t), Some(d)) if d == r.today => {
+                        num(
+                            ui,
+                            RichText::new(format!("{} reached", fmt::amount(t)))
+                                .small()
+                                .color(fmt::good()),
+                        );
+                    }
+                    (Some(t), Some(d)) => {
+                        num(
+                            ui,
+                            RichText::new(format!("{} on {d}", fmt::amount(t))).small().strong(),
+                        )
                         .on_hover_text(format!(
                             "Reaches its target in {} day(s), going by the simulation.",
                             d.0 - r.today.0
                         ));
-                }
-                (Some(t), None) => {
-                    num(
-                        ui,
-                        RichText::new(format!("{} not by {}", fmt::amount(t), r.end))
-                            .small()
-                            .color(fmt::dim()),
-                    );
-                }
-            };
-        });
-    });
+                    }
+                    (Some(t), None) => {
+                        num(
+                            ui,
+                            RichText::new(format!("{} not by {}", fmt::amount(t), r.end))
+                                .small()
+                                .color(fmt::dim()),
+                        );
+                    }
+                };
+            });
+        },
+    );
     let ahead: Vec<_> =
         r.series.iter().flat_map(|s| s.alerts_ahead.iter().map(move |a| (s, a))).collect();
     if !ahead.is_empty() {

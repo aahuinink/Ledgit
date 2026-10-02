@@ -124,6 +124,26 @@ pub fn status(repo: &Repo<SqliteStore>) -> Result<()> {
         println!("Views: {} new, {} deleted", r.new_views, r.deleted_views);
     }
 
+    if !r.commitments.is_empty() {
+        let l = repo.working();
+        println!("\nMoney spoken for:");
+        for c in &r.commitments {
+            let held: Vec<&str> =
+                c.ledgers.iter().map(|ix| l.ledgers.name[ix.get()].as_str()).collect();
+            let what = match (c.before, c.after) {
+                (None, Some(m)) => format!("holds back {} on {}", amt(m), held.join(", ")),
+                (Some(m), None) => format!("pays {} - no longer held", amt(m)),
+                (Some(a), Some(b)) => format!("held {} -> {}", amt(a), amt(b)),
+                (None, None) => continue,
+            };
+            println!(
+                "  {:<12} {:<28} {what}",
+                c.date,
+                truncate(&l.issuers.name[c.issuer.get()], 28)
+            );
+        }
+    }
+
     if !r.ledger_deltas.is_empty() {
         println!("\nLedgers affected:");
         println!("  {:<28} {:>14} {:>14} {:>14}", "ledger", "before", "after", "change");
@@ -255,18 +275,127 @@ pub fn ledgers(l: &Budget, rows: &[ledgit_core::id::LedgerIx]) {
         println!("No ledgers.");
         return;
     }
-    println!("{:<10} {:<28} {:<7} {:>14}  opened", "uid", "name", "normal", "balance");
+    let a = Availability::of(l, Date::today_utc());
+    println!(
+        "{:<10} {:<28} {:<7} {:>14} {:>14}  opened",
+        "uid", "name", "normal", "posted", "available"
+    );
     for ix in rows {
         let i = ix.get();
+        // Blank where nothing is held, so the ones with money spoken for
+        // stand out.
+        let available = match a.held_raw(*ix).is_zero() {
+            true => String::new(),
+            false => amt(a.available(l, *ix)),
+        };
         println!(
-            "{:<10} {:<28} {:<7} {:>14}  {}",
+            "{:<10} {:<28} {:<7} {:>14} {:>14}  {}",
             l.ledgers.uid[i].short(),
             truncate(&l.ledgers.name[i], 28),
             &l.ledgers.normality[i],
             amt(l.ledgers.balance(*ix)),
+            available,
             l.ledgers.opened[i],
         );
     }
+    if !a.commitments.is_empty() {
+        println!("\n`ledgit committed` lists what is held back.");
+    }
+}
+
+/// Every payment already decided, and what it holds back where.
+pub fn committed(l: &Budget, only: Option<ledgit_core::id::LedgerIx>, today: Date) {
+    let a = Availability::of(l, today);
+    let list: Vec<&Commitment> = match only {
+        Some(ix) => a.against(l, ix),
+        None => a.commitments.iter().collect(),
+    };
+    if list.is_empty() {
+        println!("Nothing is spoken for.");
+        return;
+    }
+    println!("{:<12} {:<28} {:>12}  holds back", "due", "payment", "amount");
+    for c in list {
+        let held: Vec<String> = c
+            .legs
+            .iter()
+            .filter(|g| !g.is_debit())
+            .filter_map(|g| l.ledgers.ix(g.ledger))
+            .map(|ix| l.ledgers.name[ix.get()].clone())
+            .collect();
+        let why = match c.statement {
+            Some(st) => format!("  (statement of {})", st.closed),
+            None => String::new(),
+        };
+        let overdue = if c.date < today { "  OVERDUE - run issuers" } else { "" };
+        println!(
+            "{:<12} {:<28} {:>12}  {}{why}{overdue}",
+            c.date,
+            truncate(&l.issuers.name[c.issuer.get()], 28),
+            amt(c.amount()),
+            held.join(", ")
+        );
+    }
+    if let Some(ix) = only {
+        println!(
+            "\n{}: posted {}, available {}",
+            l.ledgers.name[ix.get()],
+            amt(l.ledgers.balance(ix)),
+            amt(a.available(l, ix))
+        );
+    }
+}
+
+/// An issuer's next occurrences, priced as they will post.
+pub fn upcoming(l: &Budget, ix: ledgit_core::id::IssuerIx, count: usize) {
+    let i = ix.get();
+    println!("{} - {}", l.issuers.name[i], l.issuers.schedule[i].describe());
+    if let Some(tx) = l.issuers.settles[i].and_then(|t| l.transactions.ix(t)) {
+        println!(
+            "Pays off \"{}\" from {}.",
+            l.transactions.name[tx.get()],
+            l.transactions.date[tx.get()]
+        );
+    }
+    if l.issuers.paused[i] {
+        println!("Paused: nothing will post.");
+        return;
+    }
+    let mine = ledgit_core::issuer::upcoming(l, ix, count);
+    if mine.is_empty() {
+        println!("Nothing left to post.");
+        return;
+    }
+    let statement = mine.iter().any(|o| o.statement.is_some());
+    if statement {
+        println!(
+            "\n  {:<12} {:>12}  {:<12} {:>12} {:>12} {:>12} {:>12}",
+            "due", "pays", "closed", "statement", "paid since", "owed", "minimum"
+        );
+    } else {
+        println!("\n  {:<12} {:>12}", "due", "pays");
+    }
+    for o in &mine {
+        let set = match o.set_ahead {
+            Some(m) if m == o.amount() => "  (set ahead)".to_string(),
+            Some(m) => format!("  (set ahead to {}, raised to the minimum)", amt(m)),
+            None => String::new(),
+        };
+        match o.statement {
+            Some(st) => println!(
+                "  {:<12} {:>12}  {:<12} {:>12} {:>12} {:>12} {:>12}{set}",
+                o.date,
+                amt(o.amount()),
+                st.closed,
+                amt(st.balance),
+                amt(st.paid_since),
+                amt(st.owed),
+                amt(st.minimum)
+            ),
+            None => println!("  {:<12} {:>12}{set}", o.date, amt(o.amount())),
+        }
+    }
+    println!("\nChange one with `ledgit issuer override`. Future statements are projections.");
 }
 
 pub fn issuers(l: &Budget) {
@@ -294,7 +423,13 @@ pub fn issuers(l: &Budget) {
                     format!("  ({} {})", r.describe(), of.unwrap_or_default()),
                 )
             }
-            None => (amt(l.issuers.amount(ix)), String::new()),
+            None => {
+                let pays = l.issuers.settles[i]
+                    .and_then(|t| l.transactions.ix(t))
+                    .map(|t| format!("  (pays off \"{}\")", l.transactions.name[t.get()]))
+                    .unwrap_or_default();
+                (amt(ledgit_core::issuer::estimate(l, ix)), pays)
+            }
         };
         println!(
             "{:<10} {:<24} {:>12} {:<22} {:<12} {}{rule}",

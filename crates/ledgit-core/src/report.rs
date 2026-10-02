@@ -84,6 +84,9 @@ pub struct ChangeReport {
     /// pace before and do not afterwards. Ledger rows index the working
     /// budget.
     pub paces: Vec<crate::goals::PaceBreach>,
+    /// Payments the staged changes commit money to, pay, or resize, as of
+    /// today. Issuer and ledger rows index the working budget.
+    pub commitments: Vec<crate::available::CommitmentChange>,
 }
 
 /// A staged op that no longer applies - say a transaction whose staged

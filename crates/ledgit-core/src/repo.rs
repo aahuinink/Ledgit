@@ -447,6 +447,7 @@ impl<S: Store> Repo<S> {
         let mut r = report::build(&self.base, &healthy)?;
         r.lines = self.stage.iter().map(|o| o.summary()).collect();
         r.broken = self.broken.clone();
+        r.commitments = crate::available::changes(&self.base, &self.working, Date::today_utc());
         Ok(r)
     }
 
@@ -886,7 +887,37 @@ impl<S: Store> Repo<S> {
             schedule,
             start,
             rule: None,
+            settles: None,
         })?;
+        Ok(uid)
+    }
+
+    /// Stage a one-off payment that settles `tx`: on `date`, `amount` moves
+    /// from `from` into `owed_on` - out of chequing, onto the card the
+    /// purchase was put on. It is an issuer, so it posts when issuers are run
+    /// on or after `date`, and until then the money is spoken for.
+    pub fn pay_later(
+        &mut self,
+        tx: TxUid,
+        owed_on: LedgerUid,
+        from: LedgerUid,
+        amount: Money,
+        date: Date,
+    ) -> Result<IssuerUid> {
+        if amount.0 <= 0 {
+            return Err(Error::Invalid("a payment must be above zero".into()));
+        }
+        let name = self
+            .working
+            .transactions
+            .ix(tx)
+            .map(|ix| self.working.transactions.name[ix.get()].clone())
+            .unwrap_or_else(|| "a transaction".into());
+        let op = issuer::settlement(tx, &name, owed_on, from, amount, date);
+        let Op::CreateIssuer { uid, .. } = op else {
+            unreachable!("a settlement creates an issuer")
+        };
+        self.stage(op)?;
         Ok(uid)
     }
 
@@ -917,6 +948,7 @@ impl<S: Store> Repo<S> {
             schedule,
             start,
             rule: Some(rule),
+            settles: None,
         })?;
         Ok(uid)
     }
@@ -1048,6 +1080,18 @@ fn invert(op: &Op, before: &Budget, source: &str) -> Inverse {
                 paused: before.issuers.paused[ix.get()],
             }),
             None => Inverse::Nothing(format!("issuer {} is gone; pause not reverted", uid.short())),
+        },
+        // Puts back the amount the date had before. If the issuer has posted
+        // that date since, the op is refused when staged and flagged.
+        Op::SetIssuerOverride { uid, date, .. } => match before.issuers.ix(*uid) {
+            Some(ix) => Inverse::Op(Op::SetIssuerOverride {
+                uid: *uid,
+                date: *date,
+                amount: before.issuers.override_on(ix, *date),
+            }),
+            None => {
+                Inverse::Nothing(format!("issuer {} is gone; amount not put back", uid.short()))
+            }
         },
         Op::AdvanceIssuer { uid, .. } => Inverse::Nothing(format!(
             "issuer {} stays advanced, so reverting its transactions does not make it re-post them",

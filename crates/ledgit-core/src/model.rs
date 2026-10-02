@@ -342,6 +342,12 @@ pub struct Issuer {
     /// How each occurrence's amount is worked out, when it is not simply
     /// `legs` as written.
     pub rule: Option<AmountRule>,
+    /// The transaction this issuer pays off, when it was scheduled from one:
+    /// "bought on the Visa today, paid from chequing on the 15th".
+    pub settles: Option<TxUid>,
+    /// Amounts set ahead of time for particular occurrences, by date, oldest
+    /// first: "pay $300 on the card this month, not the statement".
+    pub overrides: Vec<(Date, Money)>,
 }
 
 impl Issuer {
@@ -398,6 +404,11 @@ pub struct ViewSpec {
     /// active issuer. Off, the projected balances are what will actually
     /// happen; on, they answer "what if these were all that happened?"
     pub only_selected_issuers: bool,
+    /// Also draw each line as *available*: what is left once the payments
+    /// already decided are taken off. Absent when off, so a view saved
+    /// before it existed encodes exactly as it did.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub show_available: bool,
 }
 
 impl Default for ViewSpec {
@@ -412,6 +423,7 @@ impl Default for ViewSpec {
             lookback: Span::Months(6),
             horizon: Span::Months(12),
             only_selected_issuers: false,
+            show_available: false,
         }
     }
 }
@@ -688,16 +700,47 @@ pub enum AmountRule {
     /// Interest at an annual rate, for the days since the previous
     /// occurrence (actual/365): "6.45% APR on the car loan".
     Interest { of: LedgerUid, apr: Rate },
+    /// Pay off a statement: what `of` stood at when the statement closed,
+    /// on the last `close_day` before the due date, less anything that has
+    /// brought it down since. A credit card due on the 10th that closes on
+    /// the 25th pays the balance as of the 25th of the month before.
+    ///
+    /// An override can pay less, but never under the minimum: the greater of
+    /// `min` and `min_rate` of the statement, and never more than the
+    /// statement itself.
+    Statement { of: LedgerUid, close_day: u32, min: Money, min_rate: Rate },
 }
 
 impl AmountRule {
     pub fn of(&self) -> LedgerUid {
         match *self {
-            AmountRule::ShareOfBalance { of, .. } | AmountRule::Interest { of, .. } => of,
+            AmountRule::ShareOfBalance { of, .. }
+            | AmountRule::Interest { of, .. }
+            | AmountRule::Statement { of, .. } => of,
         }
     }
 
+    /// The day the statement behind an occurrence on `due` closed: the last
+    /// `close_day` strictly before it. `None` for a rule without statements.
+    pub fn closes_before(&self, due: Date) -> Option<Date> {
+        let AmountRule::Statement { close_day, .. } = *self else { return None };
+        let this_month = month_day(due, close_day);
+        Some(if this_month < due { this_month } else { month_day(due.add_months(-1), close_day) })
+    }
+
     pub fn validate(&self, schedule: &Schedule) -> Result<(), &'static str> {
+        if let AmountRule::Statement { close_day, min, min_rate, .. } = *self {
+            if !matches!(schedule, Schedule::MonthlyOn { every_n_months: 1, .. }) {
+                return Err("a statement is paid monthly: pick a day of the month");
+            }
+            if !(1..=31).contains(&close_day) {
+                return Err("the statement's closing day must be 1..=31");
+            }
+            if min.cents() < 0 || min_rate.0 < 0 {
+                return Err("a minimum payment cannot be negative");
+            }
+            return Ok(());
+        }
         let rate = match *self {
             AmountRule::ShareOfBalance { rate, .. } => rate,
             AmountRule::Interest { apr, .. } => {
@@ -706,6 +749,7 @@ impl AmountRule {
                 }
                 apr
             }
+            AmountRule::Statement { .. } => unreachable!("checked above"),
         };
         if rate.0 <= 0 {
             return Err("the rate must be above zero");
@@ -718,6 +762,9 @@ impl AmountRule {
         match *self {
             AmountRule::ShareOfBalance { rate, .. } => format!("{rate} of"),
             AmountRule::Interest { apr, .. } => format!("{apr} APR on"),
+            AmountRule::Statement { close_day, .. } => {
+                format!("statement (closing on the {close_day}) of")
+            }
         }
     }
 }

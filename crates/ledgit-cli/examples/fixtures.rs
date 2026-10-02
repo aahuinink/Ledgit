@@ -300,6 +300,22 @@ fn household(repo: &mut Budget, today: Date) -> R {
         monthly(28),
         start,
     )?;
+    // The card pays itself off: on the 10th, what its statement closed at on
+    // the 25th, from chequing. Minimum $10 or 2%.
+    let visa_pay = repo.add_rule_issuer(
+        "Visa statement",
+        "paid in full on the 10th",
+        b.card,
+        b.chequing,
+        AmountRule::Statement {
+            of: b.card,
+            close_day: 25,
+            min: Money::from_major(10),
+            min_rate: apr("2"),
+        },
+        monthly(10),
+        start,
+    )?;
 
     // Variables for formulas and names.
     for (name, value) in [("Car_Km_Rate", "0.68"), ("Home", "Toronto"), ("Grocery_Budget", "650")] {
@@ -403,6 +419,17 @@ fn household(repo: &mut Budget, today: Date) -> R {
             },
         ),
         (
+            "Spending money",
+            "chequing and cash, posted and available",
+            ViewSpec {
+                ledgers: vec![b.chequing, b.cash],
+                lookback: Span::Months(3),
+                horizon: Span::Months(3),
+                show_available: true,
+                ..ViewSpec::default()
+            },
+        ),
+        (
             "Spending by month",
             "",
             ViewSpec {
@@ -490,8 +517,30 @@ fn household(repo: &mut Budget, today: Date) -> R {
             Leg::credit(b.card, cents(129_00)),
         ],
     )?;
-    repo.post("Tuxedo fitting", "", today, Money::from_major(250), b.tuxedo, b.card)?;
-    repo.add_ledger("Wedding:Photographer", "not booked yet", D, today)?;
+    let tux = repo.post("Tuxedo fitting", "", today, Money::from_major(250), b.tuxedo, b.card)?;
+    // Paid off on its own in two weeks, not left for the statement.
+    repo.pay_later(tux, b.card, b.chequing, Money::from_major(250), today.add_days(14))?;
+    let photo = repo.add_ledger("Wedding:Photographer", "not booked yet", D, today)?;
+    // Nothing posts now: the deposit is scheduled for its day.
+    repo.add_issuer(
+        "Photographer deposit",
+        "due when booked",
+        photo,
+        b.chequing,
+        Money::from_major(800),
+        Schedule::Once,
+        today.add_days(45),
+    )?;
+    // Next month's card payment, set ahead to less than the statement.
+    let card_ix = repo.working().issuers.ix(visa_pay).expect("staged");
+    if let Some(o) = ledgit_core::issuer::upcoming(repo.working(), card_ix, 3).last() {
+        let uid = visa_pay;
+        repo.stage(Op::SetIssuerOverride {
+            uid,
+            date: o.date,
+            amount: Some(Money::from_major(400)),
+        })?;
+    }
     // An entry worked out from variables, as the forms do it.
     let vars = &repo.working().variables;
     let mileage = ledgit_core::expr::eval_money("180 * Car_Km_Rate", vars)?;
@@ -506,8 +555,8 @@ fn household(repo: &mut Budget, today: Date) -> R {
     Ok(())
 }
 
-/// Groceries weekly, fuel every ten days, the odd dinner, and paying off the
-/// card near the end of the month.
+/// Groceries weekly, fuel every ten days, the odd dinner, all on the card -
+/// which its statement issuer pays off.
 fn everyday_spending(repo: &mut Budget, b: &Books, rng: &mut Rng, from: Date, to: Date) -> R {
     let mut d = from;
     while d <= to {
@@ -530,7 +579,6 @@ fn everyday_spending(repo: &mut Budget, b: &Books, rng: &mut Rng, from: Date, to
             repo.post("Side job", "invoice", d, rng.money(200, 900), b.chequing, b.side_work)?;
         }
         if day == 27 {
-            repo.post("Pay off card", "", d, rng.money(1_100, 1_500), b.card, b.chequing)?;
             repo.post("Interest", "", d, rng.money(8, 20), b.savings, b.interest)?;
         }
         d = d.add_days(1);

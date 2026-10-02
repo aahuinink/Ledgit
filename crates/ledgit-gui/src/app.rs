@@ -69,6 +69,11 @@ pub struct Session {
     pub selected_commit: Option<CommitId>,
     pub commit_message: String,
     pub issuer_through: String,
+    /// The issuer whose upcoming payments the Issuers screen shows.
+    pub selected_issuer: Option<IssuerUid>,
+    /// An amount being set ahead on the Issuers screen: the date, and what
+    /// is typed so far.
+    pub issuer_override: Option<(Date, String)>,
     pub new_branch: String,
     /// Name for a branch started at the commit selected on History.
     pub branch_at: String,
@@ -169,6 +174,8 @@ impl Session {
             selected_commit: None,
             commit_message: String::new(),
             issuer_through: Date::today_utc().to_string(),
+            selected_issuer: None,
+            issuer_override: None,
             new_branch: String::new(),
             branch_at: String::new(),
             graph: None,
@@ -315,6 +322,11 @@ impl Session {
 
     pub fn budget(&self) -> &Budget {
         self.repo.working()
+    }
+
+    /// What is spoken for as of today, and each ledger's available balance.
+    pub fn availability(&self) -> Availability {
+        Availability::of(self.budget(), Date::today_utc())
     }
 
     pub fn toggle_pin(&mut self, uid: LedgerUid) {

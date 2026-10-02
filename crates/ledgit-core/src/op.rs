@@ -80,6 +80,10 @@ pub enum Op {
         /// encodes, and hashes, exactly as it did.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rule: Option<AmountRule>,
+        /// The transaction this issuer pays off, if it was scheduled from
+        /// one. Absent when unset, for the same reason as `rule`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settles: Option<TxUid>,
     },
     EditIssuer {
         uid: IssuerUid,
@@ -89,6 +93,14 @@ pub enum Op {
     SetIssuerPaused {
         uid: IssuerUid,
         paused: bool,
+    },
+    /// Set the amount of one future occurrence ahead of time, or with `None`
+    /// put it back to what the issuer would work out. For a statement, an
+    /// amount under the minimum is raised to the minimum when it is posted.
+    SetIssuerOverride {
+        uid: IssuerUid,
+        date: Date,
+        amount: Option<Money>,
     },
     /// Records that the issuer has emitted every occurrence up to this date.
     /// Emitted as a sibling of the `PostTransaction` ops it explains, so that
@@ -200,6 +212,12 @@ impl Op {
             Op::EditIssuer { uid, .. } => format!("edit issuer {}", uid.short()),
             Op::SetIssuerPaused { uid, paused: true } => format!("pause issuer {}", uid.short()),
             Op::SetIssuerPaused { uid, paused: false } => format!("resume issuer {}", uid.short()),
+            Op::SetIssuerOverride { uid, date, amount: Some(m) } => {
+                format!("pay {m} on {date} from issuer {}", uid.short())
+            }
+            Op::SetIssuerOverride { uid, date, amount: None } => {
+                format!("clear issuer {}'s amount for {date}", uid.short())
+            }
             Op::AdvanceIssuer { uid, through } => {
                 format!("advance issuer {} through {through}", uid.short())
             }
