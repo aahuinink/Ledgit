@@ -319,6 +319,45 @@ previous amount.
 only a one-off issuer with the entry's legs. Both post when issuers are run on
 or after their date, like any other issuer.
 
+## Merging
+
+Three kinds, all ending as **one commit on the destination** made of
+ordinary ops (`merge.rs`):
+
+- **Replace** - the destination ends like the branch: every entry only it
+  has is reversed, every entry only the branch has is posted, settings take
+  the branch's values, issuers only it has are paused.
+- **Reconcile** - rows (below), decided one by one.
+- **Adopt** - issuers and settings; no transactions, no balance moves.
+
+**Rows** are the *live* entries one side has and the other does not,
+matched by uid. Live means neither a reversal nor cancelled by one
+(`Budget::live_transactions`): `PostTransaction.reverses` links a reversal to
+what it negates, apply checks that it does, and a reversal that is itself
+reversed cancels nothing. Cherry-picking keeps uids, so picked entries match
+and drop out. A ledger is *changed* on a side when its rows touch it, and
+*clashes* when changed on both; rows touching a clash are grouped by the
+clash ledgers they link (union-find) and must be decided - Force, Revert,
+Drop - per group with per-row overrides. Others default to Keep.
+
+**Why the source is not a parent.** A budget is the fold of every ancestor's
+ops (`Repo::budget_at`), so a second parent would replay the branch's whole
+history - every entry and issuer run - on top. The merge's own ops already
+say what came across; `Commit.merged = { from, kind }` records where from,
+appended and skipped when absent so old commit ids are unchanged. The graph
+draws it as a dashed lane.
+
+**Issuers cannot rewind.** `AdvanceIssuer` never goes back, so reverting the
+destination's issuer posts past where the branch ran would leave a gap. The
+preview first runs the branch's issuers up to the destination's date on the
+branch's budget; those posts are branch rows marked `catch_up`.
+
+**Ordering.** Ops are applied in passes against the destination: whatever
+applies goes in, a missing ledger the branch has is created on the way, and
+a pass that makes no progress fails with the op it could not place. The
+result is applied once more and checked balanced before the commit is
+written.
+
 ## Posted and available
 
 `available::Availability::of(budget, today)` lists the **commitments** -
@@ -536,7 +575,7 @@ rather than rediscovered:
    rely on this and so does rebase.
 4. **Nothing is deleted.** There is no op that removes a ledger, transaction
    or issuer. Buckets and saved views are pure readings, so they may be
-   deleted.
+   deleted. Merging never removes history either: it reverses and posts.
 5. **Every entry's legs sum to zero**, number at least two, contain no zero
    amount, and name no ledger twice. The last one matters: two legs against
    one ledger is always either a typo or a sum the user should have done

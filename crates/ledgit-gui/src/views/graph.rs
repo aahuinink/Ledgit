@@ -15,15 +15,24 @@ use std::collections::HashMap;
 /// One row of the graph: where its commit sits, and the line pieces that
 /// cross the row - from its top edge to its middle (`up`), and from its
 /// middle to its bottom edge (`down`). Each piece is `(from lane, to lane,
-/// branch)`. Keeping pieces inside their row is what lets rows be drawn on
-/// their own, off-screen ones not at all.
+/// branch, dashed)`; a dashed piece leads from a merge to the branch tip it
+/// brought changes from - not a parent, so not a solid line. Keeping pieces
+/// inside their row is what lets rows be drawn on their own, off-screen ones
+/// not at all.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub lane: usize,
     pub branch: Option<usize>,
-    pub up: Vec<(usize, usize, Option<usize>)>,
-    pub down: Vec<(usize, usize, Option<usize>)>,
+    pub up: Vec<Piece>,
+    pub down: Vec<Piece>,
 }
+
+/// `(from lane, to lane, branch colour, dashed)`.
+pub type Piece = (usize, usize, Option<usize>, bool);
+
+/// What a lane is waiting for, the colour of the line leading there, and
+/// whether that line is a merge's dashed one.
+type Lane = Option<(CommitId, Option<usize>, bool)>;
 
 pub struct Graph {
     /// Newest first, children before parents: `Repo::graph`.
@@ -62,7 +71,7 @@ impl Graph {
 }
 
 fn lanes_used(r: &Row) -> usize {
-    let widest = r.up.iter().chain(&r.down).map(|(a, b, _)| (*a).max(*b)).max().unwrap_or(0);
+    let widest = r.up.iter().chain(&r.down).map(|(a, b, ..)| (*a).max(*b)).max().unwrap_or(0);
     widest.max(r.lane) + 1
 }
 
@@ -95,15 +104,15 @@ pub fn owners(commits: &[Commit], branches: &[(String, CommitId)]) -> HashMap<Co
 /// joins it, and its first parent carries on in its lane.
 pub fn layout(commits: &[Commit], branches: &[(String, CommitId)]) -> Vec<Row> {
     let owner = owners(commits, branches);
-    // What each lane is waiting for, and the colour of the line leading there.
-    let mut lanes: Vec<Option<(CommitId, Option<usize>)>> = Vec::new();
+    let shown: std::collections::HashSet<CommitId> = commits.iter().map(|c| c.id).collect();
+    let mut lanes: Vec<Lane> = Vec::new();
     let mut rows = Vec::with_capacity(commits.len());
     for c in commits {
         let branch = owner.get(&c.id).copied();
         let expecting: Vec<usize> = lanes
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.is_some_and(|(id, _)| id == c.id))
+            .filter(|(_, l)| l.is_some_and(|(id, ..)| id == c.id))
             .map(|(j, _)| j)
             .collect();
         let lane = match expecting.first() {
@@ -111,43 +120,50 @@ pub fn layout(commits: &[Commit], branches: &[(String, CommitId)]) -> Vec<Row> {
             None => free_lane(&mut lanes),
         };
 
-        let up = lanes
-            .iter()
-            .enumerate()
-            .filter_map(|(j, l)| {
-                l.map(|(id, colour)| if id == c.id { (j, lane, colour) } else { (j, j, colour) })
-            })
-            .collect();
+        let up =
+            lanes
+                .iter()
+                .enumerate()
+                .filter_map(|(j, l)| {
+                    l.map(|(id, colour, dashed)| {
+                        if id == c.id {
+                            (j, lane, colour, dashed)
+                        } else {
+                            (j, j, colour, dashed)
+                        }
+                    })
+                })
+                .collect();
 
         for j in &expecting {
             lanes[*j] = None;
         }
-        let mut from_node = Vec::new();
-        for (k, p) in c.parents.iter().enumerate() {
+        let mut from_node: Vec<(usize, bool)> = Vec::new();
+        // Parents, then - dashed - the branch a merge came from, if it is on
+        // the graph at all (a deleted branch's commits are not).
+        let merged = c.merged.map(|m| m.from).filter(|f| shown.contains(f));
+        let leads = c.parents.iter().map(|p| (*p, false)).chain(merged.map(|f| (f, true)));
+        for (k, (p, dashed)) in leads.enumerate() {
             let j = if k == 0 {
                 lane
             } else {
-                match lanes.iter().position(|l| l.is_some_and(|(id, _)| id == *p)) {
+                match lanes.iter().position(|l| l.is_some_and(|(id, _, d)| id == p && d == dashed))
+                {
                     Some(j) => j,
                     None => free_lane(&mut lanes),
                 }
             };
-            lanes[j] = Some((*p, branch));
-            from_node.push(j);
+            lanes[j] = Some((p, branch, dashed));
+            from_node.push((j, dashed));
         }
         let down = lanes
             .iter()
             .enumerate()
             .filter_map(|(j, l)| {
-                l.map(
-                    |(_, colour)| {
-                        if from_node.contains(&j) {
-                            (lane, j, branch)
-                        } else {
-                            (j, j, colour)
-                        }
-                    },
-                )
+                l.map(|(_, colour, dashed)| match from_node.iter().find(|(k, _)| *k == j) {
+                    Some((_, d)) => (lane, j, branch, *d),
+                    None => (j, j, colour, dashed),
+                })
             })
             .collect();
         while lanes.last().is_some_and(|l| l.is_none()) {
@@ -158,7 +174,7 @@ pub fn layout(commits: &[Commit], branches: &[(String, CommitId)]) -> Vec<Row> {
     rows
 }
 
-fn free_lane(lanes: &mut Vec<Option<(CommitId, Option<usize>)>>) -> usize {
+fn free_lane(lanes: &mut Vec<Lane>) -> usize {
     match lanes.iter().position(|l| l.is_none()) {
         Some(j) => j,
         None => {
@@ -241,13 +257,20 @@ fn paint_lines(ui: &Ui, rect: egui::Rect, row: &Row, dark: bool) {
     let x = |lane: usize| rect.left() + 8.0 + LANE * lane as f32;
     let (top, mid, bottom) = (rect.top(), rect.center().y, rect.bottom());
     let painter = ui.painter();
-    for (from, to, b) in &row.up {
-        let stroke = Stroke::new(2.0_f32, colour(*b, dark));
-        painter.line_segment([egui::pos2(x(*from), top), egui::pos2(x(*to), mid)], stroke);
+    let piece = |from: usize, to: usize, b: Option<usize>, dashed: bool, y0: f32, y1: f32| {
+        let ends = [egui::pos2(x(from), y0), egui::pos2(x(to), y1)];
+        if dashed {
+            let stroke = Stroke::new(1.5_f32, colour(b, dark).gamma_multiply(0.8));
+            painter.extend(egui::Shape::dashed_line(&ends, stroke, 3.0, 3.0));
+        } else {
+            painter.line_segment(ends, Stroke::new(2.0_f32, colour(b, dark)));
+        }
+    };
+    for (from, to, b, dashed) in &row.up {
+        piece(*from, *to, *b, *dashed, top, mid);
     }
-    for (from, to, b) in &row.down {
-        let stroke = Stroke::new(2.0_f32, colour(*b, dark));
-        painter.line_segment([egui::pos2(x(*from), mid), egui::pos2(x(*to), bottom)], stroke);
+    for (from, to, b, dashed) in &row.down {
+        piece(*from, *to, *b, *dashed, mid, bottom);
     }
     let centre = egui::pos2(x(row.lane), mid);
     let fill = colour(row.branch, dark);
@@ -281,8 +304,8 @@ mod tests {
         assert_eq!(rows[2].branch, Some(0), "the shared fork point is main's");
         // At the fork both lanes close in on it.
         assert_eq!(rows[2].lane, 0);
-        assert!(rows[2].up.contains(&(1, 0, Some(1))), "side's line bends into the fork");
-        assert!(rows[2].up.contains(&(0, 0, Some(0))));
+        assert!(rows[2].up.contains(&(1, 0, Some(1), false)), "side's line bends into the fork");
+        assert!(rows[2].up.contains(&(0, 0, Some(0), false)));
         assert!(rows[3].down.is_empty(), "the root has nothing below it");
 
         let owner = owners(&commits, &branches);

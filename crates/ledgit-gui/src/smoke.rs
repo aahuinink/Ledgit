@@ -225,10 +225,11 @@ fn draw_in(ui: &mut egui::Ui, s: &mut Session, view: Screen) {
         Screen::Variables => views::variables::show(ui, s),
         Screen::Commit => views::commit::show(ui, s),
         Screen::History => views::history::show(ui, s),
+        Screen::Merge => views::merge::show(ui, s),
     }
 }
 
-const EVERY_VIEW: [Screen; 11] = [
+const EVERY_VIEW: [Screen; 12] = [
     Screen::Dashboard,
     Screen::Ledgers,
     Screen::Register,
@@ -240,6 +241,7 @@ const EVERY_VIEW: [Screen; 11] = [
     Screen::Variables,
     Screen::Commit,
     Screen::History,
+    Screen::Merge,
 ];
 
 #[test]
@@ -730,6 +732,14 @@ fn draws_a_real_file() {
     let first = s.repo.log(None).unwrap().last().map(|c| c.id);
     s.view_compare = first.map(crate::views::saved::CompareWith::Commit);
     let t = std::time::Instant::now();
+    // A merge of the first other branch, so the merge screen draws real
+    // rows and clash groups too.
+    let here = s.repo.head().branch_name().map(|n| n.to_string());
+    let other =
+        s.repo.branches().unwrap().into_iter().map(|(n, _)| n).find(|n| Some(n) != here.as_ref());
+    if let Some(source) = other {
+        crate::views::merge::start(&mut s, &source, MergeKind::Reconcile);
+    }
     for view in EVERY_VIEW {
         draw(&mut s, view);
     }
@@ -867,6 +877,102 @@ fn a_view_shows_available_beside_today() {
     s.view_draft = None;
     let texts = texts_of(&mut s, Screen::Views);
     assert!(texts.iter().any(|t| t == "available"), "{texts:?}");
+}
+
+// --------------------------------------------------------------- merging
+
+/// [`session`] with everything committed, then `fix` branched off: on main a
+/// $5,000 paycheque and a deposit; on `fix` a $500 one and a venue quote.
+fn repair_session() -> Session {
+    let mut s = session();
+    s.repo.commit("what was staged").unwrap();
+    s.repo.branch("fix", None).unwrap();
+    let l = s.budget();
+    let uid = |name: &str| l.ledgers.uid[l.ledger_by_name(name).unwrap().get()];
+    let (cash, salary, loan) = (uid("Chequing"), uid("Salary"), uid("Car Loan"));
+    let (tux, gifts) = (uid("Wedding:Tuxedo"), uid("Wedding:Gifts"));
+    let day: Date = "2024-02-03".parse().unwrap();
+    s.repo.post("Paycheque", "", day, Money::from_major(5_000), cash, salary).unwrap();
+    s.repo.post("Car payment", "", day, Money::from_major(400), loan, cash).unwrap();
+    s.repo.commit("february").unwrap();
+    s.repo.checkout("fix").unwrap();
+    s.repo.post("Paycheque", "", day, Money::from_major(500), cash, salary).unwrap();
+    s.repo.post("Tux deposit", "", day, Money::from_major(90), tux, gifts).unwrap();
+    s.repo.commit("february, fixed").unwrap();
+    s.repo.checkout(DEFAULT_BRANCH).unwrap();
+    s
+}
+
+fn texts(s: &mut Session, screen: Screen) -> Vec<String> {
+    texts_of(s, screen)
+}
+
+#[test]
+fn the_merge_screen_draws_each_kind_and_waits_for_clashes() {
+    let mut s = repair_session();
+    let history = texts(&mut s, Screen::History);
+    for want in ["MERGE INTO MAIN", "Replace", "Reconcile", "Adopt"] {
+        assert!(history.iter().any(|t| t == want), "{want:?} not in {history:?}");
+    }
+
+    views::merge::start(&mut s, "fix", MergeKind::Reconcile);
+    assert_eq!(s.goto, Some(Screen::Merge));
+    let shown = texts(&mut s, Screen::Merge);
+    for want in ["Merge unresolved as Replace", "1 clash(es) to decide", "undecided", "Revert"] {
+        assert!(shown.iter().any(|t| t == want), "{want:?} not in {shown:?}");
+    }
+    assert!(shown.iter().any(|t| t.starts_with("Both branches changed")), "{shown:?}");
+    assert!(shown.iter().any(|t| t.starts_with("ONLY ON FIX")), "the tux deposit: {shown:?}");
+
+    // Force warns; deciding shows what the balances come to.
+    s.merge.as_mut().unwrap().choices.groups.insert(0, GroupChoice::Force);
+    let shown = texts(&mut s, Screen::Merge);
+    assert!(shown.iter().any(|t| t.starts_with("Force keeps both sides")), "{shown:?}");
+    assert!(shown.iter().any(|t| t == "LEDGERS AFFECTED"), "{shown:?}");
+    assert!(!shown.iter().any(|t| t == "Merge unresolved as Replace"));
+
+    for kind in [MergeKind::Replace, MergeKind::Adopt] {
+        views::merge::start(&mut s, "fix", kind);
+        draw(&mut s, Screen::Merge);
+    }
+    assert!(!s.repo.has_staged_changes(), "previewing writes nothing");
+}
+
+#[test]
+fn after_a_merge_history_offers_to_delete_the_branch() {
+    let mut s = repair_session();
+    let p = s.repo.merge_preview("fix", MergeKind::Reconcile).unwrap();
+    let mut c = Choices::default();
+    c.groups.insert(0, GroupChoice::Revert);
+    let out = s.repo.merge(&p, &c, "").unwrap();
+    s.merged = Some("fix".into());
+    s.selected_commit = Some(out.commit);
+    let shown = texts(&mut s, Screen::History);
+    assert!(shown.iter().any(|t| t == "Delete branch fix"), "{shown:?}");
+    assert!(shown.iter().any(|t| t == "Reconcile merge from fix"), "{shown:?}");
+    // The merge's graph row leads, dashed, to the branch it came from.
+    let g = views::graph::Graph::build(&s.repo, 100).unwrap();
+    let at = g.commits.iter().position(|c| c.id == out.commit).unwrap();
+    assert!(
+        g.rows[at].down.iter().any(|piece| piece.3),
+        "{:?}",
+        g.rows.iter().zip(&g.commits).map(|(r, c)| (c.summary(), r)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn entries_can_be_reversed_from_their_rows() {
+    let mut s = repair_session();
+    let shown = texts(&mut s, Screen::Transactions);
+    assert!(shown.iter().any(|t| t == "Reverse"), "{shown:?}");
+    let l = s.budget();
+    let pay = l.transactions.uid[l.transactions.len() - 2];
+    views::stage_reversal(&mut s, pay);
+    assert!(s.repo.has_staged_changes());
+    let shown = texts(&mut s, Screen::Transactions);
+    assert!(shown.iter().any(|t| t == "reversed"), "{shown:?}");
+    assert!(shown.iter().any(|t| t == "reversal"), "{shown:?}");
+    draw(&mut s, Screen::Register);
 }
 
 /// A headless window to click and type in, reporting what it painted.

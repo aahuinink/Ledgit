@@ -29,11 +29,14 @@ pub enum Screen {
     Variables,
     Commit,
     History,
+    /// Reached from History: deciding a merge.
+    Merge,
 }
 
 fn screen_name(v: Screen) -> &'static str {
     match v {
         Screen::Register => "Register",
+        Screen::Merge => "Merge",
         _ => Screen::NAV.iter().find(|(s, _)| *s == v).map(|(_, n)| *n).unwrap_or("?"),
     }
 }
@@ -81,6 +84,13 @@ pub struct Session {
     /// only when a branch or HEAD moves: reading a commit re-hashes it.
     pub graph: Option<(String, std::rc::Rc<crate::views::graph::Graph>)>,
     pub rebase_onto: String,
+    /// The branch picked to merge into this one, on the History screen.
+    pub merge_source: String,
+    /// A merge being decided on the Merge screen.
+    pub merge: Option<crate::views::merge::Draft>,
+    /// The branch just merged, until its "Delete branch" offer is taken or
+    /// dismissed.
+    pub merged: Option<String>,
     /// A branch picked on the History screen while changes are staged: the
     /// screen asks whether to shelve them or bring them along.
     pub pending_switch: Option<String>,
@@ -180,6 +190,9 @@ impl Session {
             branch_at: String::new(),
             graph: None,
             rebase_onto: String::new(),
+            merge_source: String::new(),
+            merge: None,
+            merged: None,
             pending_switch: None,
             status: None,
             forms: Forms::default(),
@@ -618,6 +631,7 @@ impl LedgitApp {
                 Screen::Variables => views::variables::show(ui, &mut session),
                 Screen::Commit => views::commit::show(ui, &mut session),
                 Screen::History => views::history::show(ui, &mut session),
+                Screen::Merge => views::merge::show(ui, &mut session),
             }
         });
 

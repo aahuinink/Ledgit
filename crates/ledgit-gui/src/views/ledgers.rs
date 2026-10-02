@@ -352,7 +352,9 @@ pub fn register(ui: &mut Ui, s: &mut Session) {
         return;
     }
 
+    let mut reverse: Option<TxUid> = None;
     let l = s.budget();
+    let reversible = super::Reversible::of(l);
     Table::new(
         ("register", uid),
         vec![
@@ -361,6 +363,7 @@ pub fn register(ui: &mut Ui, s: &mut Session) {
             text("other side").max(320.0),
             figures("change"),
             figures("balance"),
+            text("").narrow(),
         ],
     )
     .height(Height::Fill)
@@ -408,7 +411,15 @@ pub fn register(ui: &mut Ui, s: &mut Session) {
         row.col(|ui| {
             num(ui, fmt::mono(fmt::amount(line.balance)));
         });
+        row.col(|ui| {
+            if let Some(tx) = reversible.cell(ui, l, line.transaction) {
+                reverse = Some(tx);
+            }
+        });
     });
+    if let Some(tx) = reverse {
+        super::stage_reversal(s, tx);
+    }
 }
 
 /// The payments already decided that hold money back on this ledger.

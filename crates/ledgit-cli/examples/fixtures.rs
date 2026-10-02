@@ -505,6 +505,30 @@ fn household(repo: &mut Budget, today: Date) -> R {
         month = month.add_months(1);
     }
 
+    // A mistake to repair on a branch: a $9,000 invoice that was $900,
+    // committed alongside good groceries. `fix-side-job` branches from the
+    // commit before, cherry-picks that commit, reverses the bad invoice and
+    // enters the right one - ready to Reconcile into main.
+    let before = repo.head_commit()?.expect("history so far").to_string();
+    let when = stop.add_days(3);
+    let bad = repo.post(
+        "Side job",
+        "invoice - typo",
+        when,
+        Money::from_major(9_000),
+        b.chequing,
+        b.side_work,
+    )?;
+    repo.post("Groceries", "Loblaws", when, cents(118_40), b.groceries, b.card)?;
+    let mistake = repo.commit("Side job and groceries")?;
+    repo.branch("fix-side-job", Some(&before))?;
+    repo.checkout("fix-side-job")?;
+    repo.cherry_pick(&mistake.to_string())?;
+    repo.reverse_transaction(bad)?;
+    repo.post("Side job", "invoice", when, Money::from_major(900), b.chequing, b.side_work)?;
+    repo.commit("Side job, fixed")?;
+    repo.checkout(DEFAULT_BRANCH)?;
+
     // Leave a few edits staged: the commit screen's report.
     repo.post("Groceries", "this week", today.add_days(-2), cents(143_62), b.groceries, b.card)?;
     repo.post_split(

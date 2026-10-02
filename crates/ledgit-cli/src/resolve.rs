@@ -88,6 +88,18 @@ pub fn issuer(l: &Budget, s: &str) -> Result<IssuerUid> {
     }
 }
 
+/// A transaction by its uid, or a unique prefix of it.
+pub fn transaction(l: &Budget, s: &str) -> Result<TxUid> {
+    let lower = s.to_lowercase();
+    let hits: Vec<TxUid> =
+        l.transactions.uid.iter().copied().filter(|u| u.to_string().starts_with(&lower)).collect();
+    match hits.len() {
+        1 => Ok(hits[0]),
+        0 => Err(Error::Invalid(format!("no transaction {s}"))),
+        n => Err(Error::Invalid(format!("\"{s}\" matches {n} transactions; give more of it"))),
+    }
+}
+
 /// `14d`, `weekly`, `biweekly`, `monthly`, `monthly:15`, `quarterly:1`, `once`.
 pub fn schedule(s: &str) -> Result<Schedule> {
     let s = s.trim().to_lowercase();

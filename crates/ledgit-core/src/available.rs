@@ -254,6 +254,7 @@ mod tests {
             date,
             legs,
             parent: Parent::Manual,
+            reverses: None,
         };
         let issuer = |uid, legs, schedule, start, rule, settles| Op::CreateIssuer {
             uid,

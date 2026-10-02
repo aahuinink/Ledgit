@@ -163,7 +163,10 @@ impl Forms {
                 };
                 FormKind::Ledger
             }
-            Op::PostTransaction { uid, name, description, date, legs, parent } => {
+            // A reversal is every side of another entry negated; there is
+            // nothing in it to edit.
+            Op::PostTransaction { reverses: Some(_), .. } => return false,
+            Op::PostTransaction { uid, name, description, date, legs, parent, reverses: None } => {
                 self.transaction = TxForm {
                     uid: Some((uid, parent)),
                     name,
@@ -767,6 +770,7 @@ impl TxForm {
                 date,
                 legs,
                 parent,
+                reverses: None,
             }])),
             When::PostLater => {
                 if date <= Date::today_utc() {
@@ -810,7 +814,15 @@ impl TxForm {
                 }
                 let pay = ledgit_core::issuer::settlement(uid, &name, owed_on, from, amount, on);
                 Ok(Outcome::Submit(vec![
-                    Op::PostTransaction { uid, name, description, date, legs, parent },
+                    Op::PostTransaction {
+                        uid,
+                        name,
+                        description,
+                        date,
+                        legs,
+                        parent,
+                        reverses: None,
+                    },
                     pay,
                 ]))
             }
@@ -1503,6 +1515,7 @@ mod tests {
             date: Date::from_ymd(2024, 3, 1).unwrap(),
             legs,
             parent: Parent::Manual,
+            reverses: None,
         };
         assert!(forms.edit_staged(3, &op));
         assert_eq!(forms.editing, Some(3));
@@ -1636,6 +1649,7 @@ mod tests {
             date: d(1, 5),
             legs: simple_legs(a, card, Money::from_major(400)),
             parent: Parent::Manual,
+            reverses: None,
         })
         .unwrap();
         b.apply(&Op::CreateIssuer {

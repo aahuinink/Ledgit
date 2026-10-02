@@ -435,6 +435,7 @@ fn unstaging_a_dependency_flags_what_it_breaks_and_blocks_the_commit() {
         date,
         legs: simple_legs(f.loan, f.cash, Money::from_major(5)),
         parent,
+        reverses: None,
     };
     f.repo.replace_staged(0, fixed).unwrap();
     assert!(f.repo.broken().is_empty());
@@ -454,6 +455,7 @@ fn an_edit_that_does_not_apply_is_refused_and_leaves_the_stage_alone() {
         date: d("2024-01-02"),
         legs: simple_legs(LedgerUid::new(), f.cash, Money::from_major(5)),
         parent: Parent::Manual,
+        reverses: None,
     };
     assert!(f.repo.replace_staged(0, bad).is_err());
     assert_eq!(f.repo.staged(), &before[..]);
@@ -1621,4 +1623,501 @@ fn a_pace_is_a_target_per_calendar_period() {
     assert_eq!(p.flow, m(460), "all of March's food");
     // A pace is no balance to draw a line at, nor to add into a bucket's.
     assert!(goals::bucket_targets(l, spend, RollUp::Sum).unwrap().lines.is_empty());
+}
+
+// ------------------------------------------------ reversing and picking
+
+#[test]
+fn reversing_one_entry_links_it_and_refuses_twice() {
+    let mut f = fixture();
+    let pay = f
+        .repo
+        .post("Pay", "", d("2024-01-05"), Money::from_major(5_000), f.cash, f.salary)
+        .unwrap();
+    let keep = f
+        .repo
+        .post("Pay 2", "", d("2024-01-19"), Money::from_major(500), f.cash, f.salary)
+        .unwrap();
+    f.repo.commit("pay").unwrap();
+
+    let r = f.repo.reverse_transaction(pay).unwrap();
+    let l = f.repo.working();
+    let (pix, rix) = (l.transactions.ix(pay).unwrap(), l.transactions.ix(r).unwrap());
+    assert_eq!(l.transactions.reverses[rix.get()], Some(pay));
+    assert_eq!(l.reversed_by(pix), Some(rix));
+    assert_eq!(l.live_transactions(), vec![l.transactions.ix(keep).unwrap()]);
+    assert_eq!(l.ledgers.balance(l.ledgers.ix(f.cash).unwrap()), Money::from_major(500));
+    assert!(f.repo.reverse_transaction(pay).is_err(), "already reversed");
+    assert!(f.repo.reverse_transaction(r).is_err(), "a reversal itself");
+}
+
+#[test]
+fn a_reversal_must_negate_what_it_names() {
+    let mut f = fixture();
+    let pay =
+        f.repo.post("Pay", "", d("2024-01-05"), Money::from_major(100), f.cash, f.salary).unwrap();
+    let wrong = Op::PostTransaction {
+        uid: TxUid::new(),
+        name: "not quite".into(),
+        description: String::new(),
+        date: d("2024-01-05"),
+        legs: simple_legs(f.salary, f.cash, Money::from_major(90)),
+        parent: Parent::Manual,
+        reverses: Some(pay),
+    };
+    assert!(f.repo.stage(wrong).is_err());
+}
+
+/// Reverting a commit links its reversals; reverting the revert brings the
+/// original entries back to life.
+#[test]
+fn reverting_a_revert_brings_the_entry_back() {
+    let mut f = fixture();
+    let pay =
+        f.repo.post("Pay", "", d("2024-01-05"), Money::from_major(100), f.cash, f.salary).unwrap();
+    f.repo.commit("pay").unwrap();
+    f.repo.revert("HEAD").unwrap();
+    f.repo.commit("undo").unwrap();
+    let live = |f: &Fixture| f.repo.working().live_transactions().len();
+    assert_eq!(live(&f), 0);
+    f.repo.revert("HEAD").unwrap();
+    f.repo.commit("redo").unwrap();
+    assert_eq!(live(&f), 1);
+    let l = f.repo.working();
+    assert_eq!(l.live_transactions(), vec![l.transactions.ix(pay).unwrap()]);
+}
+
+#[test]
+fn cherry_pick_keeps_uids_and_skips_what_is_already_here() {
+    let mut f = fixture();
+    f.repo.commit("base").ok();
+    f.repo.branch("other", None).unwrap();
+    let pay =
+        f.repo.post("Pay", "", d("2024-01-05"), Money::from_major(100), f.cash, f.salary).unwrap();
+    let good = f.repo.commit("good pay").unwrap();
+    f.repo.checkout("other").unwrap();
+    assert_eq!(f.repo.cherry_pick(&good.to_string()).unwrap(), (1, 0));
+    assert!(f.repo.working().transactions.ix(pay).is_some(), "same uid");
+    f.repo.commit("picked").unwrap();
+    assert_eq!(f.repo.cherry_pick(&good.to_string()).unwrap(), (0, 1), "already here");
+}
+
+/// Commits and entries made before merges and reversal links existed must
+/// encode exactly as they did.
+#[test]
+fn old_commits_and_entries_encode_as_they_did() {
+    let op = Op::PostTransaction {
+        uid: TxUid::new(),
+        name: "Pay".into(),
+        description: String::new(),
+        date: d("2024-01-05"),
+        legs: simple_legs(LedgerUid::new(), LedgerUid::new(), Money(100)),
+        parent: Parent::Manual,
+        reverses: None,
+    };
+    let json = serde_json::to_string(&op).unwrap();
+    assert!(!json.contains("reverses"), "{json}");
+    let c = Commit::new(vec![], "me", 1, "m", vec![op]).unwrap();
+    assert!(!serde_json::to_string(&c).unwrap().contains("merged"));
+    c.verify().unwrap();
+}
+
+// --------------------------------------------------------------- merging
+
+mod merging {
+    use super::*;
+    use ledgit_core::merge::Case;
+
+    /// `main` and `fix-sept`, split at the end of August.
+    ///
+    /// main: a $5,000 paycheque that should have been $500, groceries $80,
+    /// the 2% sweep run on the inflated balance, a wedding deposit, and
+    /// groceries $50 on Oct 1.
+    /// fix-sept: the September entries cherry-picked, the paycheque reversed
+    /// and re-entered at $500, the sweep run on the right balance, and a
+    /// venue quote on ledgers main never touched.
+    struct Repair {
+        repo: Repo<MemStore>,
+        cash: LedgerUid,
+        salary: LedgerUid,
+        emergency: LedgerUid,
+        wedding: LedgerUid,
+        venue: LedgerUid,
+        bad_pay: TxUid,
+        groceries_oct: TxUid,
+        sweep: IssuerUid,
+    }
+
+    fn repair() -> Repair {
+        let mut repo = Repo::init(MemStore::new(), "tester").unwrap();
+        let open = d("2024-08-01");
+        let l =
+            |repo: &mut Repo<MemStore>, name: &str, n| repo.add_ledger(name, "", n, open).unwrap();
+        let cash = l(&mut repo, "Chequing", Normality::Debit);
+        let salary = l(&mut repo, "Salary", Normality::Credit);
+        let emergency = l(&mut repo, "Emergency", Normality::Debit);
+        let food = l(&mut repo, "Groceries", Normality::Debit);
+        let wedding = l(&mut repo, "Wedding", Normality::Debit);
+        let opening = l(&mut repo, "Opening", Normality::Credit);
+        let venue = l(&mut repo, "Venue", Normality::Debit);
+        let gifts = l(&mut repo, "Gifts", Normality::Credit);
+        repo.post("Opening", "", open, Money::from_major(1_000), cash, opening).unwrap();
+        let sweep = repo
+            .add_rule_issuer(
+                "Sweep",
+                "",
+                emergency,
+                cash,
+                AmountRule::ShareOfBalance { of: cash, rate: Rate::parse_percent("2").unwrap() },
+                Schedule::MonthlyOn { day: 28, every_n_months: 1 },
+                open,
+            )
+            .unwrap();
+        repo.run_issuers(d("2024-08-31")).unwrap();
+        repo.commit("august").unwrap();
+        repo.branch("fix-sept", None).unwrap();
+
+        let bad_pay = repo
+            .post("Paycheque", "", d("2024-09-03"), Money::from_major(5_000), cash, salary)
+            .unwrap();
+        repo.post("Groceries", "", d("2024-09-10"), Money::from_major(80), food, cash).unwrap();
+        let entries = repo.commit("september entries").unwrap();
+        repo.run_issuers(d("2024-09-30")).unwrap();
+        repo.commit("september issuers").unwrap();
+        repo.post("Deposit", "", d("2024-09-15"), Money::from_major(400), wedding, opening)
+            .unwrap();
+        let groceries_oct =
+            repo.post("Groceries", "", d("2024-10-01"), Money::from_major(50), food, cash).unwrap();
+        repo.commit("more").unwrap();
+
+        repo.checkout("fix-sept").unwrap();
+        repo.cherry_pick(&entries.to_string()).unwrap();
+        repo.reverse_transaction(bad_pay).unwrap();
+        repo.post("Paycheque", "", d("2024-09-03"), Money::from_major(500), cash, salary).unwrap();
+        repo.post("Venue quote", "", d("2024-09-20"), Money::from_major(50), venue, gifts).unwrap();
+        repo.commit("september, fixed").unwrap();
+        repo.run_issuers(d("2024-09-30")).unwrap();
+        repo.commit("september issuers").unwrap();
+        repo.checkout(DEFAULT_BRANCH).unwrap();
+        Repair { repo, cash, salary, emergency, wedding, venue, bad_pay, groceries_oct, sweep }
+    }
+
+    fn balance(repo: &Repo<MemStore>, l: LedgerUid) -> Money {
+        let w = repo.working();
+        w.ledgers.balance(w.ledgers.ix(l).unwrap())
+    }
+
+    fn branch_balance(r: &Repair, l: LedgerUid) -> Money {
+        let b = r.repo.budget_at(r.repo.resolve("fix-sept").unwrap()).unwrap();
+        b.ledgers.balance(b.ledgers.ix(l).unwrap())
+    }
+
+    fn names(p: &MergePreview, case: Case) -> Vec<(Side, String, Money)> {
+        p.rows
+            .iter()
+            .filter(|r| r.case == case)
+            .map(|r| (r.side, r.tx.name.clone(), r.tx.amount()))
+            .collect()
+    }
+
+    #[test]
+    fn rows_fall_into_the_three_cases() {
+        let r = repair();
+        let p = r.repo.merge_preview("fix-sept", MergeKind::Reconcile).unwrap();
+        assert_eq!(
+            names(&p, Case::DestinationOnly),
+            [(Side::Destination, "Deposit".into(), Money::from_major(400))]
+        );
+        assert_eq!(
+            names(&p, Case::SourceOnly),
+            [(Side::Source, "Venue quote".into(), Money::from_major(50))]
+        );
+        // Chequing, Salary and Emergency are changed on both sides, and the
+        // rows link them into one group. The cherry-picked September
+        // groceries are on both, so they are not a row at all.
+        assert_eq!(p.groups.len(), 1);
+        let mut ledgers = p.groups[0].ledgers.clone();
+        ledgers.sort();
+        let mut want = vec![r.cash, r.salary, r.emergency];
+        want.sort();
+        assert_eq!(ledgers, want);
+        let clash = names(&p, Case::Clash);
+        assert_eq!(clash.len(), 5, "{clash:?}");
+        assert!(clash.contains(&(Side::Destination, "Paycheque".into(), Money::from_major(5_000))));
+        assert!(clash.contains(&(Side::Source, "Paycheque".into(), Money::from_major(500))));
+        assert!(clash.contains(&(Side::Destination, "Groceries".into(), Money::from_major(50))));
+        // The sweep on both: 2% of 5,900 on main, of 1,400 on the branch.
+        assert!(clash.contains(&(Side::Destination, "Sweep".into(), Money::from_major(118))));
+        assert!(clash.contains(&(Side::Source, "Sweep".into(), Money::from_major(28))));
+        assert!(p.rows.iter().all(|row| !row.catch_up));
+    }
+
+    #[test]
+    fn an_undecided_clash_blocks_the_merge() {
+        let mut r = repair();
+        let p = r.repo.merge_preview("fix-sept", MergeKind::Reconcile).unwrap();
+        let none = Choices::default();
+        assert_eq!(p.unresolved(&none).groups, vec![0]);
+        assert!(r.repo.merge(&p, &none, "").is_err());
+        assert!(!r.repo.has_staged_changes());
+    }
+
+    /// The repair: take the branch's side of the clash, but keep the
+    /// groceries bought on main during it.
+    #[test]
+    fn reverting_the_clash_makes_main_match_the_fix_without_losing_history() {
+        let mut r = repair();
+        let p = r.repo.merge_preview("fix-sept", MergeKind::Reconcile).unwrap();
+        let mut c = Choices::default();
+        c.groups.insert(0, GroupChoice::Revert);
+        c.rows.insert(r.groceries_oct, RowChoice::Keep);
+        let out = r.repo.merge(&p, &c, "").unwrap();
+        assert!(!out.fast_forward);
+
+        for l in [r.salary, r.emergency, r.venue] {
+            assert_eq!(balance(&r.repo, l), branch_balance(&r, l));
+        }
+        assert_eq!(balance(&r.repo, r.cash), branch_balance(&r, r.cash) - Money::from_major(50));
+        assert_eq!(balance(&r.repo, r.wedding), Money::from_major(400), "case 1 kept");
+
+        // The bad paycheque is still in main's history, reversed.
+        let w = r.repo.working();
+        let bad = w.transactions.ix(r.bad_pay).unwrap();
+        assert!(w.reversed_by(bad).is_some());
+
+        // The merge records its source without making it a parent, so the
+        // fold of main's history is exactly what is on screen.
+        let head = r.repo.head_commit().unwrap().unwrap();
+        let commit = r.repo.get_commit(head).unwrap();
+        assert_eq!(commit.parents.len(), 1);
+        assert_eq!(
+            commit.merged.map(|m| (m.from, m.kind)),
+            Some((r.repo.resolve("fix-sept").unwrap(), MergeKind::Reconcile))
+        );
+        assert_eq!(commit.message, "Reconcile fix-sept into main");
+        let folded = r.repo.budget_at(head).unwrap();
+        assert_eq!(folded.ledgers.raw_balance, r.repo.working().ledgers.raw_balance);
+        assert!(r.repo.working().is_balanced());
+
+        // Merging the same branch again finds only main's own work, which
+        // the branch never had - nothing from the branch is left to bring.
+        let again = r.repo.merge_preview("fix-sept", MergeKind::Reconcile).unwrap();
+        let left: Vec<_> =
+            again.rows.iter().map(|row| (row.side, row.case, row.tx.name.as_str())).collect();
+        assert_eq!(
+            left,
+            [
+                (Side::Destination, Case::DestinationOnly, "Deposit"),
+                (Side::Destination, Case::DestinationOnly, "Groceries"),
+            ]
+        );
+    }
+
+    #[test]
+    fn force_keeps_both_and_drop_keeps_main() {
+        let mut force = repair();
+        let p = force.repo.merge_preview("fix-sept", MergeKind::Reconcile).unwrap();
+        let before = balance(&force.repo, force.cash);
+        let mut c = Choices::default();
+        c.groups.insert(0, GroupChoice::Force);
+        force.repo.merge(&p, &c, "").unwrap();
+        // Both paycheques, both sweeps: the double post Force warns about.
+        assert_eq!(balance(&force.repo, force.cash), before + Money::from_major(500 - 28));
+
+        let mut drop = repair();
+        let p = drop.repo.merge_preview("fix-sept", MergeKind::Reconcile).unwrap();
+        let before = balance(&drop.repo, drop.cash);
+        let mut c = Choices::default();
+        c.groups.insert(0, GroupChoice::Drop);
+        drop.repo.merge(&p, &c, "").unwrap();
+        assert_eq!(balance(&drop.repo, drop.cash), before);
+        assert_eq!(balance(&drop.repo, drop.venue), Money::from_major(50), "case 2 still comes");
+    }
+
+    #[test]
+    fn undecided_clashes_can_go_the_way_replace_would() {
+        let mut r = repair();
+        let p = r.repo.merge_preview("fix-sept", MergeKind::Reconcile).unwrap();
+        let mut c = Choices { unresolved_as_replace: true, ..Choices::default() };
+        c.rows.insert(r.groceries_oct, RowChoice::Keep);
+        assert!(p.unresolved(&c).is_empty());
+        r.repo.merge(&p, &c, "").unwrap();
+        assert_eq!(balance(&r.repo, r.cash), branch_balance(&r, r.cash) - Money::from_major(50));
+    }
+
+    #[test]
+    fn replace_makes_main_match_the_branch() {
+        let mut r = repair();
+        // An issuer only main has: Replace cannot delete it, so it pauses it.
+        let gym = r
+            .repo
+            .add_issuer(
+                "Gym",
+                "",
+                r.wedding,
+                r.cash,
+                Money::from_major(45),
+                Schedule::Once,
+                d("2024-12-01"),
+            )
+            .unwrap();
+        r.repo.commit("gym").unwrap();
+        let p = r.repo.merge_preview("fix-sept", MergeKind::Replace).unwrap();
+        assert!(!p.fast_forward);
+        r.repo.merge(&p, &Choices::default(), "").unwrap();
+        for l in [r.cash, r.salary, r.emergency, r.venue, r.wedding] {
+            assert_eq!(balance(&r.repo, l), branch_balance(&r, l), "{l:?}");
+        }
+        let w = r.repo.working();
+        assert_eq!(
+            w.issuers.emitted_through[w.issuers.ix(r.sweep).unwrap().get()],
+            Some(d("2024-09-28"))
+        );
+        assert!(w.issuers.paused[w.issuers.ix(gym).unwrap().get()]);
+    }
+
+    /// A branch's change to a setting comes across; one both sides changed
+    /// is listed and stays main's unless chosen.
+    #[test]
+    fn settings_the_branch_changed_come_across() {
+        let mut r = repair();
+        let edit =
+            |uid, name: &str| Op::EditLedger { uid, name: Some(name.into()), description: None };
+        r.repo.stage(edit(r.wedding, "Wedding (main)")).unwrap();
+        r.repo.commit("rename on main").unwrap();
+        r.repo.checkout("fix-sept").unwrap();
+        r.repo.stage(edit(r.wedding, "Wedding (fix)")).unwrap();
+        r.repo.stage(edit(r.venue, "Venue (fix)")).unwrap();
+        r.repo.commit("renames on the fix").unwrap();
+        r.repo.checkout(DEFAULT_BRANCH).unwrap();
+
+        let p = r.repo.merge_preview("fix-sept", MergeKind::Reconcile).unwrap();
+        let wedding = p.settings.iter().find(|i| i.theirs == "Wedding (fix)").unwrap();
+        assert!(wedding.both_changed);
+        assert_eq!(wedding.ours, "Wedding (main)");
+        let mut c = Choices::default();
+        c.groups.insert(0, GroupChoice::Drop);
+        r.repo.merge(&p, &c, "").unwrap();
+        let w = r.repo.working();
+        let name = |l| w.ledgers.name[w.ledgers.ix(l).unwrap().get()].clone();
+        assert_eq!(name(r.wedding), "Wedding (main)", "changed on both: main's by default");
+        assert_eq!(name(r.venue), "Venue (fix)", "changed on the branch only: comes across");
+    }
+
+    #[test]
+    fn replace_with_nothing_new_on_main_fast_forwards() {
+        let mut f = fixture();
+        f.repo.checkout_new("ahead").unwrap();
+        f.repo.post("Pay", "", d("2024-01-05"), Money::from_major(100), f.cash, f.salary).unwrap();
+        let tip = f.repo.commit("on the branch").unwrap();
+        f.repo.checkout(DEFAULT_BRANCH).unwrap();
+        let p = f.repo.merge_preview("ahead", MergeKind::Replace).unwrap();
+        assert!(p.fast_forward);
+        let out = f.repo.merge(&p, &Choices::default(), "").unwrap();
+        assert_eq!((out.fast_forward, out.commit), (true, tip));
+        assert_eq!(f.repo.head_commit().unwrap(), Some(tip));
+        assert_eq!(f.repo.working().transactions.len(), 1);
+    }
+
+    /// Main ran the sweep into October; the branch stopped at September.
+    /// Reverting main's October sweep must not leave October unswept.
+    #[test]
+    fn the_branch_catches_up_with_issuers_main_ran_further() {
+        let mut r = repair();
+        r.repo.run_issuers(d("2024-10-31")).unwrap();
+        r.repo.commit("october issuers").unwrap();
+        let p = r.repo.merge_preview("fix-sept", MergeKind::Reconcile).unwrap();
+        let caught: Vec<_> = p.rows.iter().filter(|row| row.catch_up).collect();
+        assert_eq!(caught.len(), 1);
+        assert_eq!((caught[0].tx.name.as_str(), caught[0].tx.date), ("Sweep", d("2024-10-28")));
+        let mut c = Choices::default();
+        c.groups.insert(0, GroupChoice::Revert);
+        r.repo.merge(&p, &c, "").unwrap();
+        let w = r.repo.working();
+        let live_sweeps: Vec<Date> = w
+            .live_transactions()
+            .into_iter()
+            .filter(|t| w.transactions.parent[t.get()] == Parent::Issuer(r.sweep))
+            .map(|t| w.transactions.date[t.get()])
+            .collect();
+        assert_eq!(live_sweeps, [d("2024-08-28"), d("2024-09-28"), d("2024-10-28")]);
+    }
+
+    /// A what-if's plans come across; its imagined entries do not.
+    #[test]
+    fn adopt_brings_issuers_and_views_but_moves_no_money() {
+        let mut f = fixture();
+        let rent_l = f.repo.add_ledger("Rent", "", Normality::Debit, d("2024-01-01")).unwrap();
+        let monthly = Schedule::MonthlyOn { day: 1, every_n_months: 1 };
+        let rent = f
+            .repo
+            .add_issuer(
+                "Rent",
+                "",
+                rent_l,
+                f.cash,
+                Money::from_major(1_500),
+                monthly,
+                d("2024-01-01"),
+            )
+            .unwrap();
+        f.repo.commit("rent").unwrap();
+        f.repo.checkout_new("new-car").unwrap();
+        let new_loan =
+            f.repo.add_ledger("New Car Loan", "", Normality::Credit, d("2024-02-01")).unwrap();
+        f.repo
+            .post("New car", "", d("2024-02-01"), Money::from_major(38_000), f.cash, new_loan)
+            .unwrap();
+        let car = f
+            .repo
+            .add_issuer(
+                "New car payment",
+                "",
+                new_loan,
+                f.cash,
+                Money::from_major(640),
+                Schedule::EveryNDays { n: 14 },
+                d("2024-02-15"),
+            )
+            .unwrap();
+        let rent2 = f
+            .repo
+            .add_issuer(
+                "Rent, new place",
+                "",
+                rent_l,
+                f.cash,
+                Money::from_major(1_700),
+                monthly,
+                d("2024-03-01"),
+            )
+            .unwrap();
+        f.repo.add_view("Car budget", "", ViewSpec::default()).unwrap();
+        f.repo.run_issuers(d("2024-03-31")).unwrap();
+        f.repo.commit("what if").unwrap();
+        f.repo.checkout(DEFAULT_BRANCH).unwrap();
+
+        let p = f.repo.merge_preview("new-car", MergeKind::Adopt).unwrap();
+        assert!(p.rows.is_empty(), "no transactions in an adopt");
+        let clash = p.issuers.iter().find(|i| i.uid == rent2).unwrap();
+        assert_eq!(clash.clashes, vec![rent], "same ledgers as main's rent");
+        assert!(p.issuers.iter().any(|i| i.uid == car && i.clashes.is_empty()));
+        assert_eq!(p.unresolved(&Choices::default()).issuers, vec![rent2]);
+
+        let before = f.repo.working().ledgers.raw_balance.clone();
+        let mut c = Choices::default();
+        c.issuers.insert(rent2, IssuerChoice::TakeBranch);
+        f.repo.merge(&p, &c, "").unwrap();
+        let w = f.repo.working();
+        assert!(
+            w.ledgers.raw_balance.iter().take(before.len()).eq(before.iter()),
+            "no money moved"
+        );
+        let car_ix = w.issuers.ix(car).expect("the plan came across");
+        assert_eq!(w.issuers.emitted_through[car_ix.get()], None, "its what-if runs did not");
+        assert!(w.ledgers.ix(new_loan).is_some(), "the ledger it pays was created");
+        assert_eq!(w.ledgers.balance(w.ledgers.ix(new_loan).unwrap()), Money::ZERO);
+        assert!(w.issuers.paused[w.issuers.ix(rent).unwrap().get()], "main's rent paused");
+        assert!(w.view_by_name("Car budget").is_some());
+    }
 }

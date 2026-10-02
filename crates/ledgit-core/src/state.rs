@@ -116,6 +116,8 @@ pub struct TxArena {
     pub description: Vec<String>,
     pub date: Vec<Date>,
     pub parent: Vec<Parent>,
+    /// For a reversal, the transaction it cancels.
+    pub reverses: Vec<Option<TxUid>>,
     /// First posting of this transaction in the posting arena.
     pub leg_start: Vec<u32>,
     /// How many postings it has. Always at least two.
@@ -436,7 +438,45 @@ impl Budget {
                 .map(|p| self.postings.leg(PostingIx(p as u32), &self.ledgers))
                 .collect(),
             parent: self.transactions.parent[i],
+            reverses: self.transactions.reverses[i],
         }
+    }
+
+    /// Transactions still in effect: neither a reversal nor cancelled by
+    /// one, oldest first. A reversal that is itself reversed cancels
+    /// nothing, so reverting a revert brings the original back.
+    pub fn live_transactions(&self) -> Vec<TxIx> {
+        let cancelled = self.cancelled();
+        let t = &self.transactions;
+        t.indices().filter(|ix| !cancelled[ix.get()] && t.reverses[ix.get()].is_none()).collect()
+    }
+
+    /// The reversal that cancels `ix`, if one does (and is not itself
+    /// cancelled).
+    pub fn reversed_by(&self, ix: TxIx) -> Option<TxIx> {
+        let cancelled = self.cancelled();
+        let t = &self.transactions;
+        let uid = t.uid[ix.get()];
+        (0..t.len())
+            .rev()
+            .map(|i| TxIx(i as u32))
+            .find(|r| t.reverses[r.get()] == Some(uid) && !cancelled[r.get()])
+    }
+
+    /// Per row: cancelled by a reversal that itself stands. Newest first,
+    /// since a reversal is always applied after what it reverses.
+    fn cancelled(&self) -> Vec<bool> {
+        let t = &self.transactions;
+        let mut cancelled = vec![false; t.len()];
+        for i in (0..t.len()).rev() {
+            if cancelled[i] {
+                continue;
+            }
+            if let Some(target) = t.reverses[i].and_then(|u| t.ix(u)) {
+                cancelled[target.get()] = true;
+            }
+        }
+        cancelled
     }
 
     /// The size of an entry: the total debited, which equals the total credited.
@@ -529,11 +569,30 @@ impl Budget {
                 self.ledgers.target[ix] = target;
                 self.ledgers.alerts[ix] = alerts;
             }
-            Op::PostTransaction { uid, name, description, date, legs, parent } => {
+            Op::PostTransaction { uid, name, description, date, legs, parent, reverses } => {
                 if self.transactions.ix(uid).is_some() {
                     return Err(Error::Duplicate { kind: "transaction", uid: uid.0 });
                 }
                 validate_legs(&legs).map_err(invalid)?;
+                if let Some(target) = reverses {
+                    let tix = self
+                        .transactions
+                        .ix(target)
+                        .ok_or(Error::NoSuchEntity { kind: "transaction", uid: target.0 })?;
+                    // A reversal must be exactly that: every side negated.
+                    let mut want: Vec<(LedgerUid, Money)> =
+                        self.transaction(tix).legs.iter().map(|g| (g.ledger, -g.amount)).collect();
+                    let mut got: Vec<(LedgerUid, Money)> =
+                        legs.iter().map(|g| (g.ledger, g.amount)).collect();
+                    want.sort();
+                    got.sort();
+                    if want != got {
+                        return Err(invalid(format!(
+                            "a reversal of {} must negate every side of it",
+                            target.short()
+                        )));
+                    }
+                }
                 let name = check_name(name, "transaction name")?;
                 // Resolve every ledger before writing anything, so a bad leg
                 // leaves the budget exactly as it was.
@@ -563,6 +622,7 @@ impl Budget {
                 t.description.push(description);
                 t.date.push(date);
                 t.parent.push(parent);
+                t.reverses.push(reverses);
                 t.leg_start.push(leg_start);
                 t.leg_len.push(legs.len() as u32);
             }
@@ -922,6 +982,7 @@ mod tests {
             date: Date::from_ymd(2024, 1, 2).unwrap(),
             legs,
             parent: Parent::Manual,
+            reverses: None,
         }
     }
 

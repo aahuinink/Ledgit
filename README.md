@@ -166,6 +166,52 @@ which is what an auditor expects to see and what makes the balance trustworthy.
 Things with no inverse come back as a note rather than a lie: ledgers stay
 open, and reverting a commit that created an issuer pauses it instead.
 
+### Reversing one entry, and picking commits
+
+```sh
+ledgit search Paycheque             # find its uid
+ledgit reverse 04358157             # stage the reversal of just that entry
+ledgit cherry-pick <commit>         # stage another commit's changes here, same entries
+```
+
+A reversal knows what it reverses, so listings mark both: *reversed* and
+*reversal*. Reverting a reversal brings the original back.
+
+### Merging
+
+Three ways to bring another branch back, each one new commit on the branch
+you are on. Nothing in its history is removed.
+
+- **Replace** - end up exactly like the other branch. What differs is
+  reversed, what is missing is posted. (With nothing new here since the
+  branch split, it just moves up to it.)
+- **Reconcile** - decide each entry the two branches disagree on. Entries
+  only here: *keep* or *revert*. Entries only there: *keep* or *drop*.
+  Entries on ledgers *both* branches changed are grouped and must be decided:
+  *force* (keep both - may double-post), *revert* (reverse yours, take
+  theirs) or *drop* (keep yours) - or merge the undecided ones as Replace.
+- **Adopt** - bring the other branch's plans: issuers and settings, never its
+  transactions. An issuer that posts to the same ledgers as one here can keep
+  both, keep yours, or take theirs (yours is paused).
+
+```sh
+# Repair a bad month: branch from the last good commit, pick the good
+# commits, fix, then reconcile it back.
+ledgit branch fix-sept <last-good-commit>
+ledgit checkout fix-sept
+ledgit cherry-pick <september-commit>
+ledgit reverse <bad-entry>
+ledgit post "Paycheque" 500 --debit Chequing --credit Salary --date 2026-09-03
+ledgit commit -m "september, fixed"
+ledgit checkout main
+ledgit merge fix-sept --reconcile --preview
+ledgit merge fix-sept --reconcile --set group-1=revert --delete-branch
+```
+
+If main ran an issuer further than the branch did, the merge runs the
+branch's issuers up to the same date first, so reverting main's run leaves no
+gap.
+
 ## Reading the budget
 
 ```sh
@@ -247,7 +293,13 @@ cargo run -p ledgit-gui -- ~/budget.ledgit    # or pick a file from the welcome 
   per period, and a calendar of the issuers the view breaks down.
 - **Commit** - the report: every staged change, every ledger it moves, and
   every bucket that might be affected. Nothing is permanent until you press it.
-- **History** - the commit log, branches, revert, and rebase.
+- **History** - the commit log, branches, revert, rebase, cherry-pick, and
+  **Merge**: pick a branch and Replace, Reconcile or Adopt. The merge screen
+  lists every entry the branches disagree on, highlights clashes until they
+  are decided, shows the balances it changes, and offers to delete the branch
+  afterwards. A merge's line to its source is drawn dashed.
+- **Reverse** on any entry's row (Transactions, a ledger's register) stages
+  its reversal.
 
 Every screen reads the *working* budget: committed history plus whatever is
 staged. So an entry shows up in the dashboard and the bucket totals the moment

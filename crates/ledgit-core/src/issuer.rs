@@ -109,6 +109,7 @@ pub fn run_all(l: &Budget, through: Date) -> Vec<IssuerRun> {
                         date: o.date,
                         legs,
                         parent: Parent::Issuer(s.uid[i]),
+                        reverses: None,
                     })
                 })
                 .collect();
@@ -542,6 +543,7 @@ mod tests {
                 date,
                 legs: simple_legs(food, card, Money::from_major(dollars)),
                 parent: Parent::Manual,
+                reverses: None,
             })
             .unwrap();
         }
@@ -620,6 +622,7 @@ mod tests {
                 date: d(2024, 2, 3),
                 legs: simple_legs(c.visa, c.chequing, Money::from_major(40)),
                 parent: Parent::Manual,
+                reverses: None,
             })
             .unwrap();
             let st = february(&c).statement.unwrap();

@@ -59,6 +59,7 @@ pub mod expr;
 pub mod goals;
 pub mod id;
 pub mod issuer;
+pub mod merge;
 pub mod model;
 pub mod money;
 pub mod op;
@@ -76,11 +77,14 @@ pub use error::{Error, Result};
 /// Everything a front end normally needs, in one `use`.
 pub mod prelude {
     pub use crate::available::{Availability, Commitment};
-    pub use crate::commit::{Commit, CommitId, Head};
+    pub use crate::commit::{Commit, CommitId, Head, MergeInfo};
     pub use crate::date::Date;
     pub use crate::dues::{CalendarEntry, DueStatus, RateLine};
     pub use crate::error::{Error, Result};
     pub use crate::id::{BucketUid, IssuerUid, LedgerUid, TxUid, ViewUid};
+    pub use crate::merge::{
+        Case, Choices, GroupChoice, IssuerChoice, MergeKind, MergePreview, RowChoice, Side,
+    };
     pub use crate::model::{
         magnitude, simple_legs, validate_legs, Alert, AlertWhen, AmountRule, Bound, Bucket, Issuer,
         Ledger, Leg, Normality, Parent, Rate, SavedView, Schedule, Target, Transaction, VarValue,
@@ -94,7 +98,7 @@ pub mod prelude {
         IssuerQuery, LedgerFilter, LedgerQuery, LedgerSort, Order, RegisterLine, RollUp, Sign,
         Term, TxFilter, TxQuery, TxSort,
     };
-    pub use crate::repo::{Repo, StagedWork};
+    pub use crate::repo::{MergeOutcome, Repo, StagedWork};
     pub use crate::report::{Broken, ChangeReport};
     pub use crate::state::Budget;
     pub use crate::store::{MemStore, Store, DEFAULT_BRANCH};

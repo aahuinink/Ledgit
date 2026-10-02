@@ -16,6 +16,8 @@ use std::rc::Rc;
 pub fn show(ui: &mut Ui, s: &mut Session) {
     heading(ui, "History", "Every commit, every branch, and the two ways to take something back.");
 
+    merged_banner(ui, s);
+
     let graph = match graph(s) {
         Ok(g) => g,
         Err(e) => {
@@ -44,6 +46,27 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
             },
         );
     });
+}
+
+/// Just merged a branch: offer to delete it.
+fn merged_banner(ui: &mut Ui, s: &mut Session) {
+    let Some(source) = s.merged.clone() else { return };
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(format!("Merged {source}. It is still there to look back at."));
+            if ui.button(format!("Delete branch {source}")).clicked() {
+                match s.repo.delete_branch(&source) {
+                    Ok(()) => s.note(format!("Deleted branch {source}.")),
+                    Err(e) => s.fail(e),
+                }
+                s.merged = None;
+            }
+            if ui.button("Keep it").clicked() {
+                s.merged = None;
+            }
+        });
+    });
+    ui.add_space(6.0);
 }
 
 /// How far back the graph reaches.
@@ -178,6 +201,64 @@ fn branch_panel(ui: &mut Ui, s: &mut Session) {
             }
         }
     });
+
+    merge_panel(ui, s, current.as_deref(), &branches);
+}
+
+/// Bring another branch's changes into this one, three ways.
+fn merge_panel(
+    ui: &mut Ui,
+    s: &mut Session,
+    current: Option<&str>,
+    branches: &[(String, CommitId)],
+) {
+    ui.add_space(16.0);
+    let here = current.unwrap_or("HEAD");
+    ui.label(
+        RichText::new(format!("MERGE INTO {}", here.to_uppercase())).small().color(fmt::dim()),
+    );
+    let others: Vec<&str> =
+        branches.iter().map(|(n, _)| n.as_str()).filter(|n| Some(*n) != current).collect();
+    if others.is_empty() {
+        ui.label(RichText::new("No other branch to merge.").small().color(fmt::dim()));
+        return;
+    }
+    if !others.contains(&s.merge_source.as_str()) {
+        s.merge_source = others[0].to_string();
+    }
+    egui::ComboBox::from_id_salt("merge_source")
+        .selected_text(s.merge_source.clone())
+        .width(180.0)
+        .show_ui(ui, |ui| {
+            for name in &others {
+                ui.selectable_value(&mut s.merge_source, name.to_string(), *name);
+            }
+        });
+    let dirty = s.repo.has_staged_changes();
+    let source = s.merge_source.clone();
+    ui.horizontal_wrapped(|ui| {
+        for (kind, hover) in [
+            (MergeKind::Replace, "End up exactly like the other branch."),
+            (MergeKind::Reconcile, "Decide each entry the two branches disagree on."),
+            (MergeKind::Adopt, "Bring its issuers and settings only. No money moves."),
+        ] {
+            if ui
+                .add_enabled(!dirty, egui::Button::new(kind.name()))
+                .on_hover_text(hover)
+                .on_disabled_hover_text("Commit or discard what is staged first")
+                .clicked()
+            {
+                super::merge::start(s, &source, kind);
+            }
+        }
+    });
+    ui.label(
+        RichText::new(
+            "Nothing here is deleted: a merge is one new commit, and you review it first.",
+        )
+        .small()
+        .color(fmt::dim()),
+    );
 }
 
 /// Asked when a switch is picked with changes staged.
@@ -285,6 +366,18 @@ fn commit_detail(ui: &mut Ui, s: &mut Session, commits: &[Commit]) {
         ui.add_space(6.0);
         ui.label(c.message.lines().skip(1).collect::<Vec<_>>().join("\n"));
     }
+    if let Some(m) = c.merged {
+        let from = s
+            .repo
+            .branches()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(_, tip)| *tip == m.from)
+            .map(|(n, _)| n)
+            .unwrap_or_else(|| m.from.short());
+        ui.label(RichText::new(format!("{} merge from {from}", m.kind.name())).color(fmt::good()))
+            .on_hover_text(format!("Its changes came from commit {}", m.from.short()));
+    }
     ui.add_space(10.0);
 
     ui.label(RichText::new(format!("{} operation(s)", c.ops.len())).small().color(fmt::dim()));
@@ -321,6 +414,33 @@ fn commit_detail(ui: &mut Ui, s: &mut Session, commits: &[Commit]) {
             }
         }
     });
+    let on_branch = s.repo.head().branch_name().map(|n| n.to_string());
+    if let Some(here) = on_branch {
+        if ui
+            .button(format!("Cherry-pick onto {here}"))
+            .on_hover_text(
+                "Stage this commit's changes on the branch you are on, exactly as they were - the same entries, so a later merge knows them.",
+            )
+            .clicked()
+        {
+            match s.repo.cherry_pick(&c.id.to_string()) {
+                Ok((0, skipped)) => s.note(format!("Nothing to pick: all {skipped} change(s) are already here.")),
+                Ok((staged, skipped)) => {
+                    let broken = s.repo.broken().len();
+                    let mut msg = format!("Staged {staged} change(s) from {}.", c.id.short());
+                    if skipped > 0 {
+                        msg.push_str(&format!(" {skipped} already here, skipped."));
+                    }
+                    if broken > 0 {
+                        msg.push_str(&format!(" {broken} do not apply here: fix or drop them on the Commit screen."));
+                    }
+                    s.note(msg);
+                    s.goto = Some(Screen::Commit);
+                }
+                Err(e) => s.fail(e),
+            }
+        }
+    }
     ui.label(
         RichText::new(
             "Reverting posts a new transaction with debit and credit swapped, so both the \

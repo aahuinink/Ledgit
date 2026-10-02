@@ -8,6 +8,7 @@
 //! until `ledgit commit`, exactly as in the GUI.
 
 mod analysis;
+mod merging;
 mod resolve;
 mod show;
 
@@ -89,6 +90,47 @@ enum Command {
         #[arg(long)]
         onto: String,
     },
+    /// Bring another branch's changes into this one, as one new commit.
+    /// Nothing in this branch's history is removed.
+    ///
+    ///   --replace    end up exactly like the branch
+    ///   --reconcile  decide each entry the two sides disagree on
+    ///   --adopt      bring its issuers and settings only; no money moves
+    ///
+    /// Run with --preview first to see the rows, then decide with --set:
+    ///
+    ///   ledgit merge fix-sept --reconcile --preview
+    ///   ledgit merge fix-sept --reconcile --set group-1=revert --set 7a3f=keep
+    #[command(verbatim_doc_comment)]
+    Merge {
+        source: String,
+        #[arg(long, group = "kind")]
+        replace: bool,
+        #[arg(long, group = "kind")]
+        reconcile: bool,
+        #[arg(long, group = "kind")]
+        adopt: bool,
+        /// Show what would happen; change nothing.
+        #[arg(long)]
+        preview: bool,
+        /// KEY=CHOICE. A row's uid: keep, revert (this branch's) or drop
+        /// (the other's). group-N: force, revert or drop. An issuer's name or
+        /// uid: bring, leave or take. setting-N: theirs or ours. Repeatable.
+        #[arg(long = "set", value_name = "KEY=CHOICE")]
+        set: Vec<String>,
+        /// Settle anything left undecided the way --replace would.
+        #[arg(long)]
+        unresolved_as_replace: bool,
+        #[arg(short, long, default_value = "")]
+        message: String,
+        /// Delete the source branch once merged.
+        #[arg(long)]
+        delete_branch: bool,
+    },
+    /// Stage the reversal of one transaction: every side negated.
+    Reverse { transaction: String },
+    /// Stage another commit's changes here, exactly as they were.
+    CherryPick { rev: String },
     /// Check every commit in the file still hashes to its own id.
     Verify,
     /// Ledgers.
@@ -627,6 +669,87 @@ fn run(cli: Cli) -> Result<()> {
             match n {
                 0 => println!("Nothing to replay; {branch} is already up to date."),
                 n => println!("Replayed {n} commit(s) of {branch} onto {onto}."),
+            }
+        }
+
+        Command::Merge {
+            source,
+            replace,
+            reconcile,
+            adopt,
+            preview,
+            set,
+            unresolved_as_replace,
+            message,
+            delete_branch,
+        } => {
+            let kind = match (replace, reconcile, adopt) {
+                (true, _, _) => MergeKind::Replace,
+                (_, true, _) => MergeKind::Reconcile,
+                (_, _, true) => MergeKind::Adopt,
+                _ => {
+                    return Err(Error::Invalid("say how: --replace, --reconcile or --adopt".into()))
+                }
+            };
+            let p = repo.merge_preview(&source, kind)?;
+            let mut choices = Choices { unresolved_as_replace, ..Choices::default() };
+            for s in &set {
+                merging::set(&p, &mut choices, s)?;
+            }
+            merging::print(&p, &choices);
+            if preview || p.is_empty() {
+                return Ok(());
+            }
+            let open = p.unresolved(&choices);
+            if !open.is_empty() {
+                return Err(Error::Invalid(format!(
+                    "{} clash(es) undecided: decide them with --set, or pass --unresolved-as-replace",
+                    open.len()
+                )));
+            }
+            if !p.fast_forward {
+                let r = p.report(&choices)?;
+                if !r.ledger_deltas.is_empty() {
+                    println!("\nLedgers this changes:");
+                    for d in &r.ledger_deltas {
+                        println!(
+                            "  {:<28} {:>14} -> {:>14}",
+                            show::truncate(&d.name, 28),
+                            show::amt(d.before),
+                            show::amt(d.after)
+                        );
+                    }
+                }
+            }
+            let out = repo.merge(&p, &choices, message)?;
+            if out.fast_forward {
+                println!("\nMoved up to {} ({}).", source, out.commit.short());
+            } else {
+                println!("\nMerged in commit {} ({} change(s)).", out.commit.short(), out.ops);
+            }
+            if delete_branch {
+                repo.delete_branch(&source)?;
+                println!("Deleted branch {source}.");
+            }
+        }
+
+        Command::Reverse { transaction } => {
+            let tx = resolve::transaction(repo.working(), &transaction)?;
+            repo.reverse_transaction(tx)?;
+            println!("Staged the reversal of {}. Review with `ledgit status`.", tx.short());
+        }
+
+        Command::CherryPick { rev } => {
+            let (staged, skipped) = repo.cherry_pick(&rev)?;
+            println!("Staged {staged} change(s) from {rev}.");
+            if skipped > 0 {
+                println!("{skipped} were already here and were skipped.");
+            }
+            if !repo.broken().is_empty() {
+                println!(
+                    "{} do not apply here; `ledgit status` lists them to fix or drop.",
+                    repo.broken().len()
+                );
             }
         }
 

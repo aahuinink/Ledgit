@@ -304,6 +304,8 @@ pub struct Transaction {
     /// Two or more sides, summing to zero. Debit-positive.
     pub legs: Vec<Leg>,
     pub parent: Parent,
+    /// Set on a reversal: the transaction it cancels.
+    pub reverses: Option<TxUid>,
 }
 
 impl Transaction {

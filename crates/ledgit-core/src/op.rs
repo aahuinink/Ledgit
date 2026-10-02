@@ -61,6 +61,12 @@ pub enum Op {
         date: Date,
         legs: Vec<Leg>,
         parent: Parent,
+        /// Set on a reversal: the transaction whose every side this one
+        /// negates. Absent - not `null` - when unset, so every entry
+        /// committed before reversals were linked encodes, and hashes,
+        /// exactly as it did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reverses: Option<TxUid>,
     },
     /// Only the name and description of a posted transaction may change.
     EditTransaction {
@@ -176,6 +182,26 @@ pub enum Op {
 }
 
 impl Op {
+    /// The reversal of an entry: every side negated, linked back to it.
+    ///
+    /// Dated to match the original, not to today, so a correction lands in
+    /// the period it belongs to and monthly totals stay true. A business
+    /// would date it on the day of discovery; a personal budget wants the
+    /// month to read correctly. Negating every side is correct for a
+    /// four-leg paycheque for the same reason it is for a transfer: sum-zero
+    /// in means sum-zero out.
+    pub fn reversal(of: TxUid, name: &str, date: Date, legs: &[Leg], description: String) -> Op {
+        Op::PostTransaction {
+            uid: TxUid::new(),
+            name: format!("Reversal of {name}"),
+            description,
+            date,
+            legs: legs.iter().map(|l| Leg { ledger: l.ledger, amount: -l.amount }).collect(),
+            parent: Parent::Manual,
+            reverses: Some(of),
+        }
+    }
+
     /// A short line for the pre-commit report and the history view.
     pub fn summary(&self) -> String {
         match self {

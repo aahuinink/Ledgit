@@ -551,8 +551,8 @@ pub fn register(l: &Budget, ledger: LedgerUid, limit: Option<usize>) -> Result<(
         return Ok(());
     }
     println!(
-        "{:<12} {:<26} {:<26} {:>13} {:>15} source",
-        "date", "description", "other side", "change", "balance"
+        "{:<10} {:<12} {:<26} {:<26} {:>13} {:>15} source",
+        "uid", "date", "description", "other side", "change", "balance"
     );
     for line in rows {
         let t = line.transaction.get();
@@ -575,15 +575,26 @@ pub fn register(l: &Budget, ledger: LedgerUid, limit: Option<usize>) -> Result<(
             ),
         };
         println!(
-            "{:<12} {:<26} {:<26} {:>13} {:>15} {source}",
+            "{:<10} {:<12} {:<26} {:<26} {:>13} {:>15} {source}{}",
+            l.transactions.uid[t].short(),
             l.transactions.date[t],
             truncate(&l.transactions.name[t], 26),
             truncate(&others.join(", "), 26),
             amt(shown),
             amt(line.balance),
+            reversal_note(l, line.transaction),
         );
     }
     Ok(())
+}
+
+/// "  (reversed)" or "  (reverses 1a2b3c4d)", for a listing.
+fn reversal_note(l: &Budget, t: ledgit_core::id::TxIx) -> String {
+    match (l.transactions.reverses[t.get()], l.reversed_by(t)) {
+        (Some(of), _) => format!("  (reverses {})", of.short()),
+        (None, Some(_)) => "  (reversed)".into(),
+        _ => String::new(),
+    }
 }
 
 pub fn search(l: &Budget, needle: &str) {
@@ -599,17 +610,19 @@ pub fn search(l: &Budget, needle: &str) {
     if !hits.transactions.is_empty() {
         found = true;
         println!("Transactions:");
-        println!("  {:<12} {:<30} {:>13}  dr / cr", "date", "name", "amount");
+        println!("  {:<10} {:<12} {:<30} {:>13}  dr / cr", "uid", "date", "name", "amount");
         for tix in &hits.transactions {
             let i = tix.get();
             let (dr, cr) = sides(l, *tix);
             println!(
-                "  {:<12} {:<30} {:>13}  {} / {}",
+                "  {:<10} {:<12} {:<30} {:>13}  {} / {}{}",
+                l.transactions.uid[i].short(),
                 &l.transactions.date[i],
                 truncate(&l.transactions.name[i], 30),
                 amt(l.amount_of(*tix)),
                 truncate(&dr, 20),
                 truncate(&cr, 20),
+                reversal_note(l, *tix),
             );
         }
         println!();

@@ -11,6 +11,7 @@ pub mod graph;
 pub mod history;
 pub mod issuers;
 pub mod ledgers;
+pub mod merge;
 pub mod saved;
 pub mod search;
 pub mod transactions;
@@ -30,6 +31,53 @@ pub fn heading(ui: &mut Ui, title: &str, subtitle: &str) {
 }
 
 pub use crate::table::num;
+
+/// Stage the reversal of one entry, saying how it went.
+pub fn stage_reversal(s: &mut crate::app::Session, tx: ledgit_core::id::TxUid) {
+    match s.repo.reverse_transaction(tx) {
+        Ok(_) => s.note("Staged its reversal. Review it on the Commit screen."),
+        Err(e) => s.fail(e),
+    }
+}
+
+/// Which entries can be reversed, worked out once per frame for a list:
+/// not a reversal, and not reversed already.
+pub struct Reversible {
+    live: Vec<bool>,
+}
+
+impl Reversible {
+    pub fn of(l: &ledgit_core::state::Budget) -> Reversible {
+        let mut live = vec![false; l.transactions.len()];
+        for ix in l.live_transactions() {
+            live[ix.get()] = true;
+        }
+        Reversible { live }
+    }
+
+    /// The cell at the end of an entry's row: "Reverse", or why not.
+    /// Returns the entry to reverse when the button is pressed.
+    pub fn cell(
+        &self,
+        ui: &mut Ui,
+        l: &ledgit_core::state::Budget,
+        ix: ledgit_core::id::TxIx,
+    ) -> Option<ledgit_core::id::TxUid> {
+        let i = ix.get();
+        if l.transactions.reverses[i].is_some() {
+            ui.label(egui::RichText::new("reversal").small().color(crate::fmt::dim()));
+            return None;
+        }
+        if !self.live.get(i).copied().unwrap_or(true) {
+            ui.label(egui::RichText::new("reversed").small().color(crate::fmt::dim()));
+            return None;
+        }
+        ui.small_button("Reverse")
+            .on_hover_text("Stage its reversal - every side negated. Both stay on record; review it on the Commit screen.")
+            .clicked()
+            .then(|| l.transactions.uid[i])
+    }
+}
 
 pub fn empty(ui: &mut Ui, message: &str) {
     ui.add_space(24.0);

@@ -72,6 +72,22 @@ pub struct Commit {
     pub timestamp: i64,
     pub message: String,
     pub ops: Vec<Op>,
+    /// Set on a merge: the branch tip it brought changes from, and how.
+    ///
+    /// Deliberately *not* a parent. A budget is the fold of every ancestor's
+    /// ops, so a second parent would replay the whole other branch - every
+    /// entry it made, and every issuer run - on top of this one. The merge's
+    /// own ops already say exactly what came across. Absent when unset, so
+    /// every commit made before merges existed hashes as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged: Option<MergeInfo>,
+}
+
+/// Where a merge commit's changes came from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct MergeInfo {
+    pub from: CommitId,
+    pub kind: crate::merge::MergeKind,
 }
 
 /// The hashed part of a commit: everything except the id itself.
@@ -82,6 +98,8 @@ struct Payload<'a> {
     timestamp: i64,
     message: &'a str,
     ops: &'a [Op],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merged: Option<&'a MergeInfo>,
 }
 
 impl Commit {
@@ -92,6 +110,18 @@ impl Commit {
         message: impl Into<String>,
         ops: Vec<Op>,
     ) -> Result<Commit> {
+        Commit::with_merge(parents, author, timestamp, message, ops, None)
+    }
+
+    /// A commit that may record a merge.
+    pub fn with_merge(
+        parents: Vec<CommitId>,
+        author: impl Into<String>,
+        timestamp: i64,
+        message: impl Into<String>,
+        ops: Vec<Op>,
+        merged: Option<MergeInfo>,
+    ) -> Result<Commit> {
         let (author, message) = (author.into(), message.into());
         let id = hash_payload(&Payload {
             parents: &parents,
@@ -99,8 +129,9 @@ impl Commit {
             timestamp,
             message: &message,
             ops: &ops,
+            merged: merged.as_ref(),
         })?;
-        Ok(Commit { id, parents, author, timestamp, message, ops })
+        Ok(Commit { id, parents, author, timestamp, message, ops, merged })
     }
 
     /// Recompute the id and compare. Catches a corrupted or tampered store.
@@ -111,6 +142,7 @@ impl Commit {
             timestamp: self.timestamp,
             message: &self.message,
             ops: &self.ops,
+            merged: self.merged.as_ref(),
         })?;
         if expect == self.id {
             Ok(())

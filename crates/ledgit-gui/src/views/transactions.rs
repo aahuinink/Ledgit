@@ -126,6 +126,8 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
     ui.add_space(6.0);
 
     let mut open: Option<Option<LedgerUid>> = None;
+    let mut reverse: Option<TxUid> = None;
+    let reversible = super::Reversible::of(l);
     Table::new(
         "transactions",
         vec![
@@ -134,6 +136,7 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
             text("debit").max(300.0),
             text("credit").max(300.0),
             figures("amount"),
+            text("").narrow(),
         ],
     )
     .height(Height::Fill)
@@ -172,7 +175,15 @@ pub fn show(ui: &mut Ui, s: &mut Session) {
         row.col(|ui| {
             num(ui, fmt::mono(fmt::amount(l.amount_of(ix))));
         });
+        row.col(|ui| {
+            if let Some(uid) = reversible.cell(ui, l, ix) {
+                reverse = Some(uid);
+            }
+        });
     });
+    if let Some(tx) = reverse {
+        super::stage_reversal(s, tx);
+    }
     if let Some(uid) = open {
         s.selected_ledger = uid;
         s.goto = Some(Screen::Register);

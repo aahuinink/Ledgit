@@ -15,11 +15,12 @@
 //! left out of `working`, listed by [`Repo::broken`] - and nothing can be
 //! committed until it is edited back into shape or dropped.
 
-use crate::commit::{validate_branch_name, Commit, CommitId, Head};
+use crate::commit::{validate_branch_name, Commit, CommitId, Head, MergeInfo};
 use crate::date::Date;
 use crate::error::{Error, Result};
 use crate::id::{BucketUid, IssuerUid, LedgerUid, TxUid, ViewUid};
 use crate::issuer::{self, IssuerRun};
+use crate::merge::{self, Choices, MergeKind, MergePreview};
 use crate::model::{simple_legs, AmountRule, Leg, Normality, Parent, Schedule, ViewSpec};
 use crate::money::Money;
 use crate::op::Op;
@@ -40,6 +41,16 @@ pub enum StagedWork {
     /// entry posting to a ledger that branch never opened - are flagged as
     /// broken, not dropped.
     Bring,
+}
+
+/// What a merge did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MergeOutcome {
+    /// The new commit, or for a fast-forward, the source's tip.
+    pub commit: CommitId,
+    pub fast_forward: bool,
+    /// Ops in the merge commit.
+    pub ops: usize,
 }
 
 pub struct Repo<S: Store> {
@@ -665,6 +676,154 @@ impl<S: Store> Repo<S> {
         Ok(notes)
     }
 
+    /// Stage the reversal of one entry: every side negated, linked back to
+    /// it. Returns the reversal's uid.
+    pub fn reverse_transaction(&mut self, tx: TxUid) -> Result<TxUid> {
+        let l = &self.working;
+        let ix =
+            l.transactions.ix(tx).ok_or(Error::NoSuchEntity { kind: "transaction", uid: tx.0 })?;
+        if l.transactions.reverses[ix.get()].is_some() {
+            return Err(Error::Invalid(
+                "that entry is itself a reversal; reverse the commit that made it instead".into(),
+            ));
+        }
+        if let Some(r) = l.reversed_by(ix) {
+            return Err(Error::Invalid(format!(
+                "\"{}\" is already reversed (by {})",
+                l.transactions.name[ix.get()],
+                l.transactions.uid[r.get()].short()
+            )));
+        }
+        let t = l.transaction(ix);
+        let op = Op::reversal(
+            tx,
+            &t.name,
+            t.date,
+            &t.legs,
+            format!("Reverses transaction {}", tx.short()),
+        );
+        let Op::PostTransaction { uid, .. } = op else { unreachable!("a reversal posts") };
+        self.stage(op)?;
+        Ok(uid)
+    }
+
+    /// Stage a commit's ops on the current branch, exactly as they were -
+    /// same uids, so a later reconcile sees them as the same entries. Ops
+    /// already here (an entry or ledger that exists) are skipped; ops that
+    /// do not apply are staged anyway and flagged, to fix or drop. Returns
+    /// (staged, skipped).
+    pub fn cherry_pick(&mut self, rev: &str) -> Result<(usize, usize)> {
+        let commit = self.get_commit(self.resolve(rev)?)?;
+        let mut probe = self.working.clone();
+        let mut take = Vec::new();
+        let mut skipped = 0;
+        for op in commit.ops {
+            match probe.apply(&op) {
+                Ok(()) => take.push(op),
+                Err(Error::Duplicate { .. }) => skipped += 1,
+                Err(_) => take.push(op),
+            }
+        }
+        let staged = take.len();
+        let mut stage = std::mem::take(&mut self.stage);
+        stage.extend(take);
+        self.set_stage(stage)?;
+        Ok((staged, skipped))
+    }
+
+    // --------------------------------------------------------------- merging
+
+    /// What merging `source` into the current branch would involve. Reads
+    /// the committed budget: anything staged is not part of a merge.
+    pub fn merge_preview(&self, source: &str, kind: MergeKind) -> Result<MergePreview> {
+        let tip = self.resolve(source)?;
+        let head = self.head_commit()?;
+        if head == Some(tip) {
+            return Err(Error::Invalid(format!("{source} is where you already are")));
+        }
+        let base_id = match head {
+            Some(h) => self.merge_base(h, tip)?,
+            None => None,
+        };
+        let base = match base_id {
+            Some(b) => self.budget_at(b)?,
+            None => Budget::new(),
+        };
+        let src = self.budget_at(tip)?;
+        let mut p = merge::preview(kind, &self.base, &src, &base, source);
+        p.source_tip = Some(tip);
+        p.dest_head = head;
+        // Nothing has happened here since the branch split: a Replace is
+        // just moving up to the branch.
+        p.fast_forward = kind == MergeKind::Replace && (head.is_none() || base_id == head);
+        Ok(p)
+    }
+
+    /// Make the merge `preview` describes, as chosen. One commit on the
+    /// current branch, recording where it came from - or, for a Replace
+    /// with nothing new here, the branch simply moves up to the source.
+    pub fn merge(
+        &mut self,
+        preview: &MergePreview,
+        choices: &Choices,
+        message: impl Into<String>,
+    ) -> Result<MergeOutcome> {
+        if !self.stage.is_empty() {
+            return Err(Error::Invalid(
+                "you have staged changes; commit or discard them before merging".into(),
+            ));
+        }
+        let tip = preview.source_tip.ok_or_else(|| Error::Invalid("no source to merge".into()))?;
+        if self.head_commit()? != preview.dest_head
+            || self.resolve(&preview.source).ok() != Some(tip)
+        {
+            return Err(Error::Invalid(
+                "a branch has moved since this merge was previewed; preview it again".into(),
+            ));
+        }
+        if preview.fast_forward {
+            self.advance_head(tip)?;
+            self.store.flush()?;
+            self.reload()?;
+            return Ok(MergeOutcome { commit: tip, fast_forward: true, ops: 0 });
+        }
+        let ops = preview.ops(choices)?;
+        if ops.is_empty() {
+            return Err(Error::Invalid("with these choices nothing comes across".into()));
+        }
+        let mut after = self.base.clone();
+        for op in &ops {
+            after.apply(op)?;
+        }
+        if !after.is_balanced() {
+            return Err(Error::Invalid(
+                "refusing to merge: debits do not equal credits (this is a bug, please report it)"
+                    .into(),
+            ));
+        }
+        let message = message.into();
+        let message = if message.trim().is_empty() {
+            format!("{} {} into {}", preview.kind.name(), preview.source, self.head)
+        } else {
+            message
+        };
+        let n = ops.len();
+        let commit = Commit::with_merge(
+            self.head_commit()?.into_iter().collect(),
+            self.author.clone(),
+            now_seconds(),
+            message,
+            ops,
+            Some(MergeInfo { from: tip, kind: preview.kind }),
+        )?;
+        self.store.put_commit(&commit)?;
+        self.advance_head(commit.id)?;
+        self.store.flush()?;
+        self.base = after.clone();
+        self.working = after;
+        Ok(MergeOutcome { commit: commit.id, fast_forward: false, ops: n })
+    }
+
     // -------------------------------------------------------------- rebasing
 
     /// Replay `branch` onto `onto`, rewriting its commits.
@@ -838,6 +997,7 @@ impl<S: Store> Repo<S> {
             date,
             legs,
             parent: Parent::Manual,
+            reverses: None,
         })?;
         Ok(uid)
     }
@@ -1030,23 +1190,13 @@ fn invert(op: &Op, before: &Budget, source: &str) -> Inverse {
             }),
             None => Inverse::Nothing(format!("ledger {} is gone; edit not reverted", uid.short())),
         },
-        Op::PostTransaction { uid, name, date, legs, .. } => {
-            Inverse::Op(Op::PostTransaction {
-                uid: TxUid::new(),
-                name: format!("Reversal of {name}"),
-                description: format!("Reverses transaction {} from commit {source}", uid.short()),
-                // Dated to match the original, not to today, so a correction
-                // lands in the period it belongs to and monthly totals stay
-                // true. A business would date it on the day of discovery; a
-                // personal budget wants the month to read correctly.
-                date: *date,
-                // The whole reversal: negate every side. Sum-zero in means
-                // sum-zero out, so this is correct for a four-leg paycheque
-                // for exactly the same reason it is correct for a transfer.
-                legs: legs.iter().map(|l| Leg { ledger: l.ledger, amount: -l.amount }).collect(),
-                parent: Parent::Manual,
-            })
-        }
+        Op::PostTransaction { uid, name, date, legs, .. } => Inverse::Op(Op::reversal(
+            *uid,
+            name,
+            *date,
+            legs,
+            format!("Reverses transaction {} from commit {source}", uid.short()),
+        )),
         Op::EditTransaction { uid, name, description } => match before.transactions.ix(*uid) {
             Some(ix) => Inverse::Op(Op::EditTransaction {
                 uid: *uid,

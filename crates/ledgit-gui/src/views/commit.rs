@@ -200,7 +200,7 @@ fn editable(op: &Op) -> bool {
     )
 }
 
-fn ledgers_table(ui: &mut Ui, r: &ChangeReport) {
+pub(crate) fn ledgers_table(ui: &mut Ui, r: &ChangeReport) {
     if r.ledger_deltas.is_empty() {
         return;
     }
@@ -240,7 +240,7 @@ fn ledgers_table(ui: &mut Ui, r: &ChangeReport) {
     });
 }
 
-fn buckets_table(ui: &mut Ui, r: &ChangeReport) {
+pub(crate) fn buckets_table(ui: &mut Ui, r: &ChangeReport) {
     if r.bucket_effects.is_empty() {
         return;
     }

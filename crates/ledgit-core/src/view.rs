@@ -766,6 +766,7 @@ mod tests {
             date,
             legs,
             parent: Parent::Manual,
+            reverses: None,
         };
         let bucket = |uid, name: &str| Op::CreateBucket {
             uid,
@@ -974,6 +975,7 @@ mod tests {
                 date: x.date,
                 legs: x.legs,
                 parent: x.parent,
+                reverses: None,
             });
         }
         for s in l.issuers.indices() {
