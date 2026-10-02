@@ -159,6 +159,61 @@ impl SqliteStore {
             .map_err(store_err)
     }
 
+    /// Copy everything in `src` - commits, branches, HEAD, the staging area
+    /// and every branch's shelf - into this store in one transaction: one
+    /// durable write instead of one per commit. For writing out a budget
+    /// built in memory, such as a sample budget.
+    pub fn import<S: Store>(&mut self, src: &S) -> Result<()> {
+        let tx = self.conn.transaction().map_err(store_err)?;
+        {
+            let mut put = tx
+                .prepare(
+                    "INSERT INTO commits (id, body) VALUES (?1, ?2) ON CONFLICT(id) DO NOTHING",
+                )
+                .map_err(store_err)?;
+            for id in src.all_commit_ids()? {
+                let c = src
+                    .get_commit(&id)?
+                    .ok_or_else(|| Error::Store(format!("missing commit {}", id.short())))?;
+                put.execute(params![id.to_string(), serde_json::to_string(&c)?])
+                    .map_err(store_err)?;
+            }
+            let mut refs = tx
+                .prepare(
+                    "INSERT INTO refs (name, target) VALUES (?1, ?2)
+                     ON CONFLICT(name) DO UPDATE SET target = excluded.target",
+                )
+                .map_err(store_err)?;
+            let mut shelf = tx
+                .prepare("INSERT INTO shelves (branch, seq, op) VALUES (?1, ?2, ?3)")
+                .map_err(store_err)?;
+            for (name, id) in src.list_refs()? {
+                refs.execute(params![name, id.to_string()]).map_err(store_err)?;
+                tx.execute("DELETE FROM shelves WHERE branch = ?1", [&name]).map_err(store_err)?;
+                for (i, op) in src.get_shelf(&name)?.iter().enumerate() {
+                    shelf
+                        .execute(params![name, i as i64, serde_json::to_string(op)?])
+                        .map_err(store_err)?;
+                }
+            }
+            tx.execute("DELETE FROM stage", []).map_err(store_err)?;
+            let mut stage =
+                tx.prepare("INSERT INTO stage (seq, op) VALUES (?1, ?2)").map_err(store_err)?;
+            for (i, op) in src.get_stage()?.iter().enumerate() {
+                stage.execute(params![i as i64, serde_json::to_string(op)?]).map_err(store_err)?;
+            }
+            if let Some(head) = src.get_head()? {
+                tx.execute(
+                    "INSERT INTO meta (key, value) VALUES ('head', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![serde_json::to_string(&head)?],
+                )
+                .map_err(store_err)?;
+            }
+        }
+        tx.commit().map_err(store_err)
+    }
+
     /// Re-hash every commit and check it still matches its id, and that every
     /// ref and parent points at something that exists.
     pub fn verify(&self) -> Result<usize> {
@@ -357,6 +412,27 @@ mod tests {
         let mut journal = path.as_os_str().to_os_string();
         journal.push("-journal");
         let _ = std::fs::remove_file(std::path::PathBuf::from(journal));
+    }
+
+    #[test]
+    fn a_budget_built_in_memory_imports_whole() {
+        let path =
+            std::env::temp_dir().join(format!("ledgit-import-{}.ledgit", std::process::id()));
+        cleanup(&path);
+        let mut mem = Repo::init(MemStore::new(), "t").unwrap();
+        ledgit_core::demo::build("repairs", &mut mem, Date::today_utc()).unwrap();
+        mem.add_ledger("Staged", "", Normality::Debit, Date::today_utc()).unwrap();
+        {
+            let mut disk = SqliteStore::open(&path).unwrap();
+            disk.import(mem.store()).unwrap();
+        }
+        let back = Repo::open(SqliteStore::open(&path).unwrap(), "t").unwrap();
+        assert_eq!(back.branches().unwrap(), mem.branches().unwrap());
+        assert_eq!(back.head(), mem.head());
+        assert_eq!(back.staged(), mem.staged());
+        assert_eq!(back.working().ledgers.raw_balance, mem.working().ledgers.raw_balance);
+        assert_eq!(back.store().verify().unwrap(), mem.store().all_commit_ids().unwrap().len());
+        cleanup(&path);
     }
 
     #[test]

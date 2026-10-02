@@ -18,6 +18,7 @@ mod picker;
 mod smoke;
 mod table;
 mod textbox;
+mod tutorial;
 mod views;
 
 use app::LedgitApp;

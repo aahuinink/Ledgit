@@ -315,8 +315,13 @@ fn rows(dest: &Budget, src: &Budget, catch_up: &HashSet<TxUid>) -> (Vec<Row>, Ve
     let d_uids: HashSet<TxUid> = d_live.iter().map(|t| t.uid).collect();
     let s_uids: HashSet<TxUid> = s_live.iter().map(|t| t.uid).collect();
 
+    let mut d_only: Vec<Transaction> =
+        d_live.into_iter().filter(|t| !s_uids.contains(&t.uid)).collect();
+    let mut s_only: Vec<Transaction> =
+        s_live.into_iter().filter(|t| !d_uids.contains(&t.uid)).collect();
+    drop_same_occurrences(&mut d_only, &mut s_only);
     let mut rows: Vec<Row> = Vec::new();
-    for t in d_live.into_iter().filter(|t| !s_uids.contains(&t.uid)) {
+    for t in d_only {
         rows.push(Row {
             side: Side::Destination,
             tx: t,
@@ -325,7 +330,7 @@ fn rows(dest: &Budget, src: &Budget, catch_up: &HashSet<TxUid>) -> (Vec<Row>, Ve
             catch_up: false,
         });
     }
-    for t in s_live.into_iter().filter(|t| !d_uids.contains(&t.uid)) {
+    for t in s_only {
         let catch_up = catch_up.contains(&t.uid);
         rows.push(Row { side: Side::Source, tx: t, case: Case::SourceOnly, group: None, catch_up });
     }
@@ -394,6 +399,37 @@ fn rows(dest: &Budget, src: &Budget, catch_up: &HashSet<TxUid>) -> (Vec<Row>, Ve
         }
     }
     (rows, groups)
+}
+
+/// An issuer occurrence posted on both sides - same issuer, same date, same
+/// sides and amounts - is the same payment under two uids: a branch that
+/// re-ran its issuers posts this month's rent again. Pair them off; neither
+/// is a row. One that differs (a sweep priced off another balance) stays.
+fn drop_same_occurrences(d: &mut Vec<Transaction>, s: &mut Vec<Transaction>) {
+    type Key = (IssuerUid, crate::date::Date, Vec<(LedgerUid, crate::money::Money)>);
+    let key = |t: &Transaction| -> Option<Key> {
+        let Parent::Issuer(i) = t.parent else { return None };
+        let mut legs: Vec<_> = t.legs.iter().map(|g| (g.ledger, g.amount)).collect();
+        legs.sort();
+        Some((i, t.date, legs))
+    };
+    let mut theirs: HashMap<Key, Vec<usize>> = HashMap::new();
+    for (k, t) in s.iter().enumerate() {
+        if let Some(key) = key(t) {
+            theirs.entry(key).or_default().push(k);
+        }
+    }
+    let mut paired: HashSet<usize> = HashSet::new();
+    d.retain(|t| {
+        let Some(k) = key(t).and_then(|key| theirs.get_mut(&key)?.pop()) else { return true };
+        paired.insert(k);
+        false
+    });
+    let mut k = 0;
+    s.retain(|_| {
+        k += 1;
+        !paired.contains(&(k - 1))
+    });
 }
 
 /// Branch issuers the destination does not have, and what each clashes with.

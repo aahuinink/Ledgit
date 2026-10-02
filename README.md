@@ -315,6 +315,25 @@ Zoom and pinning are UI preferences, stored beside the app rather than in the
 budget - neither is a fact about your money, so neither has any business in the
 commit history.
 
+## The tutorial
+
+**File > Tutorial** (the logo menu), or **Take the tutorial** on the welcome
+screen, walks through everything above in nine chapters. Each chapter opens
+its own fresh copy of a sample budget built for it - kept in a `tutorial`
+folder in Ledgit's data directory, never near your own budgets - and
+**Restart chapter** builds it again.
+
+A panel down the right says, for each step, what the feature is, what to
+try, and what you should see; steps that ask for an action tick themselves
+off when you do it. Mark each step **Works** or **Problem** and write what
+looked wrong: the notes are saved as you type to `tutorial-feedback.md` in
+the same folder, and **Copy feedback** puts the whole report on the
+clipboard. Progress and notes carry over between runs.
+
+The same sample budgets are written by
+`cargo run -p ledgit-cli --example fixtures`: `empty`, `starter`,
+`household`, `repairs` and `stress`.
+
 ## Status
 
 Core, storage, version control, CLI, GUI and installer are built and tested.

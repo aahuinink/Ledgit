@@ -381,6 +381,11 @@ pub struct LedgitApp {
     inbox: Option<crate::instance::Inbox>,
     /// The window title last sent, so it is only sent when it changes.
     title: String,
+    /// The tutorial, while it runs. Held here, not on the session, because
+    /// it switches budgets itself.
+    tutorial: Option<crate::tutorial::Tutorial>,
+    /// The tutorial's progress and notes, kept while it is not running.
+    tutorial_progress: crate::tutorial::Progress,
 }
 
 /// What the File menu - the logo in the top bar - asked for. The app carries
@@ -392,6 +397,8 @@ pub enum FileAction {
     Recent(PathBuf),
     /// Close the budget and go back to the welcome screen.
     Close,
+    /// Start the tutorial, or pick it up where it was left.
+    Tutorial,
 }
 
 impl LedgitApp {
@@ -400,13 +407,14 @@ impl LedgitApp {
         initial: Option<PathBuf>,
         author: String,
     ) -> LedgitApp {
-        let (pins, recent, zoom) = match cc.storage {
+        let (pins, recent, zoom, tutorial_progress) = match cc.storage {
             Some(s) => (
                 eframe::get_value(s, "pins").unwrap_or_default(),
                 eframe::get_value(s, "recent").unwrap_or_default(),
                 eframe::get_value(s, "zoom").unwrap_or(1.0),
+                eframe::get_value(s, "tutorial").unwrap_or_default(),
             ),
-            None => (HashMap::new(), Vec::new(), 1.0),
+            None => (HashMap::new(), Vec::new(), 1.0, Default::default()),
         };
         // A stored zoom from an older build could be anything; clamp it rather
         // than trust it, or one bad value leaves the app unreadable on start.
@@ -423,6 +431,8 @@ impl LedgitApp {
             brand,
             inbox: None,
             title: String::new(),
+            tutorial: None,
+            tutorial_progress,
         };
         if let Some(p) = initial {
             app.open_path(p);
@@ -485,6 +495,10 @@ impl LedgitApp {
                 self.session = None;
                 None
             }
+            FileAction::Tutorial => {
+                self.start_tutorial();
+                None
+            }
         };
         if let Some(p) = path {
             self.open_path(p);
@@ -525,6 +539,61 @@ impl LedgitApp {
         }
     }
 
+    /// Start the tutorial where it was left, opening its chapter's budget.
+    pub fn start_tutorial(&mut self) {
+        if self.tutorial.is_none() {
+            let progress = std::mem::take(&mut self.tutorial_progress);
+            self.tutorial = Some(crate::tutorial::Tutorial::new(
+                crate::tutorial::Tutorial::default_dir(),
+                progress,
+            ));
+        }
+        let chapter = self.tutorial.as_ref().map_or(0, |t| t.progress.chapter);
+        self.tutorial_request(crate::tutorial::Request::Open { chapter, fresh: false });
+    }
+
+    /// Do what the tutorial panel asked: open a chapter's budget, building it
+    /// if it is missing or a fresh copy was asked for, or end the tutorial.
+    fn tutorial_request(&mut self, request: crate::tutorial::Request) {
+        use crate::tutorial::Request;
+        if self.tutorial.is_none() {
+            return;
+        }
+        match request {
+            Request::End => {
+                let mut t = self.tutorial.take().expect("checked above");
+                t.save_report();
+                self.tutorial_progress = t.progress;
+            }
+            Request::Open { chapter, fresh } => {
+                let path = self.tutorial.as_ref().expect("checked above").chapter_path(chapter);
+                if fresh || !path.exists() {
+                    // Never rebuild a file that is open.
+                    if self.session.as_ref().is_some_and(|s| same_file(&s.path, &path)) {
+                        self.remember_pins();
+                        self.session = None;
+                    }
+                    let built =
+                        self.tutorial.as_ref().expect("checked above").build_chapter(chapter);
+                    if let Err(e) = built {
+                        let msg = format!("Could not build the tutorial's budget: {e}");
+                        match &mut self.session {
+                            Some(s) => s.fail(msg),
+                            None => self.startup_error = Some(msg),
+                        }
+                        return;
+                    }
+                }
+                self.open_path(path.clone());
+                if let (Some(t), Some(s)) = (&mut self.tutorial, &mut self.session) {
+                    if same_file(&s.path, &path) {
+                        t.opened(chapter, s);
+                    }
+                }
+            }
+        }
+    }
+
     fn remember_pins(&mut self) {
         if let Some(s) = &self.session {
             let key = s.path.to_string_lossy().to_string();
@@ -552,6 +621,8 @@ impl eframe::App for LedgitApp {
         eframe::set_value(storage, "pins", &self.pins);
         eframe::set_value(storage, "recent", &self.recent);
         eframe::set_value(storage, "zoom", &self.zoom);
+        let progress = self.tutorial.as_ref().map_or(&self.tutorial_progress, |t| &t.progress);
+        eframe::set_value(storage, "tutorial", progress);
     }
 }
 
@@ -580,6 +651,14 @@ impl LedgitApp {
                     if let Some(p) = new_budget_dialog() {
                         self.open_path(p);
                     }
+                }
+                ui.add_space(8.0);
+                if ui
+                    .button("Take the tutorial")
+                    .on_hover_text("A guided walk through every feature, on sample budgets. Mark each step as working or not, with notes.")
+                    .clicked()
+                {
+                    self.start_tutorial();
                 }
 
                 if !self.recent.is_empty() {
@@ -611,6 +690,7 @@ impl LedgitApp {
         let file = top_bar(ctx, &mut session, &self.brand, &self.recent);
         nav_panel(ctx, &mut session);
         status_bar(ctx, &mut session);
+        let tutorial = self.tutorial.as_mut().and_then(|t| t.panel(ctx, &mut session));
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // A search bar with text in it beats whatever tab is selected;
@@ -645,6 +725,9 @@ impl LedgitApp {
         self.remember_pins();
         if let Some(action) = file {
             self.file_action(action);
+        }
+        if let Some(r) = tutorial {
+            self.tutorial_request(r);
         }
     }
 }
@@ -872,6 +955,14 @@ fn file_menu(
                 }
             });
         });
+        if ui
+            .button("Tutorial")
+            .on_hover_text("A guided walk through every feature, on sample budgets")
+            .clicked()
+        {
+            action = Some(FileAction::Tutorial);
+            ui.close();
+        }
         ui.separator();
         if ui
             .button("Close budget")

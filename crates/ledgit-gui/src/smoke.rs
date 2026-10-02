@@ -975,6 +975,294 @@ fn entries_can_be_reversed_from_their_rows() {
     draw(&mut s, Screen::Register);
 }
 
+// -------------------------------------------------------------- tutorial
+
+/// Do what a tutorial step asks, the way the screens would. `None` for a
+/// step that only asks you to look.
+fn act(id: &str, s: &mut Session) -> Option<()> {
+    let today = Date::today_utc();
+    let uid = |s: &Session, name: &str| {
+        let l = s.budget();
+        l.ledgers.uid[l.ledger_by_name(name).unwrap_or_else(|| panic!("no ledger {name}")).get()]
+    };
+    let commit = |s: &Session, prefix: &str| {
+        s.repo.log(None).unwrap().into_iter().find(|c| c.summary().starts_with(prefix)).unwrap().id
+    };
+    let r = &mut s.repo;
+    match id {
+        "around.search" => s.search = "groceries".into(),
+        "entries.ledger" => {
+            r.add_ledger("Expenses:Car:Insurance", "", Normality::Debit, today).unwrap();
+        }
+        "entries.simple" => {
+            let (food, visa) = (uid(s, "Expenses:Groceries"), uid(s, "Liabilities:Visa"));
+            s.repo.post("Groceries", "", today, Money(84_20), food, visa).unwrap();
+        }
+        "entries.split" => {
+            let legs = vec![
+                Leg::debit(uid(s, "Assets:Bank:Chequing"), Money::from_major(1_800)),
+                Leg::debit(uid(s, "Expenses:Tax:Income Tax"), Money::from_major(400)),
+                Leg::credit(uid(s, "Income:Salary"), Money::from_major(2_200)),
+            ];
+            s.repo.post_split("Paycheque", "", today, legs).unwrap();
+        }
+        "entries.variable" => {
+            r.stage(Op::SetVariable { name: "Fuel_Price".into(), value: VarValue::guess("1.65") })
+                .unwrap();
+        }
+        "entries.formula" => {
+            let (fuel, visa) = (uid(s, "Expenses:Car:Fuel"), uid(s, "Liabilities:Visa"));
+            s.repo.post("Fuel", "", today, Money(66_00), fuel, visa).unwrap();
+        }
+        "entries.report" => s.view = Screen::Commit,
+        "entries.commit" => {
+            r.commit("first entries").unwrap();
+        }
+        "ledgers.list" => {
+            let cash = uid(s, "Assets:Bank:Savings");
+            s.toggle_pin(cash);
+        }
+        "ledgers.goals" => {
+            let uid = uid(s, "Expenses:Food:Restaurants");
+            s.repo.stage(Op::SetLedgerGoals { uid, target: None, alerts: vec![] }).unwrap();
+        }
+        "ledgers.reverse" => {
+            let l = s.budget();
+            let ix = l.ledger_by_name("Expenses:Food:Restaurants").unwrap();
+            let p = l.ledgers.postings[ix.get()][0];
+            let tx = l.transactions.uid[l.postings.tx[p.get()].get()];
+            s.repo.reverse_transaction(tx).unwrap();
+        }
+        "issuers.run" => {
+            r.run_issuers(today).unwrap();
+        }
+        "issuers.override" => {
+            let l = s.budget();
+            let ix = l.issuer_by_name("Visa statement").unwrap();
+            let date = ledgit_core::issuer::upcoming(l, ix, 3)[2].date;
+            let uid = l.issuers.uid[ix.get()];
+            s.repo
+                .stage(Op::SetIssuerOverride { uid, date, amount: Some(Money::from_major(5)) })
+                .unwrap();
+        }
+        "issuers.pause" => {
+            let uid = s.budget().issuers.uid[0];
+            s.repo.stage(Op::SetIssuerPaused { uid, paused: true }).unwrap();
+        }
+        "issuers.rule" => {
+            let (interest, loan) =
+                (uid(s, "Expenses:Interest:Car Loan"), uid(s, "Liabilities:Car Loan"));
+            let rule = AmountRule::Interest { of: loan, apr: Rate::parse_percent("6.45").unwrap() };
+            let monthly = Schedule::MonthlyOn { day: 1, every_n_months: 1 };
+            s.repo.add_rule_issuer("Interest", "", interest, loan, rule, monthly, today).unwrap();
+        }
+        "issuers.pay_later" => {
+            let (health, card, cash) = (
+                uid(s, "Expenses:Health"),
+                uid(s, "Liabilities:Credit Card"),
+                uid(s, "Assets:Bank:Chequing"),
+            );
+            let tx =
+                s.repo.post("Dentist", "", today, Money::from_major(300), health, card).unwrap();
+            s.repo.pay_later(tx, card, cash, Money::from_major(300), today.add_days(14)).unwrap();
+        }
+        "issuers.post_later" => {
+            let (gifts, cash) = (uid(s, "Expenses:Gifts"), uid(s, "Assets:Bank:Chequing"));
+            s.repo
+                .add_issuer(
+                    "Birthday",
+                    "",
+                    gifts,
+                    cash,
+                    Money::from_major(80),
+                    Schedule::Once,
+                    today.add_days(30),
+                )
+                .unwrap();
+        }
+        "calendar.month" => {
+            s.view = Screen::Calendar;
+            s.calendar_list = true;
+        }
+        "buckets.subtree" => {
+            let b = s.repo.add_bucket("Car", "").unwrap();
+            s.repo.stage(Op::AddSubtreeToBucket { bucket: b, path: "Liabilities".into() }).unwrap();
+        }
+        "views.edit" => {
+            let l = s.budget();
+            let ix = l.view_by_name("Net worth").unwrap();
+            let uid = l.views.uid[ix.get()];
+            let spec = ViewSpec { lookback: Span::Months(3), ..l.views.spec[ix.get()].clone() };
+            s.repo
+                .stage(Op::EditView { uid, name: None, description: None, spec: Some(spec) })
+                .unwrap();
+        }
+        "views.compare" => s.view_compare = Some(views::saved::CompareWith::Committed),
+        "views.new" => {
+            r.add_view("Mine", "", ViewSpec::default()).unwrap();
+        }
+        "history.revert" => {
+            let id = commit(s, "Groceries at Costco");
+            s.repo.revert(&id.to_string()).unwrap();
+            s.repo.commit("undo the typo").unwrap();
+        }
+        "history.branch" => {
+            let id = commit(s, "Open the books");
+            s.repo.branch("mine", Some(&id.to_string())).unwrap();
+        }
+        "history.cherry" => {
+            let id = commit(s, "Venue deposit");
+            s.repo.checkout("mine").unwrap();
+            s.repo.cherry_pick(&id.to_string()).unwrap();
+        }
+        "history.reconcile" => {
+            // Leave the branch from the step before.
+            s.repo.commit("picked").unwrap();
+            s.repo.checkout(DEFAULT_BRANCH).unwrap();
+            let p = s.repo.merge_preview("fix-month", MergeKind::Reconcile).unwrap();
+            let mut c = Choices::default();
+            c.groups.insert(0, GroupChoice::Revert);
+            s.repo.merge(&p, &c, "").unwrap();
+        }
+        "history.delete" => s.repo.delete_branch("fix-month").unwrap(),
+        "history.adopt" => {
+            let p = s.repo.merge_preview("new-car", MergeKind::Adopt).unwrap();
+            let mut c = Choices::default();
+            for i in &p.issuers {
+                if !i.clashes.is_empty() {
+                    c.issuers.insert(i.uid, IssuerChoice::TakeBranch);
+                }
+            }
+            s.repo.merge(&p, &c, "").unwrap();
+        }
+        "history.rebase" => {
+            s.repo.rebase("old-plan", DEFAULT_BRANCH).unwrap();
+        }
+        "history.replace" => {
+            let p = s.repo.merge_preview("old-plan", MergeKind::Replace).unwrap();
+            assert!(p.fast_forward, "rebased, so Replace just moves up");
+            s.repo.merge(&p, &Choices::default(), "").unwrap();
+        }
+        _ => return None,
+    }
+    Some(())
+}
+
+/// The whole tutorial, chapter by chapter on its real sample budget: every
+/// step points at something that is there, draws, and - where it has a
+/// check - is not done until its action is, and is done after.
+#[test]
+fn the_tutorial_walks_through_on_its_own_budgets() {
+    use crate::tutorial::{Go, Progress, Tutorial};
+    let dir = std::env::temp_dir().join(format!("ledgit-tutorial-test-{}", std::process::id()));
+    let mut t = Tutorial::new(dir.clone(), Progress::default());
+    let chapters = t.chapters().len();
+    for c in 0..chapters {
+        let path = t.build_chapter(c).unwrap();
+        let mut s = Session::open(path, "tester").unwrap();
+        t.progress.step = 0;
+        t.opened(c, &mut s);
+        for k in 0..t.chapter().steps.len() {
+            t.progress.step = k;
+            t.enter(&mut s);
+            if let Some(v) = s.goto.take() {
+                s.view = v;
+            }
+            let (id, go, has_check) = (t.step().id, t.step().go, t.step().check.is_some());
+            // Where the step points is really there.
+            match go {
+                Go::Ledger(_) => {
+                    assert!(s.selected_ledger.is_some() && s.view == Screen::Register, "{id}")
+                }
+                Go::Issuer(_) => assert!(s.selected_issuer.is_some(), "{id}"),
+                Go::View(_) => assert!(s.selected_view.is_some(), "{id}"),
+                Go::Bucket(_) => assert!(s.selected_bucket.is_some(), "{id}"),
+                Go::Commit(prefix) => assert!(
+                    s.selected_commit.is_some_and(|c| s
+                        .repo
+                        .get_commit(c)
+                        .unwrap()
+                        .summary()
+                        .starts_with(prefix)),
+                    "{id}"
+                ),
+                _ => {}
+            }
+            if has_check {
+                assert!(!t.check(&s), "{id} is done before it is tried");
+            }
+            run_ui(|ui| {
+                let _ = t.ui(ui, &mut s);
+            });
+            let screen = s.view;
+            draw(&mut s, screen);
+            let acted = act(id, &mut s).is_some();
+            assert_eq!(acted, has_check, "{id}: an action exactly where there is a check");
+            if has_check {
+                assert!(t.check(&s), "{id} is not done after doing it");
+            }
+            if let Some(v) = s.goto.take() {
+                s.view = v;
+            }
+            let screen = s.view;
+            draw(&mut s, screen);
+        }
+    }
+
+    // The report: a section per chapter, verdicts and notes.
+    t.progress.verdicts.insert("issuers.statement".into(), crate::tutorial::Verdict::Problem);
+    t.progress.notes.insert("issuers.statement".into(), "the minimum column is cut off".into());
+    let report = t.report();
+    assert!(report.contains("## 4. Issuers, statements and available"), "{report}");
+    assert!(report.contains("**A statement issuer** (`issuers.statement`): PROBLEM\n    the minimum column is cut off"), "{report}");
+    assert!(report.contains("(`welcome.how`): not tried"), "{report}");
+    assert!(report.contains("(`issuers.run`): done, not marked"), "{report}");
+    t.save_report();
+    assert!(std::fs::read_to_string(t.feedback_path())
+        .unwrap()
+        .starts_with("# Ledgit tutorial feedback"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The tutorial's panel down the side of a real window: the step, the
+/// feedback box, and - on a budget that is not the chapter's - a way back.
+#[test]
+fn the_tutorial_panel_draws_beside_the_screen() {
+    use crate::tutorial::{Progress, Tutorial};
+    let dir = std::env::temp_dir().join(format!("ledgit-tutorial-panel-{}", std::process::id()));
+    let mut t = Tutorial::new(dir.clone(), Progress { chapter: 4, step: 1, ..Progress::default() });
+    let mut s = Session::open(t.build_chapter(4).unwrap(), "tester").unwrap();
+    t.opened(4, &mut s);
+    let texts: Vec<String> = painted_text(egui::vec2(1180.0, 760.0), |ctx| {
+        let _ = t.panel(ctx, &mut s);
+        egui::CentralPanel::default().show(ctx, |ui| draw_in(ui, &mut s, Screen::Issuers));
+    })
+    .into_iter()
+    .map(|(t, _)| t)
+    .collect();
+    for want in [
+        "TUTORIAL",
+        "Step 2 of 9",
+        "A statement issuer",
+        "How did it go?",
+        "Works",
+        "Problem",
+        "Copy feedback",
+    ] {
+        assert!(texts.iter().any(|x| x == want), "{want:?} not in {texts:?}");
+    }
+
+    let mut other = session();
+    let texts: Vec<String> = painted_text(egui::vec2(1180.0, 760.0), |ctx| {
+        let _ = t.panel(ctx, &mut other);
+    })
+    .into_iter()
+    .map(|(t, _)| t)
+    .collect();
+    assert!(texts.iter().any(|x| x == "Open the chapter's budget"), "{texts:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A headless window to click and type in, reporting what it painted.
 struct Window {
     ctx: egui::Context,

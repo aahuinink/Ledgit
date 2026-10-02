@@ -153,10 +153,24 @@ cargo run -p ledgit-gui -- fixtures\household.ledgit
 |---|---|---|
 | `empty.ledgit` | Nothing. | Every screen's empty state |
 | `household.ledgit` | 15 months of an ordinary budget: a 5-way split paycheque, mortgage, car loan, credit card, a 4-level ledger tree, 6 buckets (subtree and hand-picked), 18 issuers (one paused, one one-off 60 days out, a statement issuer paying the Visa with next month set ahead to $400), 7 views (incl. a weekly what-if, one scoped to ledgers rather than buckets, and one showing available). Staged: a tuxedo fitting paid off later and a photographer deposit posting in 45 days, so Chequing's available sits below its posted balance. Branches `what-if-new-car` (try **Adopt**) and `emergency-fund-plan` diverge from `main` and rebase cleanly; `fix-side-job` repairs a $9,000 invoice typed for $900 (cherry-picked, reversed, re-entered - try **Reconcile**, after committing or discarding what is staged). A mistaken commit and its revert. Issuers are ~6 weeks behind (Run issuers stages a batch); staged edits waiting (so History's switch asks to shelve). | 1-12, History, Commit report, issuer runs since last commit |
+| `starter.ledgit` | Nine ledgers and two opening balances, committed - the tutorial's "first entries" chapter. | Making entries by hand |
+| `repairs.ledgit` | Three months with history to rewrite: "Groceries at Costco" typed as $1,500 (revert it); `fix-month` repairs a $5,000 bonus that was $500 and the 2% sweep it skewed (Reconcile: one clash, plus an entry each side alone); `new-car` adds a car loan, its payment and a dearer rent on the same ledgers as main's (Adopt: one issuer clash); `old-plan` is two months stale (rebase it, then Replace fast-forwards). | History, every kind of merge |
 | `stress.ledgit` | Things built to break layouts: a $987,654,321.09 balance, a negative one, an 80-character ledger name, an 8-level tree, a non-ASCII name, 120 expense ledgers, a 13-leg split, 17 issuers with 7 due on the 1st and 7 on the 15th plus a daily one, a 10-year daily view, ~110 commits, 10 long branch names, a commit message that wraps. | 1, 2, 4, 5, 6, 7 (at their worst), 8, 9 |
 
 Pins are an app preference, not part of the file, so pin a few ledgers
 yourself on the Dashboard.
+
+## Testing with the tutorial
+
+The tutorial (File > Tutorial) is the test pass now: nine chapters, every
+feature, each on its own sample budget, and a Works / Problem verdict and
+note per step. **Copy feedback** gives a markdown report with each step's
+id (`issuers.statement`) - paste it here, or under the next session's
+heading, and those ids say exactly which screen and which sample budget to
+look at. `smoke.rs`'s `the_tutorial_walks_through_on_its_own_budgets` does
+every step's action headlessly, so a step that no longer points at
+something real, or that ticks itself off without being done, fails the
+build.
 
 ## Aaron's first-run list
 
@@ -309,7 +323,7 @@ broken staged entry.
   up ledgers created there later), and subtree renames that carry buckets
   along. CLI `ledger tree`, `ledger move`, `bucket include-tree`; GUI tree
   view and a searchable tree picker.
-- **Tests**: 239, covering the money and date edge cases, budget invariants,
+- **Tests**: 245, covering the money and date edge cases, budget invariants,
   recurrence arithmetic, rate conversion, the view simulation, GUI zoom,
   bucket combination, chart rendering, and the version-control behaviours end
   to end.

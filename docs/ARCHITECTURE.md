@@ -358,6 +358,22 @@ a pass that makes no progress fails with the op it could not place. The
 result is applied once more and checked balanced before the commit is
 written.
 
+## Sample budgets and the tutorial
+
+`ledgit_core::demo` builds the sample budgets - `empty`, `starter`,
+`household`, `repairs`, `stress` - into any `Repo<S: Store>`, dated from
+`today`. They are built in a `MemStore` and written out with
+`SqliteStore::import`, one transaction: building on disk directly costs a
+durable write per staged change and per commit, which is tens of seconds
+for `household`.
+
+The GUI's tutorial (`crates/ledgit-gui/src/tutorial`) is held by the app,
+not a session, because it opens budgets itself: one file per chapter in
+`<eframe storage dir>/tutorial/`. A step is plain data - text, where to go,
+and a check `fn(&Session, &Baseline) -> bool` over what was staged or
+committed since the step began - and progress and notes persist in eframe's
+storage and in `tutorial-feedback.md`.
+
 ## Posted and available
 
 `available::Availability::of(budget, today)` lists the **commitments** -

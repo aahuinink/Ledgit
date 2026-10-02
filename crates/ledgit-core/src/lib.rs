@@ -53,6 +53,7 @@
 pub mod available;
 pub mod commit;
 pub mod date;
+pub mod demo;
 pub mod dues;
 pub mod error;
 pub mod expr;
