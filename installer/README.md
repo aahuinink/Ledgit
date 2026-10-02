@@ -32,7 +32,8 @@ powershell -ExecutionPolicy Bypass -File installer\update.ps1 -Test    # run the
 powershell -ExecutionPolicy Bypass -File installer\update.ps1 -NoBuild # copy what is built
 ```
 
-It finds the install from the uninstall entry Inno Setup wrote, builds, asks
+It finds the install from the uninstall entry Inno Setup wrote, builds,
+rewrites the test budgets in `fixtures\` (skipped with `-NoBuild`), asks
 a running Ledgit to close (so it saves its settings; staged work is already in
 the budget file), copies both exes and the docs over, and offers to reopen it.
 A per-machine install under Program Files needs an elevated PowerShell.

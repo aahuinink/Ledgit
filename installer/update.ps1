@@ -9,7 +9,9 @@
 # Re-run the real installer (build.ps1) only when ledgit.iss itself changes.
 #
 #   -Test    run the test suite first, and stop if it fails.
-#   -NoBuild copy what is already in target\release.
+#   -NoBuild copy what is already in target\release (and leave fixtures\ alone).
+#
+# A build also rewrites the test budgets in fixtures\, as build.ps1 does.
 
 param(
     [switch]$Test,
@@ -56,6 +58,12 @@ try {
         Write-Host 'Building release binaries...' -ForegroundColor Cyan
         cargo build --release
         if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
+
+        # Fresh test budgets to go with the fresh build: they date from
+        # today. For checking by hand; not copied into the install.
+        Write-Host 'Writing test fixtures...' -ForegroundColor Cyan
+        cargo run --release -p ledgit-cli --example fixtures -- (Join-Path $root 'fixtures')
+        if ($LASTEXITCODE -ne 0) { throw 'writing the test fixtures failed' }
     }
 }
 finally {
